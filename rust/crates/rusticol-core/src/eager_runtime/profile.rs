@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: 0BSD
 
+//! Instrumented eager execution used only by the explicit native profile path.
+//!
+//! The ordinary scheduler deliberately stays in `execute.rs` without timer
+//! branches or `Instant` calls. These routines mirror its row-major packet
+//! contract while placing timers exactly at the phase boundaries exposed to
+//! users.
+
 use super::plan::{
     ComponentRange, EagerExecutionPlan, EagerStagePlan, ScheduledAttachment, ScheduledClosure,
     ScheduledDirectClosure, ScheduledFinalization, ScheduledInvocation,
 };
 use super::runtime::{EagerWorkspace, KernelPacket, PacketRole, StageSchedule};
 use super::{
-    EagerComplex64, EagerKernelBackend, EagerKernelCall, EagerKernelInput, EagerKernelSpec,
+    EagerComplex64, EagerExecutionProfile, EagerKernelBackend, EagerKernelCall, EagerKernelInput,
+    EagerKernelSpec,
 };
 use crate::{RusticolError, RusticolResult};
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AccumulationFactor {
@@ -50,31 +59,8 @@ impl AccumulationFactor {
     }
 }
 
-pub(super) fn initialize_tile(
-    plan: &EagerExecutionPlan,
-    workspace: &mut EagerWorkspace,
-    point_count: usize,
-    tile_start: usize,
-    tile_points: usize,
-    initial_values: &[EagerComplex64],
-) {
-    workspace.values.fill(EagerComplex64::new(0.0, 0.0));
-    workspace.currents.fill(EagerComplex64::new(0.0, 0.0));
-    workspace.amplitudes.fill(EagerComplex64::new(0.0, 0.0));
-    workspace
-        .reduction_groups
-        .fill(EagerComplex64::new(0.0, 0.0));
-    workspace.reduced.fill(0.0);
-    for component in 0..plan.values.component_count {
-        let source = component * point_count + tile_start;
-        let target = component * workspace.tile_capacity;
-        workspace.values[target..target + tile_points]
-            .copy_from_slice(&initial_values[source..source + tile_points]);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_stage<B: EagerKernelBackend>(
+pub(super) fn execute_stage_profiled<B: EagerKernelBackend>(
     stage: &EagerStagePlan,
     schedule: &StageSchedule,
     kernels: &BTreeMap<u32, EagerKernelSpec>,
@@ -85,6 +71,7 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
     tile_points: usize,
     momenta: &[f64],
     model_parameters: &[EagerComplex64],
+    profile: &mut EagerExecutionProfile,
 ) -> RusticolResult<()> {
     for packet in &schedule.invocation_packets {
         debug_assert_eq!(packet.role, PacketRole::Invocation);
@@ -99,6 +86,8 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
                 packet.kernel_id
             ))
         })?;
+
+        let gather_started = Instant::now();
         gather_invocations(
             items,
             &kernel.inputs,
@@ -113,6 +102,9 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             &workspace.couplings,
             model_parameters,
         );
+        profile.gather_s += gather_started.elapsed().as_secs_f64();
+
+        let kernel_started = Instant::now();
         backend.evaluate_batch(EagerKernelCall {
             kernel_id: packet.kernel_id,
             lane_count,
@@ -121,6 +113,9 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             inputs,
             outputs,
         })?;
+        profile.kernel_call_s += kernel_started.elapsed().as_secs_f64();
+
+        let scatter_started = Instant::now();
         scatter_invocations(
             items,
             &stage.attachments,
@@ -130,8 +125,10 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             workspace.tile_capacity,
             &mut workspace.currents,
         );
+        profile.invocation_scatter_s += scatter_started.elapsed().as_secs_f64();
     }
 
+    let copies_started = Instant::now();
     for item in &stage.finalization_copies {
         copy_component_range(
             &workspace.currents,
@@ -142,6 +139,8 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             tile_points,
         );
     }
+    profile.finalization_s += copies_started.elapsed().as_secs_f64();
+
     for packet in &schedule.finalization_packets {
         debug_assert_eq!(packet.role, PacketRole::Finalization);
         let items = &stage.finalizations[packet.item_range.clone()];
@@ -155,6 +154,8 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
                 packet.kernel_id
             ))
         })?;
+
+        let gather_started = Instant::now();
         gather_finalizations(
             items,
             &kernel.inputs,
@@ -168,6 +169,9 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             momenta,
             model_parameters,
         );
+        profile.finalization_s += gather_started.elapsed().as_secs_f64();
+
+        let kernel_started = Instant::now();
         backend.evaluate_batch(EagerKernelCall {
             kernel_id: packet.kernel_id,
             lane_count,
@@ -176,6 +180,9 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             inputs,
             outputs,
         })?;
+        profile.kernel_call_s += kernel_started.elapsed().as_secs_f64();
+
+        let scatter_started = Instant::now();
         scatter_finalizations(
             items,
             outputs,
@@ -184,7 +191,81 @@ pub(super) fn execute_stage<B: EagerKernelBackend>(
             workspace.tile_capacity,
             &mut workspace.values,
         )?;
+        profile.finalization_s += scatter_started.elapsed().as_secs_f64();
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_closures_profiled<B: EagerKernelBackend>(
+    plan: &EagerExecutionPlan,
+    packets: &[KernelPacket],
+    workspace: &mut EagerWorkspace,
+    backend: &mut B,
+    tile_points: usize,
+    model_parameters: &[EagerComplex64],
+    profile: &mut EagerExecutionProfile,
+) -> RusticolResult<()> {
+    for packet in packets {
+        debug_assert_eq!(packet.role, PacketRole::Closure);
+        let items = &plan.closures[packet.item_range.clone()];
+        let lane_count = items.len() * tile_points;
+        let input_len = packet.input_components * lane_count;
+        let output_len = packet.output_components * lane_count;
+        let (inputs, outputs) = packet_slices(&mut workspace.packet, input_len, output_len)?;
+        let kernel = plan.kernels.get(&packet.kernel_id).ok_or_else(|| {
+            RusticolError::internal(format!(
+                "eager schedule lost closure kernel {}",
+                packet.kernel_id
+            ))
+        })?;
+
+        let gather_started = Instant::now();
+        gather_closures(
+            items,
+            &kernel.inputs,
+            inputs,
+            packet.input_components,
+            tile_points,
+            workspace.tile_capacity,
+            &workspace.values,
+            &workspace.couplings,
+            model_parameters,
+        );
+        profile.closure_s += gather_started.elapsed().as_secs_f64();
+
+        let kernel_started = Instant::now();
+        backend.evaluate_batch(EagerKernelCall {
+            kernel_id: packet.kernel_id,
+            lane_count,
+            input_component_count: packet.input_components,
+            output_component_count: packet.output_components,
+            inputs,
+            outputs,
+        })?;
+        profile.kernel_call_s += kernel_started.elapsed().as_secs_f64();
+
+        let scatter_started = Instant::now();
+        scatter_closures(
+            items,
+            outputs,
+            lane_count,
+            tile_points,
+            workspace.tile_capacity,
+            &mut workspace.amplitudes,
+        );
+        profile.closure_s += scatter_started.elapsed().as_secs_f64();
+    }
+
+    let direct_started = Instant::now();
+    execute_direct_closures(
+        &plan.direct_closures,
+        &workspace.values,
+        workspace.tile_capacity,
+        tile_points,
+        &mut workspace.amplitudes,
+    );
+    profile.closure_s += direct_started.elapsed().as_secs_f64();
     Ok(())
 }
 
@@ -398,65 +479,6 @@ fn scatter_finalizations(
     Ok(())
 }
 
-pub(super) fn execute_closures<B: EagerKernelBackend>(
-    plan: &EagerExecutionPlan,
-    packets: &[KernelPacket],
-    workspace: &mut EagerWorkspace,
-    backend: &mut B,
-    tile_points: usize,
-    model_parameters: &[EagerComplex64],
-) -> RusticolResult<()> {
-    for packet in packets {
-        debug_assert_eq!(packet.role, PacketRole::Closure);
-        let items = &plan.closures[packet.item_range.clone()];
-        let lane_count = items.len() * tile_points;
-        let input_len = packet.input_components * lane_count;
-        let output_len = packet.output_components * lane_count;
-        let (inputs, outputs) = packet_slices(&mut workspace.packet, input_len, output_len)?;
-        let kernel = plan.kernels.get(&packet.kernel_id).ok_or_else(|| {
-            RusticolError::internal(format!(
-                "eager schedule lost closure kernel {}",
-                packet.kernel_id
-            ))
-        })?;
-        gather_closures(
-            items,
-            &kernel.inputs,
-            inputs,
-            packet.input_components,
-            tile_points,
-            workspace.tile_capacity,
-            &workspace.values,
-            &workspace.couplings,
-            model_parameters,
-        );
-        backend.evaluate_batch(EagerKernelCall {
-            kernel_id: packet.kernel_id,
-            lane_count,
-            input_component_count: packet.input_components,
-            output_component_count: packet.output_components,
-            inputs,
-            outputs,
-        })?;
-        scatter_closures(
-            items,
-            outputs,
-            lane_count,
-            tile_points,
-            workspace.tile_capacity,
-            &mut workspace.amplitudes,
-        );
-    }
-    execute_direct_closures(
-        &plan.direct_closures,
-        &workspace.values,
-        workspace.tile_capacity,
-        tile_points,
-        &mut workspace.amplitudes,
-    );
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn gather_closures(
     items: &[ScheduledClosure],
@@ -572,51 +594,6 @@ fn execute_direct_closures(
     }
 }
 
-pub(super) fn reduce_tile(
-    plan: &EagerExecutionPlan,
-    workspace: &mut EagerWorkspace,
-    tile_points: usize,
-) {
-    for (group_index, group) in plan.reduction_groups.iter().enumerate() {
-        let target = group_index * workspace.tile_capacity;
-        for amplitude_index in &group.amplitude_indices {
-            let source = *amplitude_index as usize * workspace.tile_capacity;
-            for point in 0..tile_points {
-                workspace.reduction_groups[target + point] += workspace.amplitudes[source + point];
-            }
-        }
-    }
-    for entry in &plan.reduction_entries {
-        let left = entry.left_group_index as usize * workspace.tile_capacity;
-        let right = entry.right_group_index as usize * workspace.tile_capacity;
-        for point in 0..tile_points {
-            let product = workspace.reduction_groups[left + point]
-                * workspace.reduction_groups[right + point].conj();
-            workspace.reduced[point] += (entry.coefficient * product).re;
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn copy_tile_results(
-    plan: &EagerExecutionPlan,
-    workspace: &EagerWorkspace,
-    point_count: usize,
-    tile_start: usize,
-    tile_points: usize,
-    amplitudes: &mut [EagerComplex64],
-    reduced: &mut [f64],
-) {
-    for amplitude in 0..plan.amplitude_count {
-        let source = amplitude * workspace.tile_capacity;
-        let target = amplitude * point_count + tile_start;
-        amplitudes[target..target + tile_points]
-            .copy_from_slice(&workspace.amplitudes[source..source + tile_points]);
-    }
-    reduced[tile_start..tile_start + tile_points]
-        .copy_from_slice(&workspace.reduced[..tile_points]);
-}
-
 fn packet_slices(
     packet: &mut [EagerComplex64],
     input_len: usize,
@@ -707,150 +684,5 @@ fn copy_component_range(
         let target_start = (target_range.start + component) * stride;
         target[target_start..target_start + point_count]
             .copy_from_slice(&source[source_start..source_start + point_count]);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{EagerAttachmentRow, EagerInvocationRow};
-
-    fn c64(real: f64, imag: f64) -> EagerComplex64 {
-        EagerComplex64::new(real, imag)
-    }
-
-    #[test]
-    fn packet_gather_uses_lane_major_component_rows() {
-        let complex_source = [
-            c64(1.0, 10.0),
-            c64(2.0, 20.0),
-            c64(3.0, 30.0),
-            c64(4.0, 40.0),
-            c64(5.0, 50.0),
-            c64(6.0, 60.0),
-        ];
-        let real_source = [11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
-        let mut packet = vec![c64(0.0, 0.0); 4 * 3];
-
-        gather_complex_component(
-            &complex_source,
-            ComponentRange { start: 1, len: 1 },
-            0,
-            3,
-            0,
-            &mut packet,
-            1,
-            3,
-            1,
-            2,
-        );
-        gather_real_component(
-            &real_source,
-            ComponentRange { start: 0, len: 2 },
-            1,
-            3,
-            0,
-            &mut packet,
-            0,
-            3,
-            1,
-            2,
-        );
-        fill_packet_component(&mut packet, 2, 3, 1, 2, c64(-1.0, 2.0));
-
-        assert_eq!(
-            packet,
-            vec![
-                c64(0.0, 0.0),
-                c64(0.0, 0.0),
-                c64(0.0, 0.0),
-                c64(14.0, 0.0),
-                c64(4.0, 40.0),
-                c64(-1.0, 2.0),
-                c64(15.0, 0.0),
-                c64(5.0, 50.0),
-                c64(-1.0, 2.0),
-                c64(0.0, 0.0),
-                c64(0.0, 0.0),
-                c64(0.0, 0.0),
-            ]
-        );
-    }
-
-    #[test]
-    fn row_major_scatter_specializes_exact_unit_factors() {
-        let invocation = ScheduledInvocation {
-            row: EagerInvocationRow {
-                kernel_id: 0,
-                left_value_slot_id: 0,
-                right_value_slot_id: 0,
-                left_momentum_slot_id: 0,
-                right_momentum_slot_id: 0,
-                coupling_slot_id: 0,
-                attachment_start: 0,
-                attachment_count: 4,
-            },
-            left_values: ComponentRange { start: 0, len: 1 },
-            right_values: ComponentRange { start: 0, len: 1 },
-            left_momenta: ComponentRange { start: 0, len: 1 },
-            right_momenta: ComponentRange { start: 0, len: 1 },
-            attachment_range: 0..4,
-        };
-        let factors = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
-        let attachments = factors
-            .into_iter()
-            .enumerate()
-            .map(|(index, (factor_real, factor_imag))| ScheduledAttachment {
-                row: EagerAttachmentRow {
-                    result_current_id: index as u32,
-                    factor_real,
-                    factor_imag,
-                },
-                current: ComponentRange {
-                    start: index * 2,
-                    len: 2,
-                },
-            })
-            .collect::<Vec<_>>();
-        let outputs = [c64(1.0, 2.0), c64(3.0, 4.0), c64(5.0, 6.0), c64(7.0, 8.0)];
-        let mut currents = vec![c64(0.0, 0.0); 8 * 2];
-
-        scatter_invocations(
-            &[invocation],
-            &attachments,
-            &outputs,
-            2,
-            2,
-            2,
-            &mut currents,
-        );
-
-        for (factor_index, (real, imag)) in factors.into_iter().enumerate() {
-            let factor = c64(real, imag);
-            for component in 0..2 {
-                for point in 0..2 {
-                    let expected = factor * outputs[point * 2 + component];
-                    let actual = currents[(factor_index * 2 + component) * 2 + point];
-                    assert_eq!(actual, expected);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn factor_specialization_keeps_generic_complex_fallback() {
-        let initial = c64(2.0, -3.0);
-        let value = c64(5.0, 7.0);
-        for (real, imag) in [
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-            (2.5, -0.75),
-        ] {
-            let mut actual = initial;
-            AccumulationFactor::from_parts(real, imag).accumulate(&mut actual, value);
-            assert_eq!(actual, initial + c64(real, imag) * value);
-        }
     }
 }
