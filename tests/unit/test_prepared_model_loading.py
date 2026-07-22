@@ -47,6 +47,16 @@ def _prepared_builtin_sm(tmp_path: Path, *, machine: str | None = None) -> Path:
         exact_evaluator_state_path="kernels/0/exact.evaluator.bin",
         f64_evaluator_manifest={
             "kind": "symjit-application-evaluator",
+            "optimization_level": 2,
+            "settings": {
+                "iterations": 10,
+                "cpe_iterations": None,
+                "jit_optimization_level": 2,
+                "max_horner_scheme_variables": 1000,
+                "max_common_pair_cache_entries": 5_000_000,
+                "max_common_pair_distance": 1000,
+                "collect_factors": False,
+            },
             "input_len": 1,
             "output_len": 1,
             "application_path": "kernels/0/application.symjit",
@@ -58,7 +68,7 @@ def _prepared_builtin_sm(tmp_path: Path, *, machine: str | None = None) -> Path:
         optimization_settings={
             "iterations": 10,
             "cpe_iterations": None,
-            "jit_optimization_level": 3,
+            "jit_optimization_level": 2,
             "max_horner_scheme_variables": 1000,
             "max_common_pair_cache_entries": 5_000_000,
             "max_common_pair_distance": 1000,
@@ -161,7 +171,7 @@ def test_eager_compiled_handle_without_pack_fails_before_dag(
         Generator(_eager_config()).plan("d d~ > z", model=model)
 
 
-def test_eager_rejects_incompatible_prepared_architecture_before_dag(
+def test_eager_accepts_portable_prepared_model_from_other_architecture_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,11 +179,10 @@ def test_eager_rejects_incompatible_prepared_architecture_before_dag(
     other = "x86_64" if canonical_architecture() == "aarch64" else "aarch64"
     model = ModelSource.from_path(_prepared_builtin_sm(tmp_path, machine=other))
 
-    with pytest.raises(
-        GenerationError,
-        match=r"incompatible with this host.*model compile.*--backend jit",
-    ):
-        Generator(_eager_config()).plan("d d~ > z", model=model)
+    plan = Generator(_eager_config()).plan("d d~ > z", model=model)
+
+    assert len(plan.concrete_processes) == 1
+    assert plan.effective_settings.evaluator.jit.optimization_level == 2
 
 
 def test_compiled_plan_does_not_materialize_packaged_model(
@@ -206,7 +215,7 @@ def test_eager_plan_accepts_prepared_model(
     assert len(plan.concrete_processes) == 1
     assert plan.estimated_coverage["model_kind"] == "prepared"
     assert plan.effective_settings.evaluator.backend == "jit"
-    assert plan.effective_settings.evaluator.jit.optimization_level == 3
+    assert plan.effective_settings.evaluator.jit.optimization_level == 2
     assert {
         adjustment.path for adjustment in plan.adjustments
     } >= {"evaluator.optimization.collect_factors"}
@@ -233,10 +242,10 @@ def test_eager_prepared_pack_settings_are_authoritative(
     assert plan.requested_settings.evaluator.backend == "cpp"
     assert plan.requested_settings.evaluator.jit.optimization_level == 1
     assert plan.effective_settings.evaluator.backend == "jit"
-    assert plan.effective_settings.evaluator.jit.optimization_level == 3
+    assert plan.effective_settings.evaluator.jit.optimization_level == 2
     by_path = {adjustment.path: adjustment for adjustment in plan.adjustments}
     assert by_path["evaluator.backend"].requested == "cpp"
     assert by_path["evaluator.backend"].effective == "jit"
     assert by_path["evaluator.jit.optimization_level"].requested == 1
-    assert by_path["evaluator.jit.optimization_level"].effective == 3
+    assert by_path["evaluator.jit.optimization_level"].effective == 2
     assert "prepared model settings" in caplog.text
