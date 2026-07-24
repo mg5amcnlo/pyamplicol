@@ -21,7 +21,7 @@ archive_prefix = "symjit-48197f32536c894b51ef25b2cf05ddd05c22675f"
 archive_sha256 = "876930348cc06761ca780570fb282d009f143f4a469e321e3b5039c5ee217424"
 candidate_revision = "48197f32536c894b51ef25b2cf05ddd05c22675f"
 application_storage_version = 3
-release_status = "unpatched-candidate"
+release_status = "patched-candidate"
 license = "MIT"
 
 [gammaloop_candidate]
@@ -43,3 +43,8 @@ release_status = "developer-only"
 license = "NOASSERTION"
 redistributed = false
 license_evidence = "No LICENSE or COPYING file exists at the pinned branch revision"
+
+[[patches]]
+dependency = "symjit"
+path = "patches/symjit/0001-direct-arena-applications.patch"
+sha256 = "a6f55a1d8c8827c8aa03d5c42395de6a69ed3a9ec11bce9ab5e20e3106214263"
