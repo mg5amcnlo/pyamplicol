@@ -53,13 +53,13 @@ def test_ufo_loader_uses_the_verified_published_wheel_without_local_patch() -> N
         "803ae28141ec4be3189cc62469b88da17ca33907791fe99774c2fe756a45edf7"
     )
     assert loader["release_status"] == "verified"
-    assert "patches" not in payload
+    assert {entry["dependency"] for entry in payload["patches"]} == {"symjit"}
 
 
 def test_legacy_oracle_uses_the_pinned_remote_branch_without_local_patches() -> None:
     module = _module()
     payload = module._lock()
-    assert "patches" not in payload
+    assert all(entry["dependency"] != "legacy-amplicol" for entry in payload["patches"])
     assert not tuple(
         (module.DEPENDENCIES / "patches" / "legacy-amplicol").glob("*.patch")
     )
@@ -141,6 +141,40 @@ def test_toml_section_replacement_is_idempotent() -> None:
     assert once == twice
     assert 'a = "1"' not in once
     assert once.count('b = "2"') == 1
+
+
+def test_archive_checkout_patch_does_not_discover_parent_repository(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=repository,
+        check=True,
+    )
+    parent_payload = repository / "payload.txt"
+    parent_payload.write_text("old\n", encoding="utf-8")
+    checkout = repository / "checkouts" / "dependency"
+    checkout.mkdir(parents=True)
+    checkout_payload = checkout / "payload.txt"
+    checkout_payload.write_text("old\n", encoding="utf-8")
+    patch = repository / "change.patch"
+    patch.write_text(
+        "--- a/payload.txt\n"
+        "+++ b/payload.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n",
+        encoding="utf-8",
+    )
+
+    module._apply_patch(module.Runner(dry_run=False), checkout, patch)
+    module._apply_patch(module.Runner(dry_run=False), checkout, patch)
+
+    assert checkout_payload.read_text(encoding="utf-8") == "new\n"
+    assert parent_payload.read_text(encoding="utf-8") == "old\n"
 
 
 def test_candidate_community_lock_is_resolved_from_the_upstream_lock(
