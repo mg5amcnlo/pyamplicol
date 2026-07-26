@@ -41,7 +41,6 @@ from .._internal.versions import (
     COMPILED_HELICITY_PRIMARY_RECURRENCE_CAPABILITY,
     COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
     COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
-    COMPILED_PLANE_DIRECT_APPLICATION_ABI,
     COMPILED_RUNTIME_SELECTORS_CAPABILITY,
     EAGER_DIRECT_ARENA_RUNTIME_CAPABILITY,
     EAGER_DIRECT_TABLE_BINDING_ABI,
@@ -2012,6 +2011,7 @@ def _prefix_evaluator_payload_paths(
         "descriptor_path",
         "evaluator_state_path",
         "library_path",
+        "path",
         "source_path",
     }
 
@@ -2424,7 +2424,7 @@ def _stage_evaluator_set(record: Mapping[str, object]) -> dict[str, object]:
         direct_stages and all(direct_stages)
     ):
         raise ValueError(
-            "compiled f64 artifacts require compiled-plane-arena-v1 metadata "
+            "compiled f64 artifacts require compiled-stage-plan v2 metadata "
             "for every fused stage"
         )
     if has_direct_capability != bool(direct_stages and all(direct_stages)):
@@ -2483,96 +2483,18 @@ def _compiled_plane_arena_stage(
     *,
     stage: Mapping[str, object],
 ) -> dict[str, object]:
-    result = {
-        **_select(
-            record,
-            "schema_version",
-            "kind",
-            "application_abi",
-            "source_application_abi",
-            "element_layout",
-            "output_operation",
-            "output_factor",
-            "input_output_aliasing",
-            "output_output_aliasing",
-        ),
-        "input_bindings": [
-            _select(
-                _mapping(item),
-                "parameter_index",
-                "kind",
-                "source_id",
-                "component",
-                "global_component",
-                "real_valued",
-            )
-            for item in _sequence(record["input_bindings"])
-        ],
-        "output_bindings": [
-            _select(
-                _mapping(item),
-                "output_index",
-                "arena",
-                "component",
-            )
-            for item in _sequence(record["output_bindings"])
-        ],
-        "leaves": [
-            _select(
-                _mapping(item),
-                "application_path",
-                "source_application_abi",
-                "optimization_level",
-                "direct_codegen_optimization_level",
-                "input_len",
-                "output_len",
-                "input_indices",
-                "output_start",
-                "output_stop",
-            )
-            for item in _sequence(record["leaves"])
-        ],
-    }
-    symjit_contract = (
-        result["application_abi"] == COMPILED_PLANE_DIRECT_APPLICATION_ABI
-        and result["source_application_abi"] == SYMJIT_APPLICATION_ABI
-    )
-    native_contract = (
-        result["application_abi"] == NATIVE_COMPILED_DIRECT_APPLICATION_ABI
-        and result["source_application_abi"] == NATIVE_COMPILED_DIRECT_APPLICATION_ABI
-    )
+    result = _plain_mapping(record)
     if (
-        result["schema_version"] != 1
-        or result["kind"] != "compiled-plane-arena-stage"
-        or not (symjit_contract or native_contract)
-        or result["element_layout"] != "split-complex-component-major"
-        or result["output_operation"] != "overwrite"
-        or result["output_factor"] != "identity"
-        or result["input_output_aliasing"] != "forbidden"
-        or result["output_output_aliasing"] != "forbidden"
+        result.get("schema_version") != 2
+        or result.get("kind") != "compiled-stage-plan"
+        or result.get("element_layout") != "split-complex-component-major"
     ):
-        raise ValueError("compiled plane-arena stage contract is incompatible")
-    if len(result["input_bindings"]) != int(stage["parameter_count"]):
-        raise ValueError("compiled plane-arena input binding count is invalid")
-    if len(result["output_bindings"]) != int(stage["output_length"]):
-        raise ValueError("compiled plane-arena output binding count is invalid")
-    if not result["leaves"]:
-        raise ValueError("compiled plane-arena stage has no fused leaves")
-    output_cursor = 0
-    for leaf in result["leaves"]:
-        leaf_map = _mapping(leaf)
-        input_indices = list(_sequence(leaf_map["input_indices"]))
-        if (
-            leaf_map["source_application_abi"] != result["source_application_abi"]
-            or leaf_map["direct_codegen_optimization_level"] != 3
-            or len(input_indices) != int(leaf_map["input_len"])
-            or leaf_map["output_start"] != output_cursor
-            or leaf_map["output_stop"] != output_cursor + int(leaf_map["output_len"])
-        ):
-            raise ValueError("compiled plane-arena leaf bindings are invalid")
-        output_cursor = int(leaf_map["output_stop"])
-    if output_cursor != int(stage["output_length"]):
-        raise ValueError("compiled plane-arena leaves do not cover stage outputs")
+        raise ValueError("compiled stage-plan v2 contract is incompatible")
+    residual = _mapping(result["residual_evaluator"])
+    if residual.get("kind") != "compiled-stage-empty-residual":
+        result["residual_evaluator"] = _evaluator(residual)
+    if len(_sequence(result["input_bindings"])) != int(stage["parameter_count"]):
+        raise ValueError("compiled stage-plan input binding count is invalid")
     return result
 
 

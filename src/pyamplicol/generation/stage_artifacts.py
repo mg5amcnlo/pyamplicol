@@ -28,6 +28,11 @@ from ..evaluators.execution_schema import (
     evaluator_runtime_capabilities,
 )
 from ..models.base import Model
+from .compiled_microkernels import (
+    compiled_microkernel_session,
+    empty_residual_evaluator,
+    residual_only_stage_plan,
+)
 from .contracts import StageCompilationInput
 from .dag_types import GenericDAG
 from .stage_parameters import _dict, _list, _logical_model_parameter_symbols
@@ -108,8 +113,20 @@ def write_generic_stage_evaluator_artifacts(
         payload = prepared_stage.to_json_dict()
         payload["evaluator"] = compile_stage(prepared_stage)
         direct = _compiled_plane_arena_stage(payload)
-        if direct is not None:
-            payload["compiled_plane_arena"] = direct
+        if direct is None:
+            raise ValueError(
+                "compiled stage has no DirectApplication binding; "
+                "regenerate the prepared evaluator"
+            )
+        payload["compiled_plane_arena"] = residual_only_stage_plan(
+            prepared_stage,
+            evaluator=_dict(payload["evaluator"]),
+            leaves=tuple(_dict(item) for item in _list(direct["leaves"])),
+            output_bindings=tuple(
+                _dict(item) for item in _list(direct["output_bindings"])
+            ),
+            residual_application_abi=str(direct["application_abi"]),
+        )
         stage_timings.append(
             _stage_build_timing_record(
                 prepared_stage.evaluator_label,
@@ -137,8 +154,20 @@ def write_generic_stage_evaluator_artifacts(
     amplitude_payload = prepared_amplitude_stage.to_json_dict()
     amplitude_payload["evaluator"] = compile_stage(prepared_amplitude_stage)
     direct = _compiled_plane_arena_stage(amplitude_payload)
-    if direct is not None:
-        amplitude_payload["compiled_plane_arena"] = direct
+    if direct is None:
+        raise ValueError(
+            "compiled amplitude stage has no DirectApplication binding; "
+            "regenerate the prepared evaluator"
+        )
+    amplitude_payload["compiled_plane_arena"] = residual_only_stage_plan(
+        prepared_amplitude_stage,
+        evaluator=_dict(amplitude_payload["evaluator"]),
+        leaves=tuple(_dict(item) for item in _list(direct["leaves"])),
+        output_bindings=tuple(
+            _dict(item) for item in _list(direct["output_bindings"])
+        ),
+        residual_application_abi=str(direct["application_abi"]),
+    )
     stage_timings.append(
         _stage_build_timing_record(
             blueprint.amplitude_stage.evaluator_label,
@@ -683,7 +712,7 @@ def _finalize_stage_evaluator_payload(
     )
     if requires_direct and direct_stage_count != stage_count:
         raise ValueError(
-            "compiled f64 artifacts require compiled-plane-arena-v1 metadata "
+            "compiled f64 artifacts require compiled-stage-plan v2 metadata "
             "for every fused stage"
         )
     if direct_stage_count:
@@ -792,6 +821,7 @@ def build_and_write_generic_stage_evaluator_artifacts(
     merge_evaluators_strategy: bool = False,
     verbose_evaluator_build: bool = False,
     jit_compile: bool = True,
+    enable_compiled_microkernels: bool = False,
     blueprint_progress_callback: StageBlueprintProgress | None = None,
     evaluator_progress_callback: Any | None = None,
 ) -> tuple[GenericStageCompilerBlueprint, dict[str, object]]:
@@ -800,6 +830,26 @@ def build_and_write_generic_stage_evaluator_artifacts(
     output_dir = Path(artifact_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     schema = _dict(runtime_schema)
+    microkernel_session = None
+    if enable_compiled_microkernels:
+        dag = manifest.dag if isinstance(manifest, StageCompilationInput) else manifest
+        effective_model = (
+            manifest.model if isinstance(manifest, StageCompilationInput) else model
+        )
+        if effective_model is None:
+            raise ValueError("compiled microkernel lowering requires a model")
+        microkernel_session = compiled_microkernel_session(
+            dag=dag,
+            model=effective_model,
+            runtime_schema=schema,
+            artifact_dir=output_dir,
+            symbolica_settings=symbolica_settings,
+            enabled=True,
+        )
+        if microkernel_session is None:
+            raise ValueError(
+                "compiled microkernel lowering requires the JIT O3 backend"
+            )
     current_stage_count = len(_list(schema["stages"]))
     stage_count = current_stage_count + 1
     build_started = time.perf_counter()
@@ -824,6 +874,7 @@ def build_and_write_generic_stage_evaluator_artifacts(
         reported_current_stage_count: int,
     ) -> None:
         nonlocal amplitude_payload
+        stage_started = time.perf_counter()
         if reported_current_stage_count != current_stage_count:
             raise ValueError("streamed stage count changed during blueprint lowering")
         if not stage.expression_ready:
@@ -837,6 +888,25 @@ def build_and_write_generic_stage_evaluator_artifacts(
             symbolica_settings=symbolica_settings,
             current_stage_position=position,
             current_stage_count=current_stage_count,
+        )
+        effective_stage_settings = _stage_symbolica_settings(
+            prepared_stage,
+            None,
+            symbolica_settings,
+            current_stage_position=position,
+            current_stage_count=current_stage_count,
+        )
+        lowering = (
+            None
+            if microkernel_session is None
+            else microkernel_session.lower_stage(
+                prepared_stage,
+                chunk_size=getattr(
+                    effective_stage_settings,
+                    "compiled_output_chunk_size",
+                    None,
+                ),
+            )
         )
         payload = prepared_stage.to_json_dict()
         payload["evaluator"] = _compile_stage_evaluator_artifact(
@@ -853,12 +923,78 @@ def build_and_write_generic_stage_evaluator_artifacts(
             current_stage_count=current_stage_count,
         )
         direct = _compiled_plane_arena_stage(payload)
-        if direct is not None:
-            payload["compiled_plane_arena"] = direct
+        if direct is None:
+            raise ValueError(
+                "compiled stage has no DirectApplication binding; "
+                "regenerate the prepared evaluator"
+            )
+        if lowering is None or not lowering.has_islands:
+            payload["compiled_plane_arena"] = residual_only_stage_plan(
+                prepared_stage,
+                evaluator=_dict(payload["evaluator"]),
+                leaves=tuple(_dict(item) for item in _list(direct["leaves"])),
+                output_bindings=tuple(
+                    _dict(item) for item in _list(direct["output_bindings"])
+                ),
+                residual_application_abi=str(direct["application_abi"]),
+            )
+        else:
+            residual_stage = lowering.residual_stage
+            if residual_stage.output_length == 0:
+                residual_evaluator = empty_residual_evaluator()
+                residual_leaves: tuple[dict[str, object], ...] = ()
+                residual_output_bindings: tuple[dict[str, object], ...] = ()
+            else:
+                residual_compile_stage = replace(
+                    residual_stage,
+                    evaluator_label=(
+                        f"{residual_stage.evaluator_label}_microkernel_residual"
+                    ),
+                )
+                residual_evaluator = _compile_stage_evaluator_artifact(
+                    residual_compile_stage,
+                    output_dir,
+                    compiler=compiler,
+                    blueprint=None,
+                    symbolica_settings=replace(
+                        effective_stage_settings,
+                        compiled_output_chunk_size=None,
+                        output_chunk_strategy="uniform",
+                    ),
+                    merge_evaluators_strategy=merge_evaluators_strategy,
+                    verbose_evaluator_build=verbose_evaluator_build,
+                    jit_compile=jit_compile,
+                    progress_callback=evaluator_progress_callback,
+                    current_stage_position=position,
+                    current_stage_count=current_stage_count,
+                )
+                residual_payload = residual_stage.to_json_dict()
+                residual_payload["evaluator"] = residual_evaluator
+                residual_direct = _compiled_plane_arena_stage(residual_payload)
+                if residual_direct is None:
+                    raise ValueError(
+                        "compiled residual stage has no DirectApplication binding"
+                    )
+                residual_leaves = tuple(
+                    _dict(item) for item in _list(residual_direct["leaves"])
+                )
+                residual_output_bindings = tuple(
+                    _dict(item)
+                    for item in _list(residual_direct["output_bindings"])
+                )
+            payload["compiled_plane_arena"] = (
+                microkernel_session.build_stage_plan(
+                    lowering,
+                    residual_evaluator=residual_evaluator,
+                    residual_leaves=residual_leaves,
+                    residual_output_bindings=residual_output_bindings,
+                )
+            )
         timing = _stage_build_timing_record(
             prepared_stage.evaluator_label,
             payload["evaluator"],
         )
+        timing["stage_evaluator_build_s"] = time.perf_counter() - stage_started
         stage_timings.append(timing)
         if str(prepared_stage.stage_kind).startswith("amplitude"):
             amplitude_payload = payload

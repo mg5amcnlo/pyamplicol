@@ -3104,6 +3104,12 @@ class GenerationBackend:
                     execution_lane=execution_lane,
                 )
             )
+            lane_settings = self._symbolica_settings()
+            enable_compiled_microkernels = (
+                not self._all_flow_union_enabled
+                and getattr(lane_settings, "backend", None) == "jit"
+                and getattr(lane_settings, "jit_optimization_level", None) == 3
+            )
             _blueprint, stage_manifest = (
                 build_and_write_generic_stage_evaluator_artifacts(
                     stage_input,
@@ -3111,8 +3117,11 @@ class GenerationBackend:
                     output_root,
                     model=model,
                     stage_local_parameter_layout=True,
-                    symbolica_settings=self._symbolica_settings(),
+                    symbolica_settings=lane_settings,
                     jit_compile=True,
+                    enable_compiled_microkernels=(
+                        enable_compiled_microkernels
+                    ),
                     evaluator_progress_callback=callback,
                 )
             )
@@ -3125,7 +3134,7 @@ class GenerationBackend:
                 model,
                 runtime_schema.to_mapping(),
                 output_root,
-                symbolica_settings=self._symbolica_settings(),
+                symbolica_settings=lane_settings,
                 jit_compile=True,
                 progress_callback=callback,
             )

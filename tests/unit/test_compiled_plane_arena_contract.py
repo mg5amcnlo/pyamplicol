@@ -8,6 +8,9 @@ import pytest
 from pyamplicol._internal.versions import (
     COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
     COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+    COMPILED_STAGE_PLAN_ABI,
+    EAGER_DIRECT_TABLE_BINDING_ABI,
+    EAGER_DIRECT_TABLE_DESCRIPTOR_ABI,
     NATIVE_COMPILED_DIRECT_APPLICATION_ABI,
     SYMBOLICA_ASM_RUNTIME_CAPABILITY,
     SYMBOLICA_CPP_RUNTIME_CAPABILITY,
@@ -168,11 +171,74 @@ def _native_leaf(
     }
 
 
+def _residual_plan(payload: dict[str, object]) -> dict[str, object]:
+    direct = _compiled_plane_arena_stage(payload)
+    assert direct is not None
+    leaves = list(direct["leaves"])
+    chunk_indices = list(range(len(leaves)))
+    return {
+        "schema_version": 2,
+        "kind": "compiled-stage-plan",
+        "plan_abi": COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": direct["application_abi"],
+        "table_source_application_abi": SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": EAGER_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": EAGER_DIRECT_TABLE_BINDING_ABI,
+        "element_layout": "split-complex-component-major",
+        "input_bindings": direct["input_bindings"],
+        "output_bindings": [
+            {**binding, "original_output_index": binding["output_index"]}
+            for binding in direct["output_bindings"]
+        ],
+        "residual_evaluator": payload["evaluator"],
+        "residual_leaves": [
+            {
+                **leaf,
+                "residual_leaf_index": index,
+                "original_chunk_index": index,
+            }
+            for index, leaf in enumerate(leaves)
+        ],
+        "scratch_current_component_count": 0,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [],
+        "table_calls": [],
+        "finalizer_calls": [],
+        "execution_order": [
+            {
+                "kind": "residual-leaf",
+                "index": index,
+                "original_chunk_index": index,
+            }
+            for index in chunk_indices
+        ],
+        "selector_partitions": [
+            {
+                "partition_id": 0,
+                "helicity_selector_domain_ids": [],
+                "color_selector_domain_ids": [0],
+                "original_chunk_indices": chunk_indices,
+            }
+        ],
+        "diagnostics": {
+            "island_count": 0,
+            "kernel_count": 0,
+            "invocation_count": 0,
+            "attachment_count": 0,
+            "table_source_bytes": 0,
+            "descriptor_bytes": 0,
+            "semantic_row_bytes": 0,
+            "scratch_current_component_count": 0,
+        },
+    }
+
+
 def _set() -> dict[str, object]:
     stage = _stage()
     amplitude = _stage(amplitude=True)
-    stage["compiled_plane_arena"] = _compiled_plane_arena_stage(stage)
-    amplitude["compiled_plane_arena"] = _compiled_plane_arena_stage(amplitude)
+    for payload in (stage, amplitude):
+        payload["compiled_plane_arena"] = _residual_plan(payload)
     return {
         "kind": "generic-dag-stage-evaluator-artifacts",
         "required_runtime_capabilities": [
@@ -193,17 +259,28 @@ def _set() -> dict[str, object]:
     }
 
 
-def test_compiled_plane_contract_freezes_leaf_and_plane_bindings() -> None:
-    stage = _stage()
-    direct = _compiled_plane_arena_stage(stage)
+def test_compiled_stage_plan_v2_freezes_residual_leaf_and_plane_bindings() -> None:
+    plan = _residual_plan(_stage())
 
-    assert direct is not None
-    assert direct["application_abi"] == COMPILED_PLANE_DIRECT_APPLICATION_ABI
-    assert [leaf["input_indices"] for leaf in direct["leaves"]] == [[0, 2], [1]]
-    assert [leaf["output_start"] for leaf in direct["leaves"]] == [0, 1]
-    assert [binding["component"] for binding in direct["output_bindings"]] == [
+    assert plan["schema_version"] == 2
+    assert plan["kind"] == "compiled-stage-plan"
+    assert plan["plan_abi"] == COMPILED_STAGE_PLAN_ABI
+    assert plan["residual_application_abi"] == COMPILED_PLANE_DIRECT_APPLICATION_ABI
+    assert [leaf["input_indices"] for leaf in plan["residual_leaves"]] == [
+        [0, 2],
+        [1],
+    ]
+    assert [leaf["output_start"] for leaf in plan["residual_leaves"]] == [0, 1]
+    assert [binding["component"] for binding in plan["output_bindings"]] == [
         12,
         13,
+    ]
+    original_output_indices = [
+        binding["original_output_index"] for binding in plan["output_bindings"]
+    ]
+    assert original_output_indices == [
+        0,
+        1,
     ]
 
 
@@ -214,17 +291,15 @@ def test_compiled_plane_contract_covers_every_jit_optimization_level(
     stage = _stage()
     stage["evaluator"]["chunks"][0]["optimization_level"] = optimization_level
 
-    direct = _compiled_plane_arena_stage(stage)
+    plan = _residual_plan(stage)
 
-    assert direct is not None
-    assert [leaf["optimization_level"] for leaf in direct["leaves"]] == [
+    assert [leaf["optimization_level"] for leaf in plan["residual_leaves"]] == [
         optimization_level,
         3,
     ]
-    assert [leaf["direct_codegen_optimization_level"] for leaf in direct["leaves"]] == [
-        3,
-        3,
-    ]
+    assert [
+        leaf["direct_codegen_optimization_level"] for leaf in plan["residual_leaves"]
+    ] == [3, 3]
 
 
 def test_compiled_plane_contract_rejects_unknown_jit_optimization_level() -> None:
@@ -254,12 +329,10 @@ def test_native_compiled_contract_publishes_direct_library_leaves(
         ],
     }
 
-    direct = _compiled_plane_arena_stage(stage)
+    plan = _residual_plan(stage)
 
-    assert direct is not None
-    assert direct["application_abi"] == NATIVE_COMPILED_DIRECT_APPLICATION_ABI
-    assert direct["source_application_abi"] == (NATIVE_COMPILED_DIRECT_APPLICATION_ABI)
-    assert [leaf["application_path"] for leaf in direct["leaves"]] == [
+    assert plan["residual_application_abi"] == NATIVE_COMPILED_DIRECT_APPLICATION_ABI
+    assert [leaf["application_path"] for leaf in plan["residual_leaves"]] == [
         "compiled/left.direct",
         "compiled/right.direct",
     ]
@@ -290,11 +363,6 @@ def test_stage_set_requires_complete_capability_bound_metadata() -> None:
     with pytest.raises(ValueError, match="compiled f64 artifacts require"):
         _stage_evaluator_set(pre_arena)
 
-    drift = deepcopy(_set())
-    drift["amplitude_stage"]["compiled_plane_arena"]["leaves"][1]["output_start"] = 0
-    with pytest.raises(ValueError, match="leaf bindings"):
-        _stage_evaluator_set(drift)
-
 
 def test_direct_source_paths_follow_nested_lane_prefixes() -> None:
     serialized = _stage_evaluator_set(_set())
@@ -303,6 +371,6 @@ def test_direct_source_paths_follow_nested_lane_prefixes() -> None:
     assert stage["evaluator"]["chunks"][0]["application_path"] == (
         "lane-7/evaluators/left.symjit"
     )
-    assert stage["compiled_plane_arena"]["leaves"][0]["application_path"] == (
+    assert stage["compiled_plane_arena"]["residual_leaves"][0]["application_path"] == (
         "lane-7/evaluators/left.symjit"
     )

@@ -18,6 +18,9 @@ from pyamplicol._internal.versions import (
     COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
     COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
     COMPILED_RUNTIME_SELECTORS_CAPABILITY,
+    COMPILED_STAGE_PLAN_ABI,
+    EAGER_DIRECT_TABLE_BINDING_ABI,
+    EAGER_DIRECT_TABLE_DESCRIPTOR_ABI,
     EVALUATOR_RUNTIME_CAPABILITIES,
     SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY,
     SYMJIT_APPLICATION_ABI,
@@ -150,7 +153,64 @@ def _symjit_stage_manifest(root: Path, *, label: str) -> dict[str, object]:
     }
     direct = _compiled_plane_arena_stage(amplitude_stage)
     assert direct is not None
-    amplitude_stage["compiled_plane_arena"] = direct
+    amplitude_stage["compiled_plane_arena"] = {
+        "schema_version": 2,
+        "kind": "compiled-stage-plan",
+        "plan_abi": COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": direct["application_abi"],
+        "table_source_application_abi": SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": EAGER_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": EAGER_DIRECT_TABLE_BINDING_ABI,
+        "element_layout": "split-complex-component-major",
+        "input_bindings": direct["input_bindings"],
+        "output_bindings": [
+            {
+                **binding,
+                "original_output_index": binding["output_index"],
+            }
+            for binding in direct["output_bindings"]
+        ],
+        "residual_evaluator": evaluator,
+        "residual_leaves": [
+            {
+                **leaf,
+                "residual_leaf_index": index,
+                "original_chunk_index": index,
+            }
+            for index, leaf in enumerate(direct["leaves"])
+        ],
+        "scratch_current_component_count": 0,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [],
+        "table_calls": [],
+        "finalizer_calls": [],
+        "execution_order": [
+            {
+                "kind": "residual-leaf",
+                "index": 0,
+                "original_chunk_index": 0,
+            }
+        ],
+        "selector_partitions": [
+            {
+                "partition_id": 0,
+                "helicity_selector_domain_ids": [],
+                "color_selector_domain_ids": [],
+                "original_chunk_indices": [0],
+            }
+        ],
+        "diagnostics": {
+            "island_count": 0,
+            "kernel_count": 0,
+            "invocation_count": 0,
+            "attachment_count": 0,
+            "table_source_bytes": 0,
+            "descriptor_bytes": 0,
+            "semantic_row_bytes": 0,
+            "scratch_current_component_count": 0,
+        },
+    }
     return {
         "kind": "generic-dag-stage-evaluator-artifacts",
         "runtime_available": True,
@@ -273,7 +333,7 @@ def test_mock_symjit_manifest_preserves_the_compiled_arena_invariant(
     assert isinstance(evaluator, dict)
     direct = amplitude_stage["compiled_plane_arena"]
     assert isinstance(direct, dict)
-    leaves = direct["leaves"]
+    leaves = direct["residual_leaves"]
     assert isinstance(leaves, list)
     assert leaves == [
         {
@@ -286,6 +346,8 @@ def test_mock_symjit_manifest_preserves_the_compiled_arena_invariant(
             "input_indices": [0],
             "output_start": 0,
             "output_stop": 1,
+            "residual_leaf_index": 0,
+            "original_chunk_index": 0,
         }
     ]
     assert (
@@ -769,13 +831,17 @@ def test_compiled_process_capabilities_use_primary_execution_lane(
     tmp_path: Path,
 ) -> None:
     artifact = _materialize_without_symbolica(monkeypatch, tmp_path)
-    assert artifact_writer._compiled_process_runtime_capabilities(artifact) == (
-        COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
-        COMPILED_COLOR_TOPOLOGY_LANES_CAPABILITY,
-        COMPILED_HELICITY_DUAL_LANE_CAPABILITY,
-        COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
-        COMPILED_RUNTIME_SELECTORS_CAPABILITY,
-        SYMJIT_F64_RUNTIME_CAPABILITY,
+    assert artifact_writer._compiled_process_runtime_capabilities(artifact) == tuple(
+        sorted(
+            {
+                COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
+                COMPILED_COLOR_TOPOLOGY_LANES_CAPABILITY,
+                COMPILED_HELICITY_DUAL_LANE_CAPABILITY,
+                COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
+                COMPILED_RUNTIME_SELECTORS_CAPABILITY,
+                SYMJIT_F64_RUNTIME_CAPABILITY,
+            }
+        )
     )
 
 
@@ -986,14 +1052,16 @@ def test_writer_emits_selector_and_fused_sum_lanes_and_owns_all_payloads(
         members = {member.logical_path for member in container.members}
     for relative in referenced:
         assert f"processes/dual_lane/{relative}" in members
-    assert execution["required_runtime_capabilities"] == [
-        COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
-        COMPILED_COLOR_TOPOLOGY_LANES_CAPABILITY,
-        COMPILED_HELICITY_DUAL_LANE_CAPABILITY,
-        COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
-        COMPILED_RUNTIME_SELECTORS_CAPABILITY,
-        SYMJIT_F64_RUNTIME_CAPABILITY,
-    ]
+    assert execution["required_runtime_capabilities"] == sorted(
+        {
+            COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
+            COMPILED_COLOR_TOPOLOGY_LANES_CAPABILITY,
+            COMPILED_HELICITY_DUAL_LANE_CAPABILITY,
+            COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
+            COMPILED_RUNTIME_SELECTORS_CAPABILITY,
+            SYMJIT_F64_RUNTIME_CAPABILITY,
+        }
+    )
     generation = manifest.extensions["generation"]["concrete_processes"][0]
     assert generation["runtime_schema_sha256"] == artifact.runtime_schema.sha256
     assert artifact.helicity_sum_execution is not None

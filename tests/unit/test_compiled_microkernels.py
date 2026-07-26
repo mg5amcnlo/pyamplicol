@@ -1,0 +1,499 @@
+# SPDX-License-Identifier: 0BSD
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import symbolica as symbolica_module
+
+import pyamplicol.generation.service as service_module
+from pyamplicol._internal.versions import (
+    SYMJIT_APPLICATION_ABI,
+    SYMJIT_F64_RUNTIME_CAPABILITY,
+)
+from pyamplicol.api import ProcessRequest
+from pyamplicol.config import GenerationConfig
+from pyamplicol.evaluators.symbolica_settings import SymbolicaEvaluatorSettings
+from pyamplicol.generation.compiled_microkernels import (
+    CompiledMicrokernelSession,
+    _FactorCatalog,
+    _KernelSource,
+    _PlaneCatalog,
+)
+from pyamplicol.generation.eager_tables import (
+    EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
+    EagerCouplingRow,
+)
+from pyamplicol.generation.progress import PhaseHandle
+from pyamplicol.generation.service import _ProcessSelection
+from pyamplicol.generation.stage_artifacts import (
+    build_and_write_generic_stage_evaluator_artifacts,
+)
+from pyamplicol.generation.stage_planning import (
+    _prepare_stage_for_output_chunking,
+    build_generic_stage_compiler_blueprint,
+)
+from pyamplicol.generation.stage_types import GenericCompiledStageBlueprint
+from pyamplicol.models import BuiltinSMModel
+from pyamplicol.models.builtin.process_ir import build_process_ir
+from pyamplicol.models.prepared_catalog import (
+    PreparedKernelInput,
+    PreparedKernelSpec,
+)
+
+
+def _evaluator_process(
+    expression: str,
+    *,
+    selection: _ProcessSelection,
+) -> tuple[
+    service_module.GenerationBackend,
+    BuiltinSMModel,
+    service_module._EvaluatorProcess,
+]:
+    model = BuiltinSMModel()
+    backend = service_module.GenerationBackend(
+        GenerationConfig(),
+        None,
+        process_selection=selection,
+    )
+    process_ir = build_process_ir(expression, color_accuracy="lc")
+    dag, coverage = backend._compile_concrete_process(process_ir, model)
+    prepared = backend._prepare_warmup_process(
+        service_module._DagProcess(
+            expanded=service_module._ExpandedProcess(
+                request=ProcessRequest.parse(expression, name="microkernel_test"),
+                process_ir=process_ir,
+            ),
+            dag=dag,
+            coverage=coverage,
+        ),
+        model,
+        index=0,
+        phase=PhaseHandle("test", None, 1),
+    )
+    return (
+        backend,
+        model,
+        backend._construct_evaluator(
+            prepared,
+            model,
+            PhaseHandle("test", None, 1),
+        ),
+    )
+
+
+def _fake_kernel_source(
+    session: CompiledMicrokernelSession,
+    table_kernel_id: int,
+    key: tuple[str, int],
+    *,
+    role: str,
+) -> _KernelSource:
+    spec = session._kernel_spec(key)
+    return _KernelSource(
+        table_kernel_id=table_kernel_id,
+        prepared_kernel_id=key[1] if key[0] == "prepared" else None,
+        role=role,  # type: ignore[arg-type]
+        canonical_signature=spec.canonical_signature,
+        source_application_path=f"kernel-{table_kernel_id}.symjit",
+        source_application_size_bytes=100,
+        source_application_sha256="a" * 64,
+        descriptor_path=f"kernel-{table_kernel_id}.bin",
+        descriptor_size_bytes=20,
+        descriptor_sha256="b" * 64,
+        input_complex_count=spec.input_arity,
+        output_complex_count=spec.output_dimension,
+        input_contracts=tuple(item.to_dict() for item in spec.inputs),
+        output_layout=spec.output_layout,
+    )
+
+
+def _lower_all_stages(
+    session: CompiledMicrokernelSession,
+    evaluator: service_module._EvaluatorProcess,
+    settings: object,
+) -> list[object]:
+    lowerings = []
+
+    def consume(stage: object, position: int, stage_count: int) -> None:
+        prepared = _prepare_stage_for_output_chunking(
+            stage,  # type: ignore[arg-type]
+            blueprint=None,
+            symbolica_settings=settings,
+            current_stage_position=position,
+            current_stage_count=stage_count,
+        )
+        lowerings.append(
+            session.lower_stage(
+                prepared,
+                chunk_size=getattr(settings, "compiled_output_chunk_size", None),
+            )
+        )
+
+    build_generic_stage_compiler_blueprint(
+        evaluator.stage_input,
+        model=evaluator.stage_input.model,
+        runtime_schema=evaluator.runtime_schema.to_mapping(),
+        stage_local_parameter_layout=True,
+        stage_consumer=consume,
+        release_consumed_expressions=True,
+    )
+    return lowerings
+
+
+def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    backend, model, evaluator = _evaluator_process(
+        "u u~ > z g g g g g g",
+        selection=_ProcessSelection(
+            reference_color_order=(2, 4, 5, 6, 7, 8, 9, 1),
+            selected_color_sector_ids=frozenset({0}),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        CompiledMicrokernelSession,
+        "_compile_kernel_source",
+        _fake_kernel_source,
+    )
+    settings = backend._symbolica_settings()
+    session = CompiledMicrokernelSession(
+        dag=evaluator.compiled.dag,
+        model=model,
+        runtime_schema=evaluator.runtime_schema.to_mapping(),
+        artifact_dir=tmp_path,
+        symbolica_settings=settings,
+    )
+    lowerings = _lower_all_stages(session, evaluator, settings)
+
+    assert session.profitability_diagnostics == {
+        "contract": (
+            "materialized-active-repeated-prepared-kernel-occurrences-v1"
+        ),
+        "active_occurrence_count": 203,
+        "eligible_occurrence_count": 103,
+        "coverage_basis_points": 5073,
+        "unique_projected_source_bytes": 26233,
+        "replaced_projected_source_bytes": 391469,
+        "projected_source_basis_points": 670,
+        "kernel_identity_count": 7,
+        "admitted_current_count": 31,
+        "admitted": True,
+    }
+    current_stages = lowerings[:-1]
+    assert [
+        [int(call["invocation_rows"]["count"]) for call in item.table_calls]
+        for item in current_stages
+    ] == [
+        [2, 2, 5],
+        [4, 4],
+        [6, 6],
+        [8, 8],
+        [10, 10],
+        [12, 12],
+        [7, 7],
+    ]
+    assert [
+        [int(call["invocation_rows"]["count"]) for call in item.finalizer_calls]
+        for item in current_stages
+    ] == [
+        [2, 2, 5],
+        [2, 2],
+        [2, 2],
+        [2, 2],
+        [2, 2],
+        [2, 2],
+        [1, 1],
+    ]
+    assert (
+        sum(
+            len(item.table_calls) + len(item.finalizer_calls)
+            for item in current_stages
+        )
+        == 30
+    )
+    assert sum(len(item.owned_current_ids) for item in current_stages) == 31
+    assert sum(
+        int(call["invocation_rows"]["count"])
+        for item in current_stages
+        for call in item.table_calls
+    ) == 103
+    assert not lowerings[-1].has_islands
+
+
+def test_small_ddbar_z3g_is_residual_only(tmp_path: Path) -> None:
+    backend, model, evaluator = _evaluator_process(
+        "d d~ > z g g g",
+        selection=_ProcessSelection(
+            selected_color_sector_ids=frozenset({0}),
+        ),
+    )
+    settings = backend._symbolica_settings()
+    session = CompiledMicrokernelSession(
+        dag=evaluator.compiled.dag,
+        model=model,
+        runtime_schema=evaluator.runtime_schema.to_mapping(),
+        artifact_dir=tmp_path,
+        symbolica_settings=settings,
+    )
+
+    assert session.profitability_diagnostics["eligible_occurrence_count"] == 34
+    assert session.profitability_diagnostics["admitted"] is False
+    assert not session._admitted_current_ids
+    assert all(
+        not lowering.has_islands
+        for lowering in _lower_all_stages(session, evaluator, settings)
+    )
+
+
+def test_complex_parameter_projection_and_nonzero_imaginary_factor() -> None:
+    session = object.__new__(CompiledMicrokernelSession)
+    complex_records = {
+        "real": {
+            "name": "complex_coupling.real",
+            "runtime_name": "complex_coupling",
+            "complex_component": "real",
+            "complex_domain": "complex",
+            "parameter_index": 5,
+        },
+        "imag": {
+            "name": "complex_coupling.imag",
+            "runtime_name": "complex_coupling",
+            "complex_component": "imag",
+            "complex_domain": "complex",
+            "parameter_index": 9,
+        },
+    }
+    session._logical_model_parameters = {
+        "complex_coupling": complex_records,
+    }
+    session._model_parameters_by_name = {
+        "real_mass": {
+            "name": "real_mass",
+            "parameter_index": 3,
+        }
+    }
+    session._model_parameters = {
+        5: complex_records["real"],
+        9: complex_records["imag"],
+    }
+    complex_input = PreparedKernelInput(
+        role="model-parameter",
+        component=0,
+        symbol="complex_coupling",
+        model_parameter_name="complex_coupling",
+        model_parameter_index=0,
+    )
+    real_input = PreparedKernelInput(
+        role="model-parameter",
+        component=0,
+        symbol="real_mass",
+        model_parameter_name="real_mass",
+        model_parameter_index=1,
+    )
+    spec = PreparedKernelSpec(
+        kernel_id=0,
+        contract_kind="propagator",
+        canonical_signature="c" * 64,
+        exact_expressions=("complex_coupling + real_mass",),
+        inputs=(complex_input, real_input),
+        output_layout=("current:0",),
+    )
+
+    projection = session._runtime_model_parameter_projection(complex_input)
+    assert projection == {
+        "real_parameter_index": 5,
+        "imag_parameter_index": 9,
+    }
+    planes = _PlaneCatalog()
+    real_plane, imag_plane = planes.model_parameter_pair(**projection)
+    assert planes.entries[real_plane] == {
+        "plane_id": real_plane,
+        "storage": "model-parameter",
+        "component": 5,
+        "part": "real",
+        "current_id": None,
+        "proven_real": True,
+    }
+    assert planes.entries[imag_plane] == {
+        "plane_id": imag_plane,
+        "storage": "model-parameter",
+        "component": 9,
+        "part": "imag",
+        "current_id": None,
+        "proven_real": True,
+    }
+    assert session._real_kernel_parameter_indices(spec) == (1,)
+
+    session.eager_tables = SimpleNamespace(
+        couplings=(
+            EagerCouplingRow(
+                real_parameter_id=5,
+                imag_parameter_id=9,
+                constant_real=0.0,
+                constant_imag=0.0,
+            ),
+        )
+    )
+    invocation = SimpleNamespace(
+        output_factor_source=EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
+        coupling_slot_id=0,
+    )
+    factors = _FactorCatalog()
+    factor_id = session._factor_for_attachment(
+        2.0 - 0.5j,
+        invocation,
+        factors,
+    )
+    factor = factors.entries[factor_id]
+    assert factor["model_parameter_index"] == 9
+    assert factor["parameter_component"] == "imag"
+    nonzero_imaginary_mutation = 0.375
+    assert complex(*factor["base"]) * nonzero_imaginary_mutation == (
+        0.75 - 0.1875j
+    )
+
+
+def test_residual_only_v2_reuses_each_outer_evaluator_once(
+    tmp_path: Path,
+) -> None:
+    _backend, _model, evaluator = _evaluator_process(
+        "d d~ > z g g g",
+        selection=_ProcessSelection(
+            selected_color_sector_ids=frozenset({0}),
+        ),
+    )
+    compile_labels: list[str] = []
+
+    def compiler(
+        stage: GenericCompiledStageBlueprint,
+        _parameters: object,
+        _real: object,
+    ) -> dict[str, object]:
+        label = str(stage.evaluator_label)
+        compile_labels.append(label)
+        input_len = int(stage.parameter_count)
+        output_len = int(stage.output_length)
+        partitions = tuple(stage.selector_output_partitions)
+        if not partitions:
+            partitions = ((0, output_len),)
+        chunks = [
+            {
+                "kind": "symjit-application-evaluator",
+                "runtime_capability": SYMJIT_F64_RUNTIME_CAPABILITY,
+                "input_len": input_len,
+                "output_len": stop - start,
+                "application_path": f"evaluators/{label}-{index}.symjit",
+                "application_abi": SYMJIT_APPLICATION_ABI,
+                "element_layout": "complex-f64",
+                "batch_layout": "row-major",
+                "optimization_level": 3,
+            }
+            for index, (start, stop) in enumerate(partitions)
+        ]
+        return {
+            "kind": "chunked-symbolica-evaluator",
+            "input_len": input_len,
+            "chunk_input_indices": [list(range(input_len)) for _ in chunks],
+            "required_runtime_capabilities": [SYMJIT_F64_RUNTIME_CAPABILITY],
+            "chunks": chunks,
+        }
+
+    blueprint, artifacts = build_and_write_generic_stage_evaluator_artifacts(
+        evaluator.stage_input,
+        evaluator.runtime_schema.to_mapping(),
+        tmp_path,
+        compiler=compiler,
+        symbolica_settings=SymbolicaEvaluatorSettings(),
+        enable_compiled_microkernels=False,
+    )
+    records = [*artifacts["stages"], artifacts["amplitude_stage"]]
+    assert len(compile_labels) == blueprint.stage_count == len(records)
+    assert all("_microkernel_residual" not in label for label in compile_labels)
+    for record in records:
+        outer = record["evaluator"]
+        plan = record["compiled_plane_arena"]
+        assert plan["residual_evaluator"]["chunks"] == outer["chunks"]
+        assert plan["table_kernels"] == []
+        assert plan["table_calls"] == []
+        assert plan["finalizer_calls"] == []
+
+
+def test_kernel_source_is_published_once_and_discards_unused_state(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    class FakeExpression:
+        @staticmethod
+        def parse(value: str) -> str:
+            return value
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        symbolica_module,
+        "Expression",
+        FakeExpression,
+    )
+    from pyamplicol.evaluators import symbolica_compile, symbolica_helpers
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        symbolica_compile,
+        "_compile_symbolica_outputs",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def manifest(_adapter: object, artifact_dir: Path) -> dict[str, object]:
+        source = artifact_dir / "evaluators" / "kernel.symjit"
+        state = artifact_dir / "evaluators" / "kernel.evaluator.bin"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"one machine-code application")
+        state.write_bytes(b"unused serialized evaluator")
+        return {
+            "kind": "symjit-application-evaluator",
+            "application_abi": SYMJIT_APPLICATION_ABI,
+            "optimization_level": 3,
+            "input_len": 1,
+            "output_len": 1,
+            "application_path": "evaluators/kernel.symjit",
+            "evaluator_state_path": "evaluators/kernel.evaluator.bin",
+        }
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        symbolica_helpers,
+        "_symbolica_evaluator_artifact_manifest",
+        manifest,
+    )
+    spec = PreparedKernelSpec(
+        kernel_id=7,
+        contract_kind="propagator",
+        canonical_signature="d" * 64,
+        exact_expressions=("momentum_0",),
+        inputs=(
+            PreparedKernelInput(
+                role="momentum",
+                component=0,
+                symbol="momentum_0",
+            ),
+        ),
+        output_layout=("current:0",),
+    )
+    session = object.__new__(CompiledMicrokernelSession)
+    session._specs = {7: spec}
+    session.settings = SymbolicaEvaluatorSettings()
+    session.artifact_dir = tmp_path
+    session._total_source_bytes = 0
+    session._descriptor_builder = lambda *_args, **_kwargs: b"descriptor"
+    (tmp_path / "compiled-microkernels" / "kernels").mkdir(parents=True)
+
+    source = session._compile_kernel_source(
+        0,
+        ("prepared", 7),
+        role="contribution",
+    )
+    assert source.source_application_path == "evaluators/kernel.symjit"
+    assert (tmp_path / source.source_application_path).is_file()
+    assert not (tmp_path / "evaluators" / "kernel.evaluator.bin").exists()
+    assert list(tmp_path.rglob("*.symjit")) == [
+        tmp_path / source.source_application_path
+    ]

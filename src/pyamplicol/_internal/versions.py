@@ -27,6 +27,7 @@ NATIVE_EAGER_DIRECT_TABLE_APPLICATION_ABI = "pyamplicol-eager-native-direct-tabl
 COMPILED_PLANE_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
 EAGER_DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
 EAGER_DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
+COMPILED_STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
 
 SYMJIT_F64_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
 SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY = (
@@ -51,7 +52,7 @@ RECURRENCE_CONTRACTED_COLOR_RUNTIME_CAPABILITY = (
     "rusticol.recurrence-color.contracted.v1"
 )
 COMPILED_RUNTIME_SELECTORS_CAPABILITY = "rusticol.compiled.runtime-selectors.v1"
-COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY = "compiled-plane-arena-v1"
+COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY = "rusticol.compiled.plane-arena.v2"
 COMPILED_HELICITY_DUAL_LANE_CAPABILITY = "rusticol.compiled.helicity-dual-lane.v1"
 COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY = (
     "rusticol.compiled.helicity-selector-union.v1"
