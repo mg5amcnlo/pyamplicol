@@ -68,10 +68,17 @@ fn validate_compiled_stage_plan_v2(
         .compiled_plane_arena
         .as_ref()
         .ok_or_else(|| RusticolError::integrity("compiled stage has no compiled stage-plan v2"))?;
+    let symjit_residual_abi =
+        plan.residual_application_abi == COMPILED_PLANE_DIRECT_APPLICATION_ABI;
+    #[cfg(feature = "f64-compiled")]
+    let native_residual_abi = plan.residual_application_abi
+        == super::evaluator::native_compiled_direct::NATIVE_COMPILED_DIRECT_APPLICATION_ABI;
+    #[cfg(not(feature = "f64-compiled"))]
+    let native_residual_abi = false;
     if plan.schema_version != 2
         || plan.kind != "compiled-stage-plan"
         || plan.plan_abi != COMPILED_STAGE_PLAN_ABI
-        || plan.residual_application_abi != COMPILED_PLANE_DIRECT_APPLICATION_ABI
+        || !(symjit_residual_abi || native_residual_abi)
         || plan.table_source_application_abi != COMPILED_PLANE_SOURCE_APPLICATION_ABI
         || plan.direct_table_descriptor_abi != COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI
         || plan.direct_table_binding_abi != COMPILED_DIRECT_TABLE_BINDING_ABI
@@ -242,33 +249,59 @@ fn validate_compiled_stage_plan_v2(
         .zip(&plan.residual_leaves)
         .enumerate()
     {
-        let (application_path, application_abi, input_len, output_len, optimization_level) =
-            match canonical.evaluator {
-                EvaluatorManifest::SymjitApplication {
-                    application_path,
-                    application_abi,
-                    input_len,
-                    output_len,
-                    optimization_level,
-                    ..
-                } if *optimization_level <= 3 => (
-                    application_path.as_str(),
-                    application_abi.as_str(),
+        let (
+            application_path,
+            source_application_abi,
+            residual_application_abi,
+            input_len,
+            output_len,
+            optimization_level,
+        ) = match canonical.evaluator {
+            EvaluatorManifest::SymjitApplication {
+                application_path,
+                application_abi,
+                input_len,
+                output_len,
+                optimization_level,
+                ..
+            } if *optimization_level <= 3 => (
+                application_path.as_str(),
+                application_abi.as_str(),
+                COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+                *input_len,
+                *output_len,
+                *optimization_level,
+            ),
+            #[cfg(feature = "f64-compiled")]
+            EvaluatorManifest::CompiledComplex {
+                function_name,
+                input_len,
+                output_len,
+                native_direct_application: Some(application),
+                ..
+            } => {
+                application.validate(function_name, *input_len, *output_len)?;
+                (
+                    application.library_path.as_str(),
+                    application.application_abi.as_str(),
+                    application.application_abi.as_str(),
                     *input_len,
                     *output_len,
-                    *optimization_level,
-                ),
-                _ => {
-                    return Err(RusticolError::compatibility(
-                        "compiled stage-plan v2 residuals require SymJIT DirectApplication sources",
-                    ));
-                }
-            };
+                    3,
+                )
+            }
+            _ => {
+                return Err(RusticolError::compatibility(
+                    "compiled stage-plan v2 residuals require an enabled DirectApplication \
+                         runtime",
+                ));
+            }
+        };
         if binding.residual_leaf_index != leaf_index
             || !residual_original_chunks.insert(binding.original_chunk_index)
             || binding.application_path != application_path
-            || binding.source_application_abi != application_abi
-            || binding.source_application_abi != COMPILED_PLANE_SOURCE_APPLICATION_ABI
+            || binding.source_application_abi != source_application_abi
+            || plan.residual_application_abi != residual_application_abi
             || binding.optimization_level != optimization_level
             || binding.direct_codegen_optimization_level != 3
             || binding.input_len != input_len
@@ -4448,6 +4481,56 @@ mod compiled_plane_arena_contract_tests {
         arena_manifest_at(3)
     }
 
+    #[cfg(feature = "f64-compiled")]
+    fn native_residual_manifest() -> ExecutionManifest {
+        let mut manifest = arena_manifest();
+        let stage = &mut manifest
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage;
+        let application_abi =
+            super::evaluator::native_compiled_direct::NATIVE_COMPILED_DIRECT_APPLICATION_ABI;
+        let evaluator = EvaluatorManifest::CompiledComplex {
+            runtime_capability: SYMBOLICA_COMPILED_CPP_RUNTIME_CAPABILITY.to_string(),
+            function_name: "native_residual".to_string(),
+            input_len: 14,
+            output_len: 1,
+            library_path: "evaluators/native-residual-dense.dylib".to_string(),
+            evaluator_state_path: None,
+            number_type: "complex-f64".to_string(),
+            native_direct_application: Some(NativeCompiledDirectApplicationManifest {
+                application_abi: application_abi.to_string(),
+                function_name: "native_residual".to_string(),
+                source_path: "evaluators/native-residual.cpp".to_string(),
+                library_path: "evaluators/native-residual-direct.dylib".to_string(),
+                target: NativeCompiledDirectTargetManifest {
+                    triple: crate::runtime_target_info().triple,
+                    cpu_features: Vec::new(),
+                },
+                evaluator_state_sha256: "a".repeat(64),
+                instruction_count: 1,
+                temporary_count: 0,
+                input_plane_count: 28,
+                scalar_input_count: 0,
+                output_plane_count: 2,
+                simd_lane_width: 2,
+                logical_stack_bytes: 32,
+                output_semantics: "factor-free-overwrite".to_string(),
+            }),
+        };
+        stage.evaluator = evaluator.clone();
+        let plan = stage.compiled_plane_arena.as_mut().unwrap();
+        plan.residual_application_abi = application_abi.to_string();
+        plan.residual_evaluator = Box::new(evaluator);
+        plan.residual_leaves[0].application_path =
+            "evaluators/native-residual-direct.dylib".to_string();
+        plan.residual_leaves[0].source_application_abi = application_abi.to_string();
+        plan.residual_leaves[0].optimization_level = 3;
+        manifest
+    }
+
     #[test]
     fn pre_arena_compiled_f64_requires_actionable_regeneration() {
         let value = crate::artifact::tests::minimal_execution_manifest(
@@ -4496,6 +4579,39 @@ mod compiled_plane_arena_contract_tests {
         }
         assert!(
             supported_runtime_capabilities().contains(&COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY)
+        );
+    }
+
+    #[cfg(feature = "f64-compiled")]
+    #[test]
+    fn residual_only_native_stage_plan_v2_is_supported() {
+        let manifest = native_residual_manifest();
+
+        assert!(validate_compiled_plane_arena_contract(&manifest).unwrap());
+    }
+
+    #[cfg(feature = "f64-compiled")]
+    #[test]
+    fn residual_only_native_stage_plan_rejects_source_abi_drift() {
+        let mut manifest = native_residual_manifest();
+        manifest
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage
+            .compiled_plane_arena
+            .as_mut()
+            .unwrap()
+            .residual_leaves[0]
+            .source_application_abi = COMPILED_PLANE_SOURCE_APPLICATION_ABI.to_string();
+
+        let error = validate_compiled_plane_arena_contract(&manifest).unwrap_err();
+        assert_eq!(error.kind(), crate::RusticolErrorKind::Integrity);
+        assert!(
+            error
+                .to_string()
+                .contains("disagree with their source payload")
         );
     }
 
@@ -4580,7 +4696,7 @@ mod compiled_plane_arena_contract_tests {
         assert!(
             error
                 .to_string()
-                .contains("residuals require SymJIT DirectApplication")
+                .contains("residuals require an enabled DirectApplication")
         );
     }
 }
