@@ -1863,6 +1863,7 @@ class CompiledMicrokernelSession:
             f"{spec.canonical_signature[:16]}.direct-table.bin"
         )
         descriptor_path = self.artifact_dir / descriptor_relative
+        descriptor_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor_path.write_bytes(descriptor)
         prepared_kernel_id = key[1] if key[0] == "prepared" else None
         return _KernelSource(

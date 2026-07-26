@@ -484,7 +484,8 @@ def test_kernel_source_is_published_once_and_discards_unused_state(
     session.artifact_dir = tmp_path
     session._total_source_bytes = 0
     session._descriptor_builder = lambda *_args, **_kwargs: b"descriptor"
-    (tmp_path / "compiled-microkernels" / "kernels").mkdir(parents=True)
+    descriptor_root = tmp_path / "compiled-microkernels" / "kernels"
+    assert not descriptor_root.exists()
 
     source = session._compile_kernel_source(
         0,
@@ -497,3 +498,4 @@ def test_kernel_source_is_published_once_and_discards_unused_state(
     assert list(tmp_path.rglob("*.symjit")) == [
         tmp_path / source.source_application_path
     ]
+    assert (tmp_path / source.descriptor_path).read_bytes() == b"descriptor"
