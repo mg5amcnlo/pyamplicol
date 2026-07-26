@@ -18,7 +18,9 @@ from pyamplicol.generation.compiled_microkernels import (
     CompiledMicrokernelSession,
     _FactorCatalog,
     _KernelSource,
+    _output_chunk_ranges,
     _PlaneCatalog,
+    _residual_stage,
 )
 from pyamplicol.generation.eager_tables import (
     EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
@@ -33,7 +35,10 @@ from pyamplicol.generation.stage_planning import (
     _prepare_stage_for_output_chunking,
     build_generic_stage_compiler_blueprint,
 )
-from pyamplicol.generation.stage_types import GenericCompiledStageBlueprint
+from pyamplicol.generation.stage_types import (
+    GenericCompiledStageBlueprint,
+    GenericStageOutputSlot,
+)
 from pyamplicol.models import BuiltinSMModel
 from pyamplicol.models.builtin.process_ir import build_process_ir
 from pyamplicol.models.prepared_catalog import (
@@ -499,3 +504,104 @@ def test_kernel_source_is_published_once_and_discards_unused_state(
         tmp_path / source.source_application_path
     ]
     assert (tmp_path / source.descriptor_path).read_bytes() == b"descriptor"
+
+
+def _chunk_test_stage(
+    widths: tuple[int, ...],
+    *,
+    selector_partitions: tuple[tuple[int, int], ...],
+) -> GenericCompiledStageBlueprint:
+    slots: list[GenericStageOutputSlot] = []
+    outputs: list[object] = []
+    cursor = 0
+    for current_id, width in enumerate(widths, start=1):
+        start = cursor
+        cursor += width
+        slots.append(
+            GenericStageOutputSlot(
+                value_slot_id=current_id,
+                current_id=current_id,
+                variant="current",
+                component_start=0,
+                component_stop=width,
+                output_start=start,
+                output_stop=cursor,
+            )
+        )
+        outputs.extend(
+            SimpleNamespace(
+                to_canonical_string=lambda index=index: f"output_{index}"
+            )
+            for index in range(start, cursor)
+        )
+    return GenericCompiledStageBlueprint(
+        stage_index=2,
+        stage_kind="current-combine",
+        subset_size=3,
+        evaluator_label="chunk_test",
+        parameter_layout="stage-local-value-momentum",
+        output_length=cursor,
+        output_slots=tuple(slots),
+        input_value_slot_ids=(),
+        output_value_slot_ids=tuple(range(1, len(slots) + 1)),
+        interaction_ids=(),
+        input_components=(),
+        parameter_count=0,
+        value_parameter_count=0,
+        momentum_parameter_count=0,
+        model_parameter_count=0,
+        real_valued_inputs=(),
+        expression_ready=True,
+        blockers=(),
+        first_output_previews=(),
+        selector_output_partitions=selector_partitions,
+        output_expressions=tuple(outputs),
+    )
+
+
+def test_output_chunk_ranges_are_greedy_slot_aligned() -> None:
+    stage = _chunk_test_stage(
+        (4, 6, 4, 3, 7),
+        selector_partitions=((0, 14), (14, 24)),
+    )
+
+    assert _output_chunk_ranges(stage, chunk_size=8) == (
+        (0, 4),
+        (4, 10),
+        (10, 14),
+        (14, 17),
+        (17, 24),
+    )
+
+
+def test_output_chunk_range_keeps_oversized_slot_indivisible() -> None:
+    stage = _chunk_test_stage(
+        (10, 4),
+        selector_partitions=((0, 14),),
+    )
+
+    assert _output_chunk_ranges(stage, chunk_size=8) == ((0, 10), (10, 14))
+
+
+def test_residual_stage_maps_slot_aligned_chunks_to_original_outputs() -> None:
+    stage = _chunk_test_stage(
+        (2, 4, 2, 6),
+        selector_partitions=((0, 14),),
+    )
+    ranges = _output_chunk_ranges(stage, chunk_size=8)
+
+    residual, residual_chunks, original_outputs = _residual_stage(
+        stage,
+        dag=SimpleNamespace(interactions=()),
+        owned_current_ids={2, 4},
+        original_chunk_ranges=ranges,
+    )
+
+    assert ranges == ((0, 8), (8, 14))
+    assert residual_chunks == (0,)
+    assert original_outputs == (0, 1, 6, 7)
+    assert residual.selector_output_partitions == ((0, 4),)
+    assert [
+        (slot.current_id, slot.output_start, slot.output_stop)
+        for slot in residual.output_slots
+    ] == [(1, 0, 2), (3, 2, 4)]

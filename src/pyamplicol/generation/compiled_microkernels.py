@@ -2088,23 +2088,63 @@ def _output_chunk_ranges(
     if stage.output_length < 1:
         raise ValueError("compiled stage cannot have zero original outputs")
     partitions = stage.selector_output_partitions or ((0, stage.output_length),)
+    slots = tuple(
+        sorted(
+            stage.output_slots,
+            key=lambda slot: (slot.output_start, slot.output_stop),
+        )
+    )
+    slot_index = 0
     ranges: list[tuple[int, int]] = []
     expected = 0
     for start, stop in partitions:
         if start != expected or stop <= start or stop > stage.output_length:
             raise ValueError("compiled stage selector partitions are malformed")
         expected = stop
+
+        partition_slots: list[GenericStageOutputSlot] = []
+        cursor = start
+        while slot_index < len(slots) and slots[slot_index].output_start < stop:
+            slot = slots[slot_index]
+            if slot.output_start != cursor or slot.output_stop <= slot.output_start:
+                raise ValueError(
+                    "compiled output slots must be contiguous and non-overlapping"
+                )
+            if slot.output_stop > stop:
+                raise ValueError("compiled output slot crosses a selector partition")
+            partition_slots.append(slot)
+            cursor = slot.output_stop
+            slot_index += 1
+        if cursor != stop:
+            raise ValueError(
+                "compiled output slots must cover every selector partition"
+            )
+
         if chunk_size is None:
             ranges.append((start, stop))
-        else:
-            if chunk_size < 1:
-                raise ValueError("compiled stage chunk size must be positive")
-            ranges.extend(
-                (chunk_start, min(chunk_start + chunk_size, stop))
-                for chunk_start in range(start, stop, chunk_size)
-            )
+            continue
+        if chunk_size < 1:
+            raise ValueError("compiled stage chunk size must be positive")
+
+        # A residual evaluator leaf must map back to complete value slots.
+        # Fixed-width boundaries can bisect a multi-component current, so grow
+        # each chunk greedily over whole slots instead.  An individual slot
+        # wider than the target remains one oversized, indivisible chunk.
+        chunk_start = start
+        chunk_stop = start
+        for slot in partition_slots:
+            if (
+                chunk_stop > chunk_start
+                and slot.output_stop - chunk_start > chunk_size
+            ):
+                ranges.append((chunk_start, chunk_stop))
+                chunk_start = slot.output_start
+            chunk_stop = slot.output_stop
+        ranges.append((chunk_start, chunk_stop))
     if expected != stage.output_length:
         raise ValueError("compiled stage selector partitions are incomplete")
+    if slot_index != len(slots):
+        raise ValueError("compiled output slots escape selector partitions")
     return tuple(ranges)
 
 
