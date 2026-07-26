@@ -22,6 +22,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.machinery import EXTENSION_SUFFIXES
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -146,10 +147,12 @@ _LOADED_ORIGIN_OBSERVATION_FIELDS = frozenset(
     }
 )
 _ARENA_CAPABILITY = {
-    ExecutionMode.COMPILED: "compiled-plane-arena-v1",
+    ExecutionMode.COMPILED: "rusticol.compiled.plane-arena.v2",
     ExecutionMode.EAGER: "eager-direct-arena-v1",
     ExecutionMode.RECURRENCE: ("rusticol.recurrence-direct-arena.complex-f64.v1"),
 }
+_COMPILED_STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
+_COMPILED_EMPTY_RESIDUAL_KIND = "compiled-stage-empty-residual"
 _COMPILED_DIRECT_ABI = "symjit-direct-application-storage-v1"
 _NATIVE_COMPILED_DIRECT_ABI = "pyamplicol-native-compiled-direct-application-v1"
 _SYMJIT_APPLICATION_ABI = "symjit-application-storage-v3"
@@ -181,6 +184,8 @@ _REPORT_PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _PUBLICATION_MEMBER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _PORTABLE_ARTIFACT_ROOT = "${PYAMPLICOL_REPORT_ARTIFACT_ROOT}"
 _PUBLICATION_LINEAGE_KIND = "pyamplicol-report-publication-lineage-v1"
+
+
 class FinalAuditError(RuntimeError):
     """The final report evidence does not satisfy its publication contract."""
 
@@ -805,9 +810,7 @@ def _audit_direct_agreements(
                 str(raw_record.get("baseline_cell_id")),
             )
             if key in records_by_key:
-                errors.append(
-                    f"{cell.cell_id}: duplicate direct agreement {key!r}"
-                )
+                errors.append(f"{cell.cell_id}: duplicate direct agreement {key!r}")
             records_by_key[key] = raw_record
         expected_keys = {(edge.kind, edge.baseline.cell_id) for edge in expected}
         if set(records_by_key) != expected_keys:
@@ -818,10 +821,7 @@ def _audit_direct_agreements(
             )
             continue
         for edge in expected:
-            context = (
-                f"{cell.cell_id}.validation.{DIRECT_AGREEMENT_FIELD}"
-                f"[{edge.kind}]"
-            )
+            context = f"{cell.cell_id}.validation.{DIRECT_AGREEMENT_FIELD}[{edge.kind}]"
             record = records_by_key[(edge.kind, edge.baseline.cell_id)]
             expected_fields = {
                 "abi",
@@ -1494,9 +1494,7 @@ def _profile_publication_lineage(
         "publication_revision": identity.publication_revision,
         "publication_tree": identity.publication_tree,
         "report_profile": profile,
-        "relationship": (
-            "same-commit" if same_revision else "report-only-descendant"
-        ),
+        "relationship": ("same-commit" if same_revision else "report-only-descendant"),
         "worktree_clean": True,
         "changed_path_count": len(changes),
         "changed_paths": changes,
@@ -1948,12 +1946,17 @@ def _audit_runtime_identity(
         )
         if (
             direct_identity.get("kind")
-            != "authenticated-compiled-plane-arena-direct-codegen-v1"
+            != "authenticated-compiled-stage-plan-direct-codegen-v2"
+            or direct_identity.get("plan_abi") != _COMPILED_STAGE_PLAN_ABI
             or direct_identity.get("optimization_level") != 3
             or direct_identity.get("source_optimization_level")
             != cell.measurement.jit_optimization_level
-            or type(direct_identity.get("leaf_count")) is not int
-            or int(direct_identity["leaf_count"]) <= 0
+            or type(direct_identity.get("plan_count")) is not int
+            or int(direct_identity["plan_count"]) <= 0
+            or type(direct_identity.get("table_kernel_count")) is not int
+            or int(direct_identity["table_kernel_count"]) < 0
+            or type(direct_identity.get("schedule_entry_count")) is not int
+            or int(direct_identity["schedule_entry_count"]) <= 0
             or not isinstance(direct_identity.get("execution_manifest_path"), str)
             or not isinstance(direct_identity.get("execution_manifest_sha256"), str)
             or _SHA256_RE.fullmatch(
@@ -2047,7 +2050,8 @@ def _audit_runtime_identity(
         direct_checks = {
             "execution_manifest_path": artifact.execution_manifest_path,
             "execution_manifest_sha256": artifact.execution_manifest_sha256,
-            "leaf_count": artifact.direct_leaf_count,
+            "plan_count": artifact.arena_record_count,
+            "schedule_entry_count": artifact.direct_leaf_count,
         }
         mismatches.extend(
             f"direct_codegen_identity.{field}"
@@ -2276,9 +2280,7 @@ def _audit_unavailable_execution_timing(
         "execution_seconds_per_point": None,
         "provenance": {
             "execution_timing": timing,
-            "arena_profile_evidence": provenance.get(
-                "arena_profile_evidence"
-            ),
+            "arena_profile_evidence": provenance.get("arena_profile_evidence"),
         },
     }
     if (
@@ -2632,6 +2634,320 @@ def _audit_source_evaluator(
     return 1
 
 
+def _nonnegative_int(value: object, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FinalAuditError(f"{context} must be a non-negative integer")
+    return value
+
+
+def _bounded_index(value: object, stop: int, context: str) -> int:
+    result = _nonnegative_int(value, context)
+    if result >= stop:
+        raise FinalAuditError(f"{context} is out of bounds")
+    return result
+
+
+def _strictly_increasing_ints(value: object, context: str) -> tuple[int, ...]:
+    result = tuple(
+        _nonnegative_int(item, f"{context}[{index}]")
+        for index, item in enumerate(_sequence(value, context))
+    )
+    if any(left >= right for left, right in pairwise(result)):
+        raise FinalAuditError(f"{context} must be strictly increasing")
+    return result
+
+
+def _audit_payload_reference_shape(value: object, context: str) -> int:
+    payload = _mapping(value, context)
+    _canonical_relative_path(payload.get("path"), context)
+    size = _nonnegative_int(payload.get("size_bytes"), f"{context}.size_bytes")
+    if size == 0:
+        raise FinalAuditError(f"{context} must not be empty")
+    return size
+
+
+def _audit_compiled_table_kernels(
+    raw_kernels: Sequence[object],
+    plan: Mapping[str, object],
+    cell: CellSpec,
+    *,
+    context: str,
+) -> tuple[tuple[str, int, int], ...]:
+    if len(raw_kernels) > 8:
+        raise FinalAuditError(f"{context}.table_kernels exceeds the slice bound")
+    if raw_kernels and (
+        cell.measurement.backend != "jit"
+        or cell.measurement.jit_optimization_level != 3
+    ):
+        raise FinalAuditError(
+            f"{context}.table_kernels are only valid for compiled JIT O3"
+        )
+    expected_plan_fields = {
+        "table_source_application_abi": _SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": _EAGER_DIRECT_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": _EAGER_DIRECT_BINDING_ABI,
+    }
+    if raw_kernels:
+        mismatches = [
+            field
+            for field, expected in expected_plan_fields.items()
+            if plan.get(field) != expected
+        ]
+        if mismatches:
+            raise FinalAuditError(
+                f"{context} has incompatible DirectTable ABIs: " + ", ".join(mismatches)
+            )
+    shapes: list[tuple[str, int, int]] = []
+    signatures: set[tuple[str, str]] = set()
+    for index, raw_kernel in enumerate(raw_kernels):
+        kernel_context = f"{context}.table_kernels[{index}]"
+        kernel = _mapping(raw_kernel, kernel_context)
+        if kernel.get("table_kernel_id") != index:
+            raise FinalAuditError(f"{kernel_context} has a non-dense kernel ID")
+        role = kernel.get("role")
+        if role not in {"contribution", "finalizer"}:
+            raise FinalAuditError(f"{kernel_context} has an invalid role")
+        signature = kernel.get("canonical_signature")
+        if not isinstance(signature, str) or not signature:
+            raise FinalAuditError(f"{kernel_context} has no canonical motif signature")
+        identity = (role, signature)
+        if identity in signatures:
+            raise FinalAuditError(f"{kernel_context} duplicates a motif identity")
+        signatures.add(identity)
+        if role == "contribution" and (
+            isinstance(kernel.get("prepared_kernel_id"), bool)
+            or not isinstance(kernel.get("prepared_kernel_id"), int)
+            or int(kernel["prepared_kernel_id"]) < 0
+        ):
+            raise FinalAuditError(
+                f"{kernel_context} has no prepared contribution kernel"
+            )
+        input_count = _nonnegative_int(
+            kernel.get("input_complex_count"),
+            f"{kernel_context}.input_complex_count",
+        )
+        output_count = _nonnegative_int(
+            kernel.get("output_complex_count"),
+            f"{kernel_context}.output_complex_count",
+        )
+        if not 1 <= input_count <= 16 or not 1 <= output_count <= 4:
+            raise FinalAuditError(f"{kernel_context} exceeds its bounded shape")
+        if (
+            kernel.get("source_application_abi") != _SYMJIT_APPLICATION_ABI
+            or kernel.get("descriptor_abi") != _EAGER_DIRECT_DESCRIPTOR_ABI
+            or kernel.get("binding_abi") != _EAGER_DIRECT_BINDING_ABI
+            or kernel.get("scalar_input_count") != 0
+            or kernel.get("optimization_level") != 3
+        ):
+            raise FinalAuditError(
+                f"{kernel_context} has incompatible DirectTable metadata"
+            )
+        if (
+            len(
+                _sequence(
+                    kernel.get("input_contracts"),
+                    f"{kernel_context}.input_contracts",
+                )
+            )
+            != input_count
+            or len(
+                _sequence(
+                    kernel.get("output_layout"),
+                    f"{kernel_context}.output_layout",
+                )
+            )
+            != output_count
+        ):
+            raise FinalAuditError(f"{kernel_context} I/O metadata has the wrong shape")
+        source_bytes = _audit_payload_reference_shape(
+            kernel.get("source_application"),
+            f"{kernel_context}.source_application",
+        )
+        descriptor_bytes = _audit_payload_reference_shape(
+            kernel.get("descriptor"),
+            f"{kernel_context}.descriptor",
+        )
+        if source_bytes > 64 * 1024 or descriptor_bytes > 16 * 1024:
+            raise FinalAuditError(f"{kernel_context} exceeds its payload bound")
+        shapes.append((role, input_count, output_count))
+    return tuple(shapes)
+
+
+def _audit_compiled_row_table(
+    value: object,
+    expected_row_size: int,
+    context: str,
+) -> int:
+    rows = _mapping(value, context)
+    _canonical_relative_path(rows.get("path"), context)
+    count = _nonnegative_int(rows.get("count"), f"{context}.count")
+    row_size = _nonnegative_int(rows.get("row_size"), f"{context}.row_size")
+    size = _nonnegative_int(rows.get("size_bytes"), f"{context}.size_bytes")
+    if count == 0 or row_size != expected_row_size or size != count * row_size:
+        raise FinalAuditError(f"{context} has an inconsistent bounded shape")
+    return count
+
+
+def _audit_compiled_table_calls(
+    raw_calls: Sequence[object],
+    kernel_shapes: Sequence[tuple[str, int, int]],
+    partition_ids: frozenset[int],
+    *,
+    expected_role: str,
+    context: str,
+) -> frozenset[int]:
+    all_owned: set[int] = set()
+    for index, raw_call in enumerate(raw_calls):
+        call_context = f"{context}[{index}]"
+        call = _mapping(raw_call, call_context)
+        kernel_id = _bounded_index(
+            call.get("table_kernel_id"),
+            len(kernel_shapes),
+            f"{call_context}.table_kernel_id",
+        )
+        role, input_count, output_count = kernel_shapes[kernel_id]
+        if role != expected_role:
+            raise FinalAuditError(f"{call_context} references the wrong kernel role")
+        owned = _strictly_increasing_ints(
+            call.get("owned_current_ids"),
+            f"{call_context}.owned_current_ids",
+        )
+        if not owned:
+            raise FinalAuditError(f"{call_context} has empty current ownership")
+        all_owned.update(owned)
+        _strictly_increasing_ints(
+            call.get("dependency_current_ids"),
+            f"{call_context}.dependency_current_ids",
+        )
+        _strictly_increasing_ints(
+            call.get("dependency_current_components"),
+            f"{call_context}.dependency_current_components",
+        )
+        selectors = _strictly_increasing_ints(
+            call.get("selector_partition_ids"),
+            f"{call_context}.selector_partition_ids",
+        )
+        if len(selectors) != 1 or selectors[0] not in partition_ids:
+            raise FinalAuditError(f"{call_context} has an invalid selector partition")
+        _audit_compiled_row_table(
+            call.get("invocation_rows"),
+            (input_count * 2 + 2) * 4,
+            f"{call_context}.invocation_rows",
+        )
+        _audit_compiled_row_table(
+            call.get("attachment_rows"),
+            (output_count * 2 + 2) * 4,
+            f"{call_context}.attachment_rows",
+        )
+    return frozenset(all_owned)
+
+
+def _audit_dense_catalog(
+    raw_entries: Sequence[object],
+    *,
+    id_field: str,
+    context: str,
+) -> None:
+    for index, raw_entry in enumerate(raw_entries):
+        entry = _mapping(raw_entry, f"{context}[{index}]")
+        if entry.get(id_field) != index:
+            raise FinalAuditError(f"{context} is not densely indexed")
+
+
+def _audit_compiled_selector_partitions(
+    raw_partitions: Sequence[object],
+    execution_order: Sequence[object],
+    *,
+    context: str,
+) -> frozenset[int]:
+    chunks_in_order = {
+        _nonnegative_int(
+            _mapping(item, f"{context}.execution_order[{index}]").get(
+                "original_chunk_index"
+            ),
+            f"{context}.execution_order[{index}].original_chunk_index",
+        )
+        for index, item in enumerate(execution_order)
+    }
+    covered_chunks: set[int] = set()
+    partition_ids: set[int] = set()
+    for index, raw_partition in enumerate(raw_partitions):
+        partition_context = f"{context}.selector_partitions[{index}]"
+        partition = _mapping(raw_partition, partition_context)
+        if partition.get("partition_id") != index:
+            raise FinalAuditError(f"{partition_context} has a non-dense ID")
+        _strictly_increasing_ints(
+            partition.get("helicity_selector_domain_ids"),
+            f"{partition_context}.helicity_selector_domain_ids",
+        )
+        _strictly_increasing_ints(
+            partition.get("color_selector_domain_ids"),
+            f"{partition_context}.color_selector_domain_ids",
+        )
+        chunks = _strictly_increasing_ints(
+            partition.get("original_chunk_indices"),
+            f"{partition_context}.original_chunk_indices",
+        )
+        if not chunks or covered_chunks.intersection(chunks):
+            raise FinalAuditError(
+                f"{partition_context} is empty or overlaps another partition"
+            )
+        if not set(chunks).issubset(chunks_in_order):
+            raise FinalAuditError(
+                f"{partition_context} references an absent execution chunk"
+            )
+        covered_chunks.update(chunks)
+        partition_ids.add(index)
+    if covered_chunks != chunks_in_order:
+        raise FinalAuditError(
+            f"{context}.selector_partitions do not cover the execution order"
+        )
+    return frozenset(partition_ids)
+
+
+def _audit_compiled_execution_order(
+    raw_order: Sequence[object],
+    expected_units: Mapping[str, int],
+    residual_chunks: Mapping[int, int],
+    *,
+    context: str,
+) -> None:
+    if len(raw_order) != sum(expected_units.values()):
+        raise FinalAuditError(f"{context} does not cover every schedule entry")
+    seen = {kind: set() for kind in expected_units}
+    chunks: list[int] = []
+    for position, raw_unit in enumerate(raw_order):
+        unit_context = f"{context}[{position}]"
+        unit = _mapping(raw_unit, unit_context)
+        kind = unit.get("kind")
+        if kind not in expected_units:
+            raise FinalAuditError(f"{unit_context} has an invalid kind")
+        index = _bounded_index(
+            unit.get("index"),
+            expected_units[kind],
+            f"{unit_context}.index",
+        )
+        if index in seen[kind]:
+            raise FinalAuditError(f"{unit_context} duplicates a schedule entry")
+        seen[kind].add(index)
+        chunk = _nonnegative_int(
+            unit.get("original_chunk_index"),
+            f"{unit_context}.original_chunk_index",
+        )
+        chunks.append(chunk)
+        if kind == "residual-leaf" and residual_chunks.get(index) != chunk:
+            raise FinalAuditError(
+                f"{unit_context} lost its residual original-chunk binding"
+            )
+    if any(left > right for left, right in pairwise(chunks)):
+        raise FinalAuditError(f"{context} reverses original contribution order")
+    unique_chunks = sorted(set(chunks))
+    if unique_chunks != list(range(len(unique_chunks))):
+        raise FinalAuditError(f"{context} has non-dense original chunks")
+    if any(len(seen[kind]) != count for kind, count in expected_units.items()):
+        raise FinalAuditError(f"{context} does not cover every schedule entry")
+
+
 def _audit_compiled_execution(
     execution: Mapping[str, object],
     cell: CellSpec,
@@ -2642,8 +2958,8 @@ def _audit_compiled_execution(
     lanes = _walk_compiled_lanes(execution)
     if not lanes:
         raise FinalAuditError("compiled execution contains no executable lanes")
-    plane_count = 0
-    direct_leaf_count = 0
+    plan_count = 0
+    schedule_entry_count = 0
     for lane_path, compiled in lanes:
         stages = _mapping(
             compiled.get("stage_evaluators"),
@@ -2665,15 +2981,14 @@ def _audit_compiled_execution(
                 f"{lane_path}.stage[{index}].compiled_plane_arena",
             )
             expected = {
-                "schema_version": 1,
-                "kind": "compiled-plane-arena-stage",
-                "application_abi": expected_application,
-                "source_application_abi": expected_source,
+                "schema_version": 2,
+                "kind": "compiled-stage-plan",
+                "plan_abi": _COMPILED_STAGE_PLAN_ABI,
+                "residual_application_abi": expected_application,
+                "table_source_application_abi": _SYMJIT_APPLICATION_ABI,
+                "direct_table_descriptor_abi": _EAGER_DIRECT_DESCRIPTOR_ABI,
+                "direct_table_binding_abi": _EAGER_DIRECT_BINDING_ABI,
                 "element_layout": "split-complex-component-major",
-                "output_operation": "overwrite",
-                "output_factor": "identity",
-                "input_output_aliasing": "forbidden",
-                "output_output_aliasing": "forbidden",
             }
             mismatches = [
                 field for field, value in expected.items() if arena.get(field) != value
@@ -2685,46 +3000,214 @@ def _audit_compiled_execution(
                 arena.get("output_bindings"),
                 f"{lane_path}.arena.output_bindings",
             )
-            leaves = _sequence(arena.get("leaves"), f"{lane_path}.arena.leaves")
-            if len(inputs) != stage.get("parameter_count"):
+            residual_leaves = _sequence(
+                arena.get("residual_leaves"),
+                f"{lane_path}.arena.residual_leaves",
+            )
+            table_kernels = _sequence(
+                arena.get("table_kernels"),
+                f"{lane_path}.arena.table_kernels",
+            )
+            table_calls = _sequence(
+                arena.get("table_calls"),
+                f"{lane_path}.arena.table_calls",
+            )
+            finalizer_calls = _sequence(
+                arena.get("finalizer_calls"),
+                f"{lane_path}.arena.finalizer_calls",
+            )
+            execution_order = _sequence(
+                arena.get("execution_order"),
+                f"{lane_path}.arena.execution_order",
+            )
+            selector_partitions = _sequence(
+                arena.get("selector_partitions"),
+                f"{lane_path}.arena.selector_partitions",
+            )
+            plane_catalog = _sequence(
+                arena.get("plane_catalog"),
+                f"{lane_path}.arena.plane_catalog",
+            )
+            factor_catalog = _sequence(
+                arena.get("factor_catalog"),
+                f"{lane_path}.arena.factor_catalog",
+            )
+
+            parameter_count = _nonnegative_int(
+                stage.get("parameter_count"),
+                f"{lane_path}.stage[{index}].parameter_count",
+            )
+            output_length = _nonnegative_int(
+                stage.get("output_length"),
+                f"{lane_path}.stage[{index}].output_length",
+            )
+            if len(inputs) not in {0, parameter_count}:
                 mismatches.append("input_bindings")
-            if len(outputs) != stage.get("output_length"):
+            if len(outputs) > output_length:
                 mismatches.append("output_bindings")
-            if not leaves:
-                mismatches.append("leaves")
-            source_leaf_count = _audit_source_evaluator(
+            for input_index, raw_input in enumerate(inputs):
+                input_binding = _mapping(
+                    raw_input,
+                    f"{lane_path}.arena.input_bindings[{input_index}]",
+                )
+                if input_binding.get("parameter_index") != input_index:
+                    mismatches.append("input_bindings.parameter_index")
+
+            # The outer evaluator is retained as the complete exact/reference
+            # implementation even when the f64 execution plan contains table
+            # islands.  It must remain a valid source evaluator, but it is not
+            # part of the warmed v2 schedule count.
+            _audit_source_evaluator(
                 stage.get("evaluator"),
                 cell,
                 context=f"{lane_path}.stage[{index}].evaluator",
             )
-            if source_leaf_count != len(leaves):
-                mismatches.append("source_evaluator_leaf_count")
-            for leaf in leaves:
-                leaf_record = _mapping(leaf, f"{lane_path}.arena.leaf")
-                if leaf_record.get("source_application_abi") != expected_source:
-                    mismatches.append("leaf.source_application_abi")
+
+            residual = _mapping(
+                arena.get("residual_evaluator"),
+                f"{lane_path}.arena.residual_evaluator",
+            )
+            if residual.get("kind") == _COMPILED_EMPTY_RESIDUAL_KIND:
+                if residual.get("input_len") != 0 or residual.get("output_len") != 0:
+                    mismatches.append("residual_evaluator")
+                if residual_leaves or outputs:
+                    mismatches.append("residual_empty_shape")
+            else:
+                residual_source_count = _audit_source_evaluator(
+                    residual,
+                    cell,
+                    context=f"{lane_path}.arena.residual_evaluator",
+                )
+                if residual_source_count != len(residual_leaves):
+                    mismatches.append("residual_source_evaluator_leaf_count")
+
+            original_output_indices: set[int] = set()
+            residual_output_indices: set[int] = set()
+            for output_index, raw_output in enumerate(outputs):
+                output = _mapping(
+                    raw_output,
+                    f"{lane_path}.arena.output_bindings[{output_index}]",
+                )
+                original_output = _bounded_index(
+                    output.get("original_output_index"),
+                    output_length,
+                    f"{lane_path}.arena.output_bindings[{output_index}]"
+                    ".original_output_index",
+                )
+                if original_output in original_output_indices:
+                    mismatches.append("output_bindings.original_output_index")
+                original_output_indices.add(original_output)
+                residual_output = _bounded_index(
+                    output.get("output_index"),
+                    len(outputs),
+                    f"{lane_path}.arena.output_bindings[{output_index}].output_index",
+                )
+                if residual_output in residual_output_indices:
+                    mismatches.append("output_bindings.output_index")
+                residual_output_indices.add(residual_output)
+
+            residual_chunks: dict[int, int] = {}
+            seen_residual_chunks: set[int] = set()
+            for leaf_index, raw_leaf in enumerate(residual_leaves):
+                leaf = _mapping(
+                    raw_leaf,
+                    f"{lane_path}.arena.residual_leaves[{leaf_index}]",
+                )
+                if leaf.get("residual_leaf_index") != leaf_index:
+                    mismatches.append("residual_leaves.residual_leaf_index")
+                original_chunk = _nonnegative_int(
+                    leaf.get("original_chunk_index"),
+                    f"{lane_path}.arena.residual_leaves[{leaf_index}]"
+                    ".original_chunk_index",
+                )
+                if original_chunk in seen_residual_chunks:
+                    mismatches.append("residual_leaves.original_chunk_index")
+                seen_residual_chunks.add(original_chunk)
+                residual_chunks[leaf_index] = original_chunk
+                if leaf.get("source_application_abi") != expected_source:
+                    mismatches.append("residual_leaves.source_application_abi")
                 if (
                     cell.measurement.backend == "jit"
-                    and leaf_record.get("optimization_level")
+                    and leaf.get("optimization_level")
                     != cell.measurement.jit_optimization_level
                 ):
-                    mismatches.append("leaf.optimization_level")
-                if leaf_record.get("direct_codegen_optimization_level") != 3:
-                    mismatches.append("leaf.direct_codegen_optimization_level")
+                    mismatches.append("residual_leaves.optimization_level")
+                if leaf.get("direct_codegen_optimization_level") != 3:
+                    mismatches.append(
+                        "residual_leaves.direct_codegen_optimization_level"
+                    )
+
+            kernel_shapes = _audit_compiled_table_kernels(
+                table_kernels,
+                arena,
+                cell,
+                context=f"{lane_path}.arena",
+            )
+            partition_ids = _audit_compiled_selector_partitions(
+                selector_partitions,
+                execution_order,
+                context=f"{lane_path}.arena",
+            )
+            table_owned = _audit_compiled_table_calls(
+                table_calls,
+                kernel_shapes,
+                partition_ids,
+                expected_role="contribution",
+                context=f"{lane_path}.arena.table_calls",
+            )
+            finalizer_owned = _audit_compiled_table_calls(
+                finalizer_calls,
+                kernel_shapes,
+                partition_ids,
+                expected_role="finalizer",
+                context=f"{lane_path}.arena.finalizer_calls",
+            )
+            if table_owned != finalizer_owned:
+                mismatches.append("table/finalizer ownership")
+
+            has_tables = bool(table_calls or finalizer_calls)
+            if has_tables != bool(table_kernels):
+                mismatches.append("table_kernels")
+            if has_tables != bool(plane_catalog):
+                mismatches.append("plane_catalog")
+            if has_tables != bool(factor_catalog):
+                mismatches.append("factor_catalog")
+            _audit_dense_catalog(
+                plane_catalog,
+                id_field="plane_id",
+                context=f"{lane_path}.arena.plane_catalog",
+            )
+            _audit_dense_catalog(
+                factor_catalog,
+                id_field="factor_id",
+                context=f"{lane_path}.arena.factor_catalog",
+            )
+
+            expected_units = {
+                "residual-leaf": len(residual_leaves),
+                "table-call": len(table_calls),
+                "finalizer-call": len(finalizer_calls),
+            }
+            _audit_compiled_execution_order(
+                execution_order,
+                expected_units,
+                residual_chunks,
+                context=f"{lane_path}.arena.execution_order",
+            )
             if mismatches:
                 raise FinalAuditError(
-                    f"{lane_path} has incompatible plane-Arena metadata: "
+                    f"{lane_path} has incompatible compiled stage-plan metadata: "
                     + ", ".join(sorted(set(mismatches)))
                 )
-            plane_count += 1
-            direct_leaf_count += len(leaves)
+            plan_count += 1
+            schedule_entry_count += len(execution_order)
         model_parameters = compiled.get("model_parameter_evaluator")
         if model_parameters is not None:
             _assert_model_parameter_not_direct(
                 model_parameters,
                 context=f"{lane_path}.model_parameter_evaluator",
             )
-    return plane_count, direct_leaf_count
+    return plan_count, schedule_entry_count
 
 
 def _assert_model_parameter_not_direct(
@@ -2735,7 +3218,7 @@ def _assert_model_parameter_not_direct(
     """Reject every compiled DirectApplication representation recursively."""
 
     if isinstance(value, Mapping):
-        if value.get("kind") == "compiled-plane-arena-stage":
+        if value.get("kind") == "compiled-stage-plan":
             raise FinalAuditError(
                 f"{context} model-parameter evaluator entered plane Arena"
             )
@@ -3804,9 +4287,7 @@ def _replayed_agreement_value(
     if replay_required:
         assert observation is not None
         if observation.lc_common_component is None:
-            raise FinalAuditError(
-                f"{cell.cell_id} replay has no LC common component"
-            )
+            raise FinalAuditError(f"{cell.cell_id} replay has no LC common component")
         return observation.lc_common_component
     return _audit_lc_common_component(
         cell,
@@ -3882,9 +4363,7 @@ def _audit_replayed_direct_agreements(
                     f"{edge.baseline.cell_id}"
                 )
         except Exception as error:
-            errors.append(
-                f"{edge.candidate.cell_id}: {error}"
-            )
+            errors.append(f"{edge.candidate.cell_id}: {error}")
     if errors:
         rendered = "\n".join(f"- {message}" for message in errors[:50])
         raise FinalAuditError(
@@ -3972,9 +4451,7 @@ def _audit_final_report_locked(
         raise FinalAuditError("max_n_final must be positive")
     root = repo_root.expanduser().resolve(strict=False)
     report = service or ReportService(ReportPaths.from_repo(root), catalog=catalog)
-    using_production_source_auditor = (
-        source_auditor is _require_report_source_checkout
-    )
+    using_production_source_auditor = source_auditor is _require_report_source_checkout
     if using_production_source_auditor:
         report_profile = _active_report_profile(root, report)
         try:
@@ -4010,11 +4487,7 @@ def _audit_final_report_locked(
     policy_profile = report_profile or (
         MACBOOK_M3_PROFILE
         if active_policy is MACBOOK_M3_POLICY
-        else (
-            X86_EPYC_PROFILE
-            if active_policy is X86_EPYC_POLICY
-            else ""
-        )
+        else (X86_EPYC_PROFILE if active_policy is X86_EPYC_POLICY else "")
     )
     publication_lineage = _validated_publication_lineage(
         raw_publication_lineage,
@@ -4111,9 +4584,7 @@ def _audit_final_report_locked(
                 expected_source_tree=expected_source_tree,
             )
             if published_state is not current_state:
-                raise FinalAuditError(
-                    "published and current policy states differ"
-                )
+                raise FinalAuditError("published and current policy states differ")
         except (CampaignPolicyError, FinalAuditError) as error:
             errors.append(f"{cell.cell_id}: {error}")
             continue
@@ -4162,9 +4633,7 @@ def _audit_final_report_locked(
             for source in resource_sources.get(resource_lane(cell), ())
             if source.n_final < cell.n_final
         )
-        frontier_source = (
-            lower_resource_sources[0] if lower_resource_sources else None
-        )
+        frontier_source = lower_resource_sources[0] if lower_resource_sources else None
         state = measurement_states[cell.cell_id]
         if frontier_source is not None:
             expected_frontier = resource_frontier_reference(
@@ -4247,9 +4716,7 @@ def _audit_final_report_locked(
                 "current required terminal dependencies"
             )
     if dependency_errors:
-        rendered = "\n".join(
-            f"- {message}" for message in dependency_errors[:50]
-        )
+        rendered = "\n".join(f"- {message}" for message in dependency_errors[:50])
         raise FinalAuditError(
             "final report policy-dependency audit failed "
             f"({len(dependency_errors)}):\n{rendered}"
@@ -4504,8 +4971,7 @@ def _audit_final_report_locked(
             and max_n_final == 4
             and len(cells) == _EXPECTED_N4_CELL_COUNT
             and active_policy is STRICT_POLICY
-            and replayed_direct_agreement_counts
-            != _EXPECTED_N4_DIRECT_REPLAY_COUNTS
+            and replayed_direct_agreement_counts != _EXPECTED_N4_DIRECT_REPLAY_COUNTS
         ):
             raise FinalAuditError(
                 "canonical n<=4 direct-agreement replay categories differ: "
@@ -4517,8 +4983,7 @@ def _audit_final_report_locked(
             and max_n_final == _FULL_CATALOG_MAX_N_FINAL
             and len(cells) == _EXPECTED_FULL_CATALOG_CELL_COUNT
             and active_policy is STRICT_POLICY
-            and replayed_direct_agreement_counts
-            != _EXPECTED_FULL_DIRECT_REPLAY_COUNTS
+            and replayed_direct_agreement_counts != _EXPECTED_FULL_DIRECT_REPLAY_COUNTS
         ):
             raise FinalAuditError(
                 "canonical full-catalog direct-agreement replay categories "
@@ -4594,8 +5059,7 @@ def _audit_final_report_locked(
     )
     if (
         canonical_publication_scope
-        and len(catalog_direct_edges)
-        != _EXPECTED_FULL_DIRECT_AGREEMENT_COUNT
+        and len(catalog_direct_edges) != _EXPECTED_FULL_DIRECT_AGREEMENT_COUNT
     ):
         raise FinalAuditError(
             "canonical publication direct-agreement catalog count differs: "
@@ -4748,9 +5212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _ensure_exact_cli_python(arguments.repo_root, raw_arguments)
         if arguments.report_profile is None:
-            raise FinalAuditError(
-                "final-audit requires --report-profile"
-            )
+            raise FinalAuditError("final-audit requires --report-profile")
         service = ReportService(
             ReportPaths.from_repo(
                 arguments.repo_root,

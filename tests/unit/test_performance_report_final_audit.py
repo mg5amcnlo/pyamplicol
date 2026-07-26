@@ -131,9 +131,7 @@ def test_final_pdf_audit_rejects_successful_latex_with_overfull_box(
         "bad\n",
         encoding="ascii",
     )
-    (service.paths.docs_dir / "pyAmpliCol.pdf").write_bytes(
-        b"%PDF-1.4\n%%EOF\n"
-    )
+    (service.paths.docs_dir / "pyAmpliCol.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
     executable = _fake_latexmk(
         tmp_path,
         "Overfull \\vbox (1.0pt too high)\n",
@@ -350,6 +348,7 @@ def _compiled_stage(
     *,
     optimization_level: int = 3,
     backend: str = "jit",
+    tableized: bool = False,
 ) -> dict[str, object]:
     source_application_abi = (
         "symjit-application-storage-v3"
@@ -373,30 +372,225 @@ def _compiled_stage(
             "runtime_capability": (f"symbolica.compiled-{backend}.complex-f64.v1"),
         }
     )
+    plan: dict[str, object] = {
+        "schema_version": 2,
+        "kind": "compiled-stage-plan",
+        "plan_abi": "pyamplicol-compiled-stage-plan-v2",
+        "residual_application_abi": application_abi,
+        "table_source_application_abi": "symjit-application-storage-v3",
+        "direct_table_descriptor_abi": "symjit-direct-table-descriptor-v1",
+        "direct_table_binding_abi": "symjit-direct-table-binding-v1",
+        "element_layout": "split-complex-component-major",
+        "residual_evaluator": evaluator,
+        "input_bindings": [{"parameter_index": 0}],
+        "output_bindings": [
+            {
+                "output_index": 0,
+                "original_output_index": 0,
+            }
+        ],
+        "residual_leaves": [
+            {
+                "residual_leaf_index": 0,
+                "original_chunk_index": 0,
+                "source_application_abi": source_application_abi,
+                "optimization_level": optimization_level,
+                "direct_codegen_optimization_level": 3,
+            }
+        ],
+        "scratch_current_component_count": 0,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [],
+        "table_calls": [],
+        "finalizer_calls": [],
+        "execution_order": [
+            {
+                "kind": "residual-leaf",
+                "index": 0,
+                "original_chunk_index": 0,
+            }
+        ],
+        "selector_partitions": [
+            {
+                "partition_id": 0,
+                "helicity_selector_domain_ids": [1],
+                "color_selector_domain_ids": [2],
+                "original_chunk_indices": [0],
+            }
+        ],
+        "diagnostics": {},
+    }
+    if tableized:
+        assert backend == "jit" and optimization_level == 3
+
+        def payload(path: str, size: int) -> dict[str, object]:
+            return {"path": path, "size_bytes": size, "sha256": "a" * 64}
+
+        def rows(path: str, count: int, row_size: int) -> dict[str, object]:
+            return {
+                **payload(path, count * row_size),
+                "count": count,
+                "row_size": row_size,
+            }
+
+        plan.update(
+            {
+                "residual_evaluator": {
+                    "kind": "compiled-stage-empty-residual",
+                    "input_len": 0,
+                    "output_len": 0,
+                    "required_runtime_capabilities": [],
+                },
+                "input_bindings": [],
+                "output_bindings": [],
+                "residual_leaves": [],
+                "scratch_current_component_count": 2,
+                "plane_catalog": [
+                    {
+                        "plane_id": 0,
+                        "storage": "zero",
+                        "component": 0,
+                        "part": "real",
+                        "current_id": None,
+                        "proven_real": True,
+                    }
+                ],
+                "factor_catalog": [
+                    {
+                        "factor_id": 0,
+                        "base": [1.0, 0.0],
+                        "model_parameter_index": None,
+                        "parameter_component": "none",
+                    }
+                ],
+                "table_kernels": [
+                    {
+                        "table_kernel_id": 0,
+                        "prepared_kernel_id": 3,
+                        "role": "contribution",
+                        "canonical_signature": "vertex:3",
+                        "source_application": payload(
+                            "compiled/table/source-0.symjit",
+                            32,
+                        ),
+                        "source_application_abi": "symjit-application-storage-v3",
+                        "descriptor": payload(
+                            "compiled/table/descriptor-0.bin",
+                            16,
+                        ),
+                        "descriptor_abi": "symjit-direct-table-descriptor-v1",
+                        "binding_abi": "symjit-direct-table-binding-v1",
+                        "input_complex_count": 1,
+                        "output_complex_count": 2,
+                        "scalar_input_count": 0,
+                        "optimization_level": 3,
+                        "input_contracts": [{}],
+                        "output_layout": ["a", "b"],
+                    },
+                    {
+                        "table_kernel_id": 1,
+                        "prepared_kernel_id": None,
+                        "role": "finalizer",
+                        "canonical_signature": "identity:2",
+                        "source_application": payload(
+                            "compiled/table/source-1.symjit",
+                            32,
+                        ),
+                        "source_application_abi": "symjit-application-storage-v3",
+                        "descriptor": payload(
+                            "compiled/table/descriptor-1.bin",
+                            16,
+                        ),
+                        "descriptor_abi": "symjit-direct-table-descriptor-v1",
+                        "binding_abi": "symjit-direct-table-binding-v1",
+                        "input_complex_count": 1,
+                        "output_complex_count": 2,
+                        "scalar_input_count": 0,
+                        "optimization_level": 3,
+                        "input_contracts": [{}],
+                        "output_layout": ["a", "b"],
+                    },
+                ],
+                "table_calls": [
+                    {
+                        "table_kernel_id": 0,
+                        "invocation_rows": rows(
+                            "compiled/table/invocations-0.bin",
+                            1,
+                            16,
+                        ),
+                        "attachment_rows": rows(
+                            "compiled/table/attachments-0.bin",
+                            1,
+                            24,
+                        ),
+                        "owned_current_ids": [7],
+                        "dependency_current_ids": [1, 2],
+                        "dependency_current_components": [0, 1],
+                        "selector_partition_ids": [0],
+                    }
+                ],
+                "finalizer_calls": [
+                    {
+                        "table_kernel_id": 1,
+                        "invocation_rows": rows(
+                            "compiled/table/invocations-1.bin",
+                            1,
+                            16,
+                        ),
+                        "attachment_rows": rows(
+                            "compiled/table/attachments-1.bin",
+                            1,
+                            24,
+                        ),
+                        "owned_current_ids": [7],
+                        "dependency_current_ids": [7],
+                        "dependency_current_components": [2, 3],
+                        "selector_partition_ids": [0],
+                    },
+                    {
+                        "table_kernel_id": 1,
+                        "invocation_rows": rows(
+                            "compiled/table/invocations-2.bin",
+                            1,
+                            16,
+                        ),
+                        "attachment_rows": rows(
+                            "compiled/table/attachments-2.bin",
+                            1,
+                            24,
+                        ),
+                        "owned_current_ids": [7],
+                        "dependency_current_ids": [7],
+                        "dependency_current_components": [2, 3],
+                        "selector_partition_ids": [0],
+                    },
+                ],
+                "execution_order": [
+                    {
+                        "kind": "table-call",
+                        "index": 0,
+                        "original_chunk_index": 0,
+                    },
+                    {
+                        "kind": "finalizer-call",
+                        "index": 0,
+                        "original_chunk_index": 0,
+                    },
+                    {
+                        "kind": "finalizer-call",
+                        "index": 1,
+                        "original_chunk_index": 0,
+                    },
+                ],
+            }
+        )
     return {
         "parameter_count": 1,
         "output_length": 1,
         "evaluator": evaluator,
-        "compiled_plane_arena": {
-            "schema_version": 1,
-            "kind": "compiled-plane-arena-stage",
-            "application_abi": application_abi,
-            "source_application_abi": source_application_abi,
-            "element_layout": "split-complex-component-major",
-            "output_operation": "overwrite",
-            "output_factor": "identity",
-            "input_output_aliasing": "forbidden",
-            "output_output_aliasing": "forbidden",
-            "input_bindings": [{"parameter_index": 0}],
-            "output_bindings": [{"output_index": 0}],
-            "leaves": [
-                {
-                    "source_application_abi": source_application_abi,
-                    "optimization_level": optimization_level,
-                    "direct_codegen_optimization_level": 3,
-                }
-            ],
-        },
+        "compiled_plane_arena": plan,
     }
 
 
@@ -405,7 +599,7 @@ def test_compiled_arena_audits_fused_stages_and_parameter_exclusion() -> None:
         "kind": "pyamplicol-runtime-execution",
         "compiled": {
             "stage_evaluators": {
-                "stages": [_compiled_stage()],
+                "stages": [_compiled_stage(tableized=True)],
                 "amplitude_stage": _compiled_stage(),
             },
             "model_parameter_evaluator": {
@@ -416,26 +610,38 @@ def test_compiled_arena_audits_fused_stages_and_parameter_exclusion() -> None:
     assert _audit_compiled_execution(
         execution,
         _cell(ExecutionMode.COMPILED),
-    ) == (2, 2)
-    jit_o1 = deepcopy(execution)
-    for stage in (
-        *jit_o1["compiled"]["stage_evaluators"]["stages"],  # type: ignore[index]
-        jit_o1["compiled"]["stage_evaluators"]["amplitude_stage"],  # type: ignore[index]
-    ):
-        stage["compiled_plane_arena"]["leaves"][0]["optimization_level"] = 1
-        stage["evaluator"]["optimization_level"] = 1
+    ) == (2, 4)
+    legacy = deepcopy(execution)
+    legacy_plan = legacy["compiled"]["stage_evaluators"]["stages"][0][  # type: ignore[index]
+        "compiled_plane_arena"
+    ]
+    legacy_plan["schema_version"] = 1
+    legacy_plan["kind"] = "compiled-plane-arena-stage"
+    legacy_plan.pop("plan_abi")
+    with pytest.raises(FinalAuditError, match="compiled stage-plan metadata"):
+        _audit_compiled_execution(legacy, _cell(ExecutionMode.COMPILED))
+
+    jit_o1 = {
+        "kind": "pyamplicol-runtime-execution",
+        "compiled": {
+            "stage_evaluators": {
+                "stages": [_compiled_stage(optimization_level=1)],
+                "amplitude_stage": _compiled_stage(optimization_level=1),
+            }
+        },
+    }
     assert _audit_compiled_execution(
         jit_o1,
         _cell(ExecutionMode.COMPILED, optimization_level=1),
     ) == (2, 2)
 
     invalid_direct_codegen = deepcopy(execution)
-    invalid_direct_codegen["compiled"]["stage_evaluators"]["stages"][0][  # type: ignore[index]
+    invalid_direct_codegen["compiled"]["stage_evaluators"]["amplitude_stage"][  # type: ignore[index]
         "compiled_plane_arena"
-    ]["leaves"][0]["direct_codegen_optimization_level"] = 2
+    ]["residual_leaves"][0]["direct_codegen_optimization_level"] = 2
     with pytest.raises(
         FinalAuditError,
-        match=r"leaf\.direct_codegen_optimization_level",
+        match=r"residual_leaves\.direct_codegen_optimization_level",
     ):
         _audit_compiled_execution(
             invalid_direct_codegen,
@@ -1687,10 +1893,7 @@ def _arena_profile_evidence(
         **{field: 0 for field in ZERO_ARENA_COUNTER_FIELDS},
         **{field: 0.0 for field in ZERO_ARENA_PHASE_TIME_FIELDS},
         **{field: [] for field in EMPTY_ARENA_PHASE_VECTOR_FIELDS},
-        **{
-            field: 0
-            for field in ZERO_COMPILED_BOUNDARY_COUNTER_FIELDS
-        },
+        **{field: 0 for field in ZERO_COMPILED_BOUNDARY_COUNTER_FIELDS},
     }
     if execution_mode is ExecutionMode.COMPILED:
         raw_profile.update(
@@ -1938,19 +2141,26 @@ def test_runtime_identity_audit_distinguishes_source_and_direct_codegen_levels(
         {
             "execution_mode": "compiled",
             "loaded_execution_mode": "compiled",
-            "required_arena_capability": "compiled-plane-arena-v1",
+            "required_arena_capability": "rusticol.compiled.plane-arena.v2",
             "expected_evaluator_abi": "symjit-direct-application-storage-v1",
             "expected_source_evaluator_abi": "symjit-application-storage-v3",
             "source_jit_optimization_level": 1,
             "direct_codegen_optimization_level": 3,
             "direct_codegen_identity": {
-                "kind": "authenticated-compiled-plane-arena-direct-codegen-v1",
+                "kind": "authenticated-compiled-stage-plan-direct-codegen-v2",
+                "plan_abi": "pyamplicol-compiled-stage-plan-v2",
                 "optimization_level": 3,
                 "source_optimization_level": 1,
-                "leaf_count": 2,
+                "plan_count": 2,
+                "table_kernel_count": 0,
+                "schedule_entry_count": 2,
                 "execution_manifest_path": "execution.json",
                 "execution_manifest_sha256": "8" * 64,
             },
+            "process_required_runtime_capabilities": [
+                _COLOR_CAPABILITY,
+                "rusticol.compiled.plane-arena.v2",
+            ],
         }
     )
     compiled = _cell(ExecutionMode.COMPILED, optimization_level=1)
@@ -1966,7 +2176,10 @@ def test_runtime_identity_audit_distinguishes_source_and_direct_codegen_levels(
         artifact_id=_ARTIFACT_ID,
         process_id="d_dbar_to_z",
         runtime_version=str(_active_runtime()["package_version"]),
-        runtime_capabilities=(_COLOR_CAPABILITY, _CAPABILITY),
+        runtime_capabilities=(
+            _COLOR_CAPABILITY,
+            "rusticol.compiled.plane-arena.v2",
+        ),
         execution_manifest_path="execution.json",
         execution_manifest_sha256="8" * 64,
         execution_mode="compiled",
@@ -1985,11 +2198,14 @@ def test_runtime_identity_audit_distinguishes_source_and_direct_codegen_levels(
         artifact=compiled_evidence,
     )
 
-    wrong_leaf_count = deepcopy(compiled_identity)
-    wrong_leaf_count["direct_codegen_identity"]["leaf_count"] = 3  # type: ignore[index]
-    wrong_leaf_provenance = provenance(wrong_leaf_count)
+    wrong_schedule_count = deepcopy(compiled_identity)
+    wrong_schedule_count["direct_codegen_identity"]["schedule_entry_count"] = 3  # type: ignore[index]
+    wrong_leaf_provenance = provenance(wrong_schedule_count)
     wrong_leaf_provenance["effective_config"] = compiled_effective
-    with pytest.raises(FinalAuditError, match=r"direct_codegen_identity\.leaf_count"):
+    with pytest.raises(
+        FinalAuditError,
+        match=r"direct_codegen_identity\.schedule_entry_count",
+    ):
         _audit_runtime_identity(
             compiled,
             wrong_leaf_provenance,
@@ -2315,11 +2531,11 @@ def test_final_audit_authenticates_cache_store_and_replays_unique_artifact(
     assert result["legacy_pointwise_agreement_edge_count"] == 1
     assert result["direct_agreement_edge_count"] == 0
     assert result["direct_agreement_edge_counts"] == {
-            "builtin-ufo-recurrence": 0,
-            "z-recurrence-cross-mode": 0,
-            "lc-cross-layout-component": 0,
-            "lc-legacy-pyamplicol-component": 0,
-        }
+        "builtin-ufo-recurrence": 0,
+        "z-recurrence-cross-mode": 0,
+        "lc-cross-layout-component": 0,
+        "lc-legacy-pyamplicol-component": 0,
+    }
     assert result["replayed_direct_agreement_edge_count"] == 0
     assert set(result["direct_agreement_replay_category_counts"].values()) == {0}
     assert result["unique_artifact_count"] == 1

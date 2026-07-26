@@ -71,6 +71,8 @@ _RECURRENCE_DIRECT_PAYLOAD_BINDING_ABI = (
 _RECURRENCE_JIT_SOURCE_APPLICATION_ABI = "symjit-application-storage-v3"
 _RECURRENCE_JIT_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
 _RECURRENCE_JIT_SOURCE_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
+
+
 class RunnerError(RuntimeError):
     """Raised when a cell cannot satisfy the report measurement contract."""
 
@@ -761,41 +763,88 @@ def _authenticated_direct_codegen_identity(
     process_id: str,
     source_optimization_level: int,
 ) -> dict[str, object]:
-    """Observe fixed O3 lowering in one artifact-ID-bound process payload."""
+    """Observe the universal compiled-stage-plan v2 execution shape."""
 
     execution, execution_relative, actual_sha256, _, _ = (
         _authenticated_process_execution(manifest, process_id=process_id)
     )
 
-    leaf_count = 0
+    plan_count = 0
+    table_kernel_count = 0
+    schedule_entry_count = 0
 
     def walk(value: object) -> None:
-        nonlocal leaf_count
+        nonlocal plan_count, table_kernel_count, schedule_entry_count
         if isinstance(value, Mapping):
             arena = value.get("compiled_plane_arena")
             if isinstance(arena, Mapping):
-                leaves = arena.get("leaves")
                 if (
-                    isinstance(leaves, (str, bytes))
-                    or not isinstance(leaves, Sequence)
-                    or not leaves
+                    arena.get("schema_version") != 2
+                    or arena.get("kind") != "compiled-stage-plan"
+                    or arena.get("plan_abi") != "pyamplicol-compiled-stage-plan-v2"
+                ):
+                    raise RunnerError("compiled execution does not use stage-plan v2")
+                collections: dict[str, Sequence[object]] = {}
+                for field in (
+                    "residual_leaves",
+                    "table_kernels",
+                    "table_calls",
+                    "finalizer_calls",
+                    "execution_order",
+                ):
+                    raw_collection = arena.get(field)
+                    if isinstance(raw_collection, (str, bytes)) or not isinstance(
+                        raw_collection, Sequence
+                    ):
+                        raise RunnerError(f"compiled stage-plan has invalid {field}")
+                    collections[field] = raw_collection
+                residual_leaves = collections["residual_leaves"]
+                table_kernels = collections["table_kernels"]
+                expected_schedule_count = (
+                    len(residual_leaves)
+                    + len(collections["table_calls"])
+                    + len(collections["finalizer_calls"])
+                )
+                if (
+                    len(collections["execution_order"]) != expected_schedule_count
+                    or expected_schedule_count == 0
                 ):
                     raise RunnerError(
-                        "compiled plane-Arena descriptor has no authenticated leaves"
+                        "compiled stage-plan execution order has invalid coverage"
                     )
-                for raw_leaf in leaves:
+                for raw_leaf in residual_leaves:
                     if not isinstance(raw_leaf, Mapping):
                         raise RunnerError(
-                            "compiled plane-Arena descriptor has an invalid leaf"
+                            "compiled stage-plan has an invalid residual leaf"
                         )
                     if (
                         raw_leaf.get("optimization_level") != source_optimization_level
                         or raw_leaf.get("direct_codegen_optimization_level") != 3
                     ):
                         raise RunnerError(
-                            "compiled plane-Arena leaf optimization identity drifted"
+                            "compiled residual leaf optimization identity drifted"
                         )
-                    leaf_count += 1
+                for raw_kernel in table_kernels:
+                    if not isinstance(raw_kernel, Mapping):
+                        raise RunnerError(
+                            "compiled stage-plan has an invalid table kernel"
+                        )
+                    if (
+                        source_optimization_level != 3
+                        or raw_kernel.get("source_application_abi")
+                        != "symjit-application-storage-v3"
+                        or raw_kernel.get("descriptor_abi")
+                        != "symjit-direct-table-descriptor-v1"
+                        or raw_kernel.get("binding_abi")
+                        != "symjit-direct-table-binding-v1"
+                        or raw_kernel.get("optimization_level") != 3
+                    ):
+                        raise RunnerError(
+                            "compiled DirectTable kernel identity drifted"
+                        )
+                plan_count += 1
+                table_kernel_count += len(table_kernels)
+                schedule_entry_count += expected_schedule_count
             for child in value.values():
                 walk(child)
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -803,13 +852,16 @@ def _authenticated_direct_codegen_identity(
                 walk(child)
 
     walk(execution)
-    if leaf_count == 0:
-        raise RunnerError("execution payload contains no compiled plane-Arena leaves")
+    if plan_count == 0 or schedule_entry_count == 0:
+        raise RunnerError("execution payload contains no compiled stage-plan v2")
     return {
-        "kind": "authenticated-compiled-plane-arena-direct-codegen-v1",
+        "kind": "authenticated-compiled-stage-plan-direct-codegen-v2",
+        "plan_abi": "pyamplicol-compiled-stage-plan-v2",
         "optimization_level": 3,
         "source_optimization_level": source_optimization_level,
-        "leaf_count": leaf_count,
+        "plan_count": plan_count,
+        "table_kernel_count": table_kernel_count,
+        "schedule_entry_count": schedule_entry_count,
         "execution_manifest_path": execution_relative,
         "execution_manifest_sha256": actual_sha256,
     }
@@ -1714,9 +1766,7 @@ def _calibrate_arena_repetitions(
             timer(batch, repetitions, **selector_arguments),
             "Arena wall calibration duration",
         )
-        blocks.append(
-            {"repetitions": repetitions, "duration_seconds": observed}
-        )
+        blocks.append({"repetitions": repetitions, "duration_seconds": observed})
         ratio = observed / target_per_block
         if 0.75 <= ratio <= 1.5:
             break
@@ -1767,8 +1817,7 @@ def _run_arena_benchmark(
         or minimum_samples < _ARENA_MINIMUM_SAMPLES
     ):
         raise RunnerError(
-            f"Arena report timing requires at least {_ARENA_MINIMUM_SAMPLES} "
-            "samples"
+            f"Arena report timing requires at least {_ARENA_MINIMUM_SAMPLES} samples"
         )
     if precision != 16:
         raise RunnerError("Arena report timing requires native f64 precision")
@@ -1884,9 +1933,7 @@ def _run_arena_benchmark(
             "profile_attribution_elapsed_seconds": profile_elapsed,
             "headline_block_durations_seconds": headline_durations,
             "calibration": {
-                "target_seconds_per_block": (
-                    target_runtime / minimum_samples
-                ),
+                "target_seconds_per_block": (target_runtime / minimum_samples),
                 "blocks": calibration_blocks,
             },
             "interrupted": False,
@@ -1989,9 +2036,7 @@ def _benchmark_measurement(
             else getattr(breakdown, "evaluator_call_time", None)
         )
         raw_arena_evidence = getattr(benchmark, "arena_profile_evidence", None)
-        profile_repetitions = environment.get(
-            "native_profile_repetitions_per_sample"
-        )
+        profile_repetitions = environment.get("native_profile_repetitions_per_sample")
         profile_batch_size = environment.get("native_profile_batch_size")
         try:
             arena_profile_evidence = validate_arena_profile_evidence(
@@ -2014,8 +2059,7 @@ def _benchmark_measurement(
             != ARENA_PROFILE_SAMPLE_PASS
             or environment.get("timing_breakdown_sample_pass")
             != ARENA_PROFILE_SAMPLE_PASS
-            or environment.get("profile_attribution_boundary")
-            != ARENA_PROFILE_BOUNDARY
+            or environment.get("profile_attribution_boundary") != ARENA_PROFILE_BOUNDARY
             or environment.get("profile_attribution_borrowed_flat_input") is not True
             or environment.get("profile_attribution_preallocated_output") is not True
             or environment.get("profile_attribution_phase_timing_scope")
@@ -2034,8 +2078,7 @@ def _benchmark_measurement(
             or isinstance(profile_batch_size, bool)
             or not isinstance(profile_batch_size, int)
             or profile_batch_size < 1
-            or profile_repetitions * profile_batch_size
-            != raw_points_per_sample
+            or profile_repetitions * profile_batch_size != raw_points_per_sample
             or arena_profile_evidence.get("repetitions_per_profile")
             != profile_repetitions
             or arena_profile_evidence.get("batch_size") != profile_batch_size
@@ -2140,13 +2183,9 @@ def _benchmark_measurement(
             "target_runtime_achieved": (
                 float(achieved_runtime) >= 0.95 * target_runtime
             ),
-            "completed_sample_count": environment.get(
-                "completed_sample_count"
-            ),
+            "completed_sample_count": environment.get("completed_sample_count"),
             "planned_sample_count": environment.get("planned_sample_count"),
-            "repetitions_per_sample": environment.get(
-                "repetitions_per_sample"
-            ),
+            "repetitions_per_sample": environment.get("repetitions_per_sample"),
             "measured_point_count": environment.get("measured_point_count"),
             "interrupted": bool(environment.get("interrupted", False)),
         },

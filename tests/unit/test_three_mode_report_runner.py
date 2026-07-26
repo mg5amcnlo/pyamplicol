@@ -129,9 +129,7 @@ def _benchmark_fixture(
             ),
             "profile_attribution_borrowed_flat_input": arena_authenticated,
             "profile_attribution_preallocated_output": True,
-            "profile_attribution_phase_timing_scope": (
-                "coarse-arena-boundary-only-v1"
-            ),
+            "profile_attribution_phase_timing_scope": ("coarse-arena-boundary-only-v1"),
             "profile_attribution_evaluator_timing_available": False,
             "profile_attribution_paired_with_headline": True,
             "profile_attribution_identical_batch": True,
@@ -1174,7 +1172,7 @@ def test_artifact_contract_rejects_generation_specialization(
                 for cell in REPORT_CATALOG.z_cells()
                 if cell.variant == "jit_o1" and cell.workload is Workload.SELECTED_FLOW
             ),
-            "compiled-plane-arena-v1",
+            "rusticol.compiled.plane-arena.v2",
             "symjit-direct-application-storage-v1",
             {
                 "source_jit_optimization_level": 1,
@@ -1187,7 +1185,7 @@ def test_artifact_contract_rejects_generation_specialization(
                 for cell in REPORT_CATALOG.z_cells()
                 if cell.variant == "cpp_o3" and cell.workload is Workload.SELECTED_FLOW
             ),
-            "compiled-plane-arena-v1",
+            "rusticol.compiled.plane-arena.v2",
             "pyamplicol-native-compiled-direct-application-v1",
             {},
         ),
@@ -1357,10 +1355,13 @@ def test_runtime_identity_binds_native_artifact_and_arena(
     ) -> dict[str, object]:
         assert process_id == "process-1"
         return {
-            "kind": "authenticated-compiled-plane-arena-direct-codegen-v1",
+            "kind": "authenticated-compiled-stage-plan-direct-codegen-v2",
+            "plan_abi": "pyamplicol-compiled-stage-plan-v2",
             "optimization_level": 3,
             "source_optimization_level": source_optimization_level,
-            "leaf_count": 2,
+            "plan_count": 2,
+            "table_kernel_count": 0,
+            "schedule_entry_count": 2,
             "execution_manifest_path": "execution.json",
             "execution_manifest_sha256": "e" * 64,
         }
@@ -1447,10 +1448,13 @@ def test_runtime_identity_binds_native_artifact_and_arena(
         cell.measurement.backend == "jit"
     ):
         assert identity["direct_codegen_identity"] == {
-            "kind": "authenticated-compiled-plane-arena-direct-codegen-v1",
+            "kind": "authenticated-compiled-stage-plan-direct-codegen-v2",
+            "plan_abi": "pyamplicol-compiled-stage-plan-v2",
             "optimization_level": 3,
             "source_optimization_level": cell.measurement.jit_optimization_level,
-            "leaf_count": 2,
+            "plan_count": 2,
+            "table_kernel_count": 0,
+            "schedule_entry_count": 2,
             "execution_manifest_path": "execution.json",
             "execution_manifest_sha256": "e" * 64,
         }
@@ -1511,16 +1515,65 @@ def test_direct_codegen_identity_follows_authenticated_process_index(
         "kind": "pyamplicol-runtime-execution",
         "compiled": {
             "stage_evaluators": {
+                "stages": [
+                    {
+                        "compiled_plane_arena": {
+                            "schema_version": 2,
+                            "kind": "compiled-stage-plan",
+                            "plan_abi": "pyamplicol-compiled-stage-plan-v2",
+                            "residual_leaves": [],
+                            "table_kernels": [
+                                {
+                                    "source_application_abi": (
+                                        "symjit-application-storage-v3"
+                                    ),
+                                    "descriptor_abi": (
+                                        "symjit-direct-table-descriptor-v1"
+                                    ),
+                                    "binding_abi": ("symjit-direct-table-binding-v1"),
+                                    "optimization_level": 3,
+                                }
+                            ],
+                            "table_calls": [{}],
+                            "finalizer_calls": [{}],
+                            "execution_order": [
+                                {
+                                    "kind": "table-call",
+                                    "index": 0,
+                                    "original_chunk_index": 0,
+                                },
+                                {
+                                    "kind": "finalizer-call",
+                                    "index": 0,
+                                    "original_chunk_index": 0,
+                                },
+                            ],
+                        }
+                    }
+                ],
                 "amplitude_stage": {
                     "compiled_plane_arena": {
-                        "leaves": [
+                        "schema_version": 2,
+                        "kind": "compiled-stage-plan",
+                        "plan_abi": "pyamplicol-compiled-stage-plan-v2",
+                        "residual_leaves": [
                             {
-                                "optimization_level": 1,
+                                "optimization_level": 3,
                                 "direct_codegen_optimization_level": 3,
                             }
-                        ]
+                        ],
+                        "table_kernels": [],
+                        "table_calls": [],
+                        "finalizer_calls": [],
+                        "execution_order": [
+                            {
+                                "kind": "residual-leaf",
+                                "index": 0,
+                                "original_chunk_index": 0,
+                            }
+                        ],
                     }
-                }
+                },
             }
         },
     }
@@ -1531,7 +1584,7 @@ def test_direct_codegen_identity_follows_authenticated_process_index(
             {
                 "process_id": process_id,
                 "manifest_path": execution_entry_relative,
-                "required_runtime_capabilities": ["compiled-plane-arena-v1"],
+                "required_runtime_capabilities": ["rusticol.compiled.plane-arena.v2"],
             }
         ],
     }
@@ -1580,14 +1633,17 @@ def test_direct_codegen_identity_follows_authenticated_process_index(
     identity = _authenticated_direct_codegen_identity(
         manifest,
         process_id=process_id,
-        source_optimization_level=1,
+        source_optimization_level=3,
     )
 
     assert identity == {
-        "kind": "authenticated-compiled-plane-arena-direct-codegen-v1",
+        "kind": "authenticated-compiled-stage-plan-direct-codegen-v2",
+        "plan_abi": "pyamplicol-compiled-stage-plan-v2",
         "optimization_level": 3,
-        "source_optimization_level": 1,
-        "leaf_count": 1,
+        "source_optimization_level": 3,
+        "plan_count": 2,
+        "table_kernel_count": 1,
+        "schedule_entry_count": 3,
         "execution_manifest_path": execution_relative,
         "execution_manifest_sha256": execution_payload.sha256,
     }
