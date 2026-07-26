@@ -244,6 +244,29 @@ def _selftest_fixture_bootstrap(
     return True
 
 
+@contextmanager
+def _selftest_fixture_bootstrap_environment() -> Iterator[None]:
+    """Install the exact private context used by the dedicated bootstrap helper."""
+
+    updates = {
+        "PYAMPLICOL_BUILD_MODE": "candidate",
+        "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP": "1",
+        "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT": (
+            _SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT
+        ),
+    }
+    previous = {name: os.environ.get(name) for name in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _strip_prepared_model_payloads(overlay: Path) -> None:
     """Remove stale bundles from a candidate wheel used only to create replacements."""
 
@@ -1292,6 +1315,7 @@ def _from_overlay(
     *args: Any,
     with_sdk: bool,
     validate_prepared_models: bool = False,
+    selftest_fixture_bootstrap: bool = False,
     **kwargs: Any,
 ) -> _Result:
     with _delegating():
@@ -1300,7 +1324,18 @@ def _from_overlay(
         # A raw environment escape is never sufficient for a PEP 517 build.
         # Only the dedicated local regeneration helper supplies the explicit
         # context accepted by this gate.
-        _selftest_fixture_bootstrap(mode)
+        fixture_bootstrap = _selftest_fixture_bootstrap(
+            mode,
+            explicit_context=selftest_fixture_bootstrap,
+        )
+        if fixture_bootstrap != selftest_fixture_bootstrap:
+            raise RuntimeError(
+                "self-test fixture bootstrap requires the dedicated developer command"
+            )
+        if fixture_bootstrap and (prepared_model_bootstrap or not with_sdk):
+            raise RuntimeError(
+                "self-test fixture bootstrap must build one complete candidate wheel"
+            )
         _check_dependencies(mode)
         with _overlay(mode) as (overlay, target_dir):
             environment = {
@@ -1326,6 +1361,8 @@ def _from_overlay(
                 if validate_prepared_models and not with_sdk:
                     stage_packaged_prepared_models(overlay, mode)
                 if with_sdk:
+                    if fixture_bootstrap:
+                        _mark_selftest_fixture_bootstrap(overlay)
                     _stage_packaged_examples(overlay)
                     _stage_python_stub(overlay)
                     _stage_runtime_resources(overlay)
@@ -1337,7 +1374,11 @@ def _from_overlay(
                     sdk_metadata = json.loads(
                         (sdk / "metadata.json").read_text(encoding="utf-8")
                     )
-                    _stage_selftest_fixture(overlay, str(sdk_metadata["target"]))
+                    if not fixture_bootstrap:
+                        _stage_selftest_fixture(
+                            overlay,
+                            str(sdk_metadata["target"]),
+                        )
                     os.environ["PYAMPLICOL_SDK_STAGING"] = str(sdk)
                 return operation(*args, **kwargs)
 
@@ -1355,6 +1396,23 @@ def build_wheel(
         with_sdk=True,
     )
     return filename
+
+
+def build_selftest_fixture_bootstrap_wheel(
+    wheel_directory: str,
+    config_settings: Mapping[str, Any] | None = None,
+) -> str:
+    """Build the marked, non-deployable wheel used to regenerate the fixture."""
+
+    with _selftest_fixture_bootstrap_environment():
+        return _from_overlay(
+            maturin.build_wheel,
+            wheel_directory,
+            config_settings,
+            None,
+            with_sdk=True,
+            selftest_fixture_bootstrap=True,
+        )
 
 
 def build_sdist(

@@ -154,6 +154,135 @@ def test_selftest_fixture_bootstrap_rejects_dirty_candidate(
         backend._mark_selftest_fixture_bootstrap(tmp_path)
 
 
+def test_dedicated_selftest_bootstrap_sets_and_restores_exact_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYAMPLICOL_BUILD_MODE", "release")
+    for name in (
+        "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP",
+        "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    observed: dict[str, object] = {}
+
+    def fake_from_overlay(
+        operation: object,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        observed["operation"] = operation
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        observed["mode"] = os.environ["PYAMPLICOL_BUILD_MODE"]
+        observed["flag"] = os.environ["PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP"]
+        observed["context"] = os.environ[
+            "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT"
+        ]
+        return "bootstrap.whl"
+
+    monkeypatch.setattr(backend, "_from_overlay", fake_from_overlay)
+
+    assert (
+        backend.build_selftest_fixture_bootstrap_wheel("wheelhouse") == "bootstrap.whl"
+    )
+    assert observed == {
+        "operation": backend.maturin.build_wheel,
+        "args": ("wheelhouse", None, None),
+        "kwargs": {
+            "with_sdk": True,
+            "selftest_fixture_bootstrap": True,
+        },
+        "mode": "candidate",
+        "flag": "1",
+        "context": backend._SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT,
+    }
+    assert os.environ["PYAMPLICOL_BUILD_MODE"] == "release"
+    assert "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP" not in os.environ
+    assert "PYAMPLICOL_SELFTEST_FIXTURE_BOOTSTRAP_CONTEXT" not in os.environ
+
+
+def test_dedicated_selftest_bootstrap_marks_overlay_and_skips_stale_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    overlay = tmp_path / "overlay"
+    target = tmp_path / "target" / "native"
+    package = overlay / "src" / "pyamplicol"
+    package.mkdir(parents=True)
+    (package / "_build_info.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "publishable": False,
+                "native_build_inputs_sha256": "b" * 64,
+                "selftest_fixture_bootstrap": False,
+                "source_revision": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixture = package / "assets" / "selftest" / "portable-64le"
+    fixture.mkdir(parents=True)
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "metadata.json").write_text(
+        json.dumps({"target": "aarch64-apple-darwin"}),
+        encoding="utf-8",
+    )
+
+    @contextlib.contextmanager
+    def fake_overlay(mode: str):
+        assert mode == "candidate"
+        yield overlay, target
+
+    monkeypatch.setattr(backend, "_overlay", fake_overlay)
+    monkeypatch.setattr(backend, "_check_dependencies", lambda _mode: None)
+    monkeypatch.setattr(backend, "_rust_remap_flags", lambda *_args: "")
+    monkeypatch.setattr(
+        backend,
+        "_environment",
+        lambda _updates: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_working_directory",
+        lambda _directory: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(backend, "_stage_packaged_examples", lambda _overlay: None)
+    monkeypatch.setattr(backend, "_stage_python_stub", lambda _overlay: None)
+    monkeypatch.setattr(backend, "_stage_runtime_resources", lambda _overlay: None)
+    monkeypatch.setattr(
+        backend,
+        "stage_packaged_prepared_models",
+        lambda _overlay, _mode: None,
+    )
+    monkeypatch.setattr(backend, "build_sdk", lambda *_args: sdk)
+    monkeypatch.setattr(
+        backend,
+        "_stage_selftest_fixture",
+        lambda *_args: pytest.fail("stale fixture must not be staged"),
+    )
+
+    def operation() -> str:
+        build_info = json.loads(
+            (package / "_build_info.json").read_text(encoding="utf-8")
+        )
+        assert build_info["selftest_fixture_bootstrap"] is True
+        assert not fixture.exists()
+        return "bootstrap.whl"
+
+    with backend._selftest_fixture_bootstrap_environment():
+        assert (
+            backend._from_overlay(
+                operation,
+                with_sdk=True,
+                selftest_fixture_bootstrap=True,
+            )
+            == "bootstrap.whl"
+        )
+
+
 def test_prepared_model_bootstrap_strips_only_generated_payloads(
     tmp_path: Path,
 ) -> None:
