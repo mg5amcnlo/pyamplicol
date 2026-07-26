@@ -2262,10 +2262,15 @@ def _selector_partitions(
     ] = defaultdict(list)
     slots_by_chunk: dict[int, list[GenericStageOutputSlot]] = defaultdict(list)
     for slot in stage.output_slots:
-        chunk = _slot_chunk_index(slot, ranges)
-        if chunk is None:
-            raise ValueError("compiled selector output slot crosses a chunk")
-        slots_by_chunk[chunk].append(slot)
+        chunks = [
+            index
+            for index, (start, stop) in enumerate(ranges)
+            if start < slot.output_stop and slot.output_start < stop
+        ]
+        if not chunks:
+            raise ValueError("compiled selector output slot has no chunk")
+        for chunk in chunks:
+            slots_by_chunk[chunk].append(slot)
     for chunk_index in range(len(ranges)):
         signatures = {
             (slot.selector_domain_ids, slot.color_selector_domain_ids)

@@ -21,6 +21,7 @@ from pyamplicol.generation.compiled_microkernels import (
     _output_chunk_ranges,
     _PlaneCatalog,
     _residual_stage,
+    _selector_partitions,
 )
 from pyamplicol.generation.eager_tables import (
     EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
@@ -606,3 +607,35 @@ def test_residual_stage_clips_split_slots_and_maps_original_outputs() -> None:
         (3, 0, 2, 2, 4),
         (3, 2, 4, 4, 6),
     ]
+
+
+def test_selector_partitions_cover_every_chunk_overlapped_by_a_slot() -> None:
+    stage = _chunk_test_stage(
+        (2, 4, 4),
+        selector_partitions=((0, 10),),
+    )
+    ranges = _output_chunk_ranges(stage, chunk_size=8)
+
+    assert _selector_partitions(
+        stage,
+        ranges,
+        (
+            {
+                "kind": "residual-leaf",
+                "index": 0,
+                "original_chunk_index": 0,
+            },
+            {
+                "kind": "residual-leaf",
+                "index": 1,
+                "original_chunk_index": 1,
+            },
+        ),
+    ) == (
+        {
+            "partition_id": 0,
+            "helicity_selector_domain_ids": [],
+            "color_selector_domain_ids": [],
+            "original_chunk_indices": [0, 1],
+        },
+    )
