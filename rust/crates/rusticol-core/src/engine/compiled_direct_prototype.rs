@@ -7,7 +7,7 @@
 //! executes the unchanged leaf schedule against persistent component-major
 //! planes. Canonical manifest component IDs are cold-bound to a stage-granular
 //! physical layout: values with disjoint whole-stage lifetimes may reuse a
-//! plane while every Arena-v1 stage retains its no-alias contract.
+//! plane while every stage-plan-v2 stage retains its no-alias contract.
 
 #![allow(dead_code)]
 
@@ -31,6 +31,10 @@ use super::evaluator::symjit_compiled_direct::{
     LoadedSymjitCompiledDirectStage,
 };
 #[cfg(feature = "f64-symjit")]
+use super::evaluator::symjit_eager_direct::{
+    DirectTableCatalog, DirectTableRows, LoadedSymjitEagerDirectTable,
+};
+#[cfg(feature = "f64-symjit")]
 use super::evaluator::{SymjitApplicationMetadata, validate_manifest_metadata};
 use super::sources::RuntimeSourceState;
 use super::*;
@@ -39,6 +43,10 @@ use crate::direct_arena::{
     DirectArenaTrafficCounters, DirectArenaWorkspace, DirectMomentumView, DirectParameterView,
     deterministic_point_tile_size,
 };
+#[cfg(feature = "f64-symjit")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "f64-symjit")]
+use symjit::DirectPlane;
 
 // Fused applications repeatedly traverse many split-complex parent/output
 // planes. Keeping a small, fixed power-of-two point tile preserves that
@@ -90,6 +98,49 @@ struct DirectLeafPlan {
     input_current_components: Box<[usize]>,
     output_current_components: Box<[usize]>,
     output_amplitude_components: Box<[usize]>,
+}
+
+#[cfg(feature = "f64-symjit")]
+struct LoadedCompiledTableCall {
+    application: Arc<LoadedSymjitEagerDirectTable>,
+    rows: DirectTableRows,
+    output_complex_count: u32,
+}
+
+#[cfg(feature = "f64-symjit")]
+struct BoundCompiledTableCall {
+    application: Arc<LoadedSymjitEagerDirectTable>,
+    rows: DirectTableRows,
+    output_complex_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompiledStageOperation {
+    ResidualLeaf(usize),
+    #[cfg(feature = "f64-symjit")]
+    TableCall(usize),
+    #[cfg(feature = "f64-symjit")]
+    FinalizerCall(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompiledStageOrderedOperation {
+    operation: CompiledStageOperation,
+    original_chunk_index: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompiledFactorSpec {
+    base: [f64; 2],
+    model_parameter_index: Option<usize>,
+    parameter_component: CompiledParameterComponent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompiledParameterComponent {
+    None,
+    Real,
+    Imag,
 }
 
 enum LoadedCompiledDirectLeaf {
@@ -156,11 +207,27 @@ impl BoundCompiledDirectLeaf {
 struct LoadedStage {
     leaves: Vec<LoadedCompiledDirectLeaf>,
     leaf_plans: Vec<DirectLeafPlan>,
+    #[cfg(feature = "f64-symjit")]
+    table_calls: Vec<LoadedCompiledTableCall>,
+    #[cfg(feature = "f64-symjit")]
+    finalizer_calls: Vec<LoadedCompiledTableCall>,
+    execution_order: Vec<CompiledStageOrderedOperation>,
+    plane_catalog: Vec<CompiledPlaneCatalogEntryManifest>,
+    factor_specs: Vec<CompiledFactorSpec>,
+    scratch_current_component_count: usize,
 }
 
 struct BoundStage {
     leaves: Vec<BoundCompiledDirectLeaf>,
     leaf_plans: Vec<DirectLeafPlan>,
+    #[cfg(feature = "f64-symjit")]
+    table_calls: Vec<BoundCompiledTableCall>,
+    #[cfg(feature = "f64-symjit")]
+    finalizer_calls: Vec<BoundCompiledTableCall>,
+    execution_order: Vec<CompiledStageOrderedOperation>,
+    #[cfg(feature = "f64-symjit")]
+    table_catalog: Option<DirectTableCatalog>,
+    factor_specs: Vec<CompiledFactorSpec>,
 }
 
 const UNMAPPED_CURRENT_COMPONENT: u32 = u32::MAX;
@@ -245,6 +312,10 @@ pub(crate) struct CompiledDirectValidatedSchedule {
     active_stage_leaves: Box<[Box<[usize]>]>,
     active_amplitude_leaves: Box<[usize]>,
     inactive_amplitude_components: Box<[usize]>,
+    #[cfg(feature = "f64-symjit")]
+    stage_table_rows: Box<[BTreeMap<usize, DirectTableRows>]>,
+    #[cfg(feature = "f64-symjit")]
+    stage_finalizer_rows: Box<[BTreeMap<usize, DirectTableRows>]>,
 }
 
 /// Persistent prototype executor for one compiled schedule.
@@ -260,6 +331,7 @@ pub(crate) struct CompiledDirectEnginePrototype {
     momenta: Box<AlignedF64Buffer>,
     parameter_re: Box<AlignedF64Buffer>,
     parameter_im: Box<AlignedF64Buffer>,
+    model_parameter_plane_re: Box<AlignedF64Buffer>,
     zero_plane: Box<AlignedF64Buffer>,
     full_schedule: CompiledDirectValidatedSchedule,
     source_components: Box<[usize]>,
@@ -366,13 +438,26 @@ impl CompiledDirectEnginePrototype {
             amplitude_component_count,
             &structural_zero_components,
         )?;
+        let scratch_current_component_count = loaded_stages
+            .iter()
+            .chain(std::iter::once(&loaded_amplitude))
+            .map(|stage| stage.scratch_current_component_count)
+            .max()
+            .unwrap_or(0);
+        #[cfg(feature = "f64-symjit")]
+        let has_table_calls = loaded_stages
+            .iter()
+            .chain(std::iter::once(&loaded_amplitude))
+            .any(|stage| !stage.table_calls.is_empty() || !stage.finalizer_calls.is_empty());
+        #[cfg(not(feature = "f64-symjit"))]
+        let has_table_calls = false;
 
         let full_stage_leaves = loaded_stages
             .iter()
-            .map(|stage| (0..stage.leaves.len()).collect::<Vec<_>>())
+            .map(|stage| (0..stage.leaf_plans.len()).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let full_amplitude_leaves = (0..loaded_amplitude.leaves.len()).collect::<Vec<_>>();
-        let full_schedule = validate_schedule(
+        let full_amplitude_leaves = (0..loaded_amplitude.leaf_plans.len()).collect::<Vec<_>>();
+        let mut full_schedule = validate_schedule(
             &loaded_stages,
             &loaded_amplitude,
             value_component_count,
@@ -400,8 +485,14 @@ impl CompiledDirectEnginePrototype {
                 let scalar_values_per_point =
                     usize::try_from(current_layout.physical_component_count)
                         .ok()
+                        .and_then(|value| value.checked_add(scratch_current_component_count))
                         .and_then(|value| value.checked_mul(2))
                         .and_then(|value| value.checked_add(momentum_component_count))
+                        .and_then(|value| {
+                            model_parameter_count
+                                .checked_mul(2)
+                                .and_then(|parameters| value.checked_add(parameters))
+                        })
                         .and_then(|value| {
                             amplitude_component_count
                                 .checked_mul(2)
@@ -420,8 +511,16 @@ impl CompiledDirectEnginePrototype {
                 )?
             }
         };
+        let physical_current_component_count = current_layout
+            .physical_component_count
+            .checked_add(u32::try_from(scratch_current_component_count).map_err(|_| {
+                RusticolError::integrity("compiled scratch-current plane count exceeds u32")
+            })?)
+            .ok_or_else(|| {
+                RusticolError::integrity("compiled physical current plane count overflows")
+            })?;
         let mut arena = Box::new(DirectArenaWorkspace::new(
-            current_layout.physical_component_count,
+            physical_current_component_count,
             u32::try_from(amplitude_component_count).map_err(|_| {
                 RusticolError::integrity("compiled Direct-Arena amplitude plane count exceeds u32")
             })?,
@@ -443,6 +542,17 @@ impl CompiledDirectEnginePrototype {
         let mut parameter_im = Box::new(AlignedF64Buffer::zeroed(
             model_parameter_count,
             "compiled prototype parameter imaginary",
+        )?);
+        let model_parameter_plane_len = if has_table_calls {
+            model_parameter_count.checked_mul(stride).ok_or_else(|| {
+                RusticolError::integrity("compiled model-parameter plane length overflows")
+            })?
+        } else {
+            0
+        };
+        let mut model_parameter_plane_re = Box::new(AlignedF64Buffer::zeroed(
+            model_parameter_plane_len,
+            "compiled prototype model-parameter plane real",
         )?);
         let zero_plane = Box::new(AlignedF64Buffer::zeroed(
             stride,
@@ -478,7 +588,57 @@ impl CompiledDirectEnginePrototype {
         // SAFETY: arena and side buffers are fixed-size heap allocations owned
         // by the returned executor. No field resizes them, and evaluate methods
         // require exclusive access to the executor.
-        let bind_stage = |loaded: LoadedStage| -> RusticolResult<BoundStage> {
+        let mut bind_stage = |loaded: LoadedStage| -> RusticolResult<BoundStage> {
+            #[cfg(feature = "f64-symjit")]
+            let table_catalog =
+                if loaded.table_calls.is_empty() && loaded.finalizer_calls.is_empty() {
+                    None
+                } else {
+                    Some(unsafe {
+                        bind_compiled_table_catalog(
+                            &loaded.plane_catalog,
+                            &loaded.factor_specs,
+                            arena_view,
+                            momentum_view,
+                            model_parameter_plane_re.as_mut_ptr(),
+                            model_parameter_count,
+                            &zero_plane,
+                            current_layout.physical_component_count,
+                            current_layout.physical_map(),
+                        )
+                    }?)
+                };
+            #[cfg(feature = "f64-symjit")]
+            let table_calls = loaded
+                .table_calls
+                .into_iter()
+                .map(|call| BoundCompiledTableCall {
+                    application: call.application,
+                    rows: call.rows,
+                    output_complex_count: call.output_complex_count,
+                })
+                .collect::<Vec<_>>();
+            #[cfg(feature = "f64-symjit")]
+            let finalizer_calls = loaded
+                .finalizer_calls
+                .into_iter()
+                .map(|call| BoundCompiledTableCall {
+                    application: call.application,
+                    rows: call.rows,
+                    output_complex_count: call.output_complex_count,
+                })
+                .collect::<Vec<_>>();
+            #[cfg(feature = "f64-symjit")]
+            if let Some(catalog) = table_catalog.as_ref() {
+                for call in table_calls.iter().chain(&finalizer_calls) {
+                    call.application.validate_call_with_catalog(
+                        &call.rows,
+                        catalog,
+                        0,
+                        tile_capacity,
+                    )?;
+                }
+            }
             Ok(BoundStage {
                 leaves: loaded
                     .leaves
@@ -494,18 +654,29 @@ impl CompiledDirectEnginePrototype {
                     })
                     .collect::<RusticolResult<Vec<_>>>()?,
                 leaf_plans: loaded.leaf_plans,
+                #[cfg(feature = "f64-symjit")]
+                table_calls,
+                #[cfg(feature = "f64-symjit")]
+                finalizer_calls,
+                execution_order: loaded.execution_order,
+                #[cfg(feature = "f64-symjit")]
+                table_catalog,
+                factor_specs: loaded.factor_specs,
             })
         };
         let stages = loaded_stages
             .into_iter()
-            .map(bind_stage)
+            .map(&mut bind_stage)
             .collect::<RusticolResult<Vec<_>>>()?;
         let amplitude = bind_stage(loaded_amplitude)?;
+        #[cfg(feature = "f64-symjit")]
+        recompute_selected_table_rows(&stages, &mut full_schedule, tile_capacity)?;
         let allocation_counters = [
             arena.allocation_counters(),
             momenta.allocation_counters(),
             parameter_re.allocation_counters(),
             parameter_im.allocation_counters(),
+            model_parameter_plane_re.allocation_counters(),
             zero_plane.allocation_counters(),
             DirectArenaAllocationCounters {
                 allocation_requests: 1,
@@ -528,6 +699,7 @@ impl CompiledDirectEnginePrototype {
             momenta,
             parameter_re,
             parameter_im,
+            model_parameter_plane_re,
             zero_plane,
             full_schedule,
             source_components: source_components.to_vec().into_boxed_slice(),
@@ -752,7 +924,24 @@ impl CompiledDirectEnginePrototype {
         for (index, value) in model_parameter_values.iter().copied().enumerate() {
             self.parameter_re.as_mut_slice()[index] = value;
             self.parameter_im.as_mut_slice()[index] = 0.0;
+            if !self.model_parameter_plane_re.is_empty() {
+                let start = index * stride;
+                self.model_parameter_plane_re.as_mut_slice()[start..start + point_count]
+                    .fill(value);
+            }
         }
+        for stage in &mut self.stages {
+            refresh_compiled_stage_factors(
+                stage,
+                self.parameter_re.as_slice(),
+                self.parameter_im.as_slice(),
+            )?;
+        }
+        refresh_compiled_stage_factors(
+            &mut self.amplitude,
+            self.parameter_re.as_slice(),
+            self.parameter_im.as_slice(),
+        )?;
 
         self.traffic.source_fill_bytes = self.traffic.source_fill_bytes.saturating_add(
             point_count
@@ -766,7 +955,14 @@ impl CompiledDirectEnginePrototype {
         );
         self.traffic.parameter_fill_bytes = self.traffic.parameter_fill_bytes.saturating_add(
             self.model_parameter_count
-                .saturating_mul(2 * std::mem::size_of::<f64>()) as u64,
+                .saturating_mul(2_usize.saturating_add(
+                    if self.model_parameter_plane_re.is_empty() {
+                        0
+                    } else {
+                        point_count
+                    },
+                ))
+                .saturating_mul(std::mem::size_of::<f64>()) as u64,
         );
         Ok(())
     }
@@ -839,6 +1035,11 @@ impl CompiledDirectEnginePrototype {
                 let value = state[parameter_start + index];
                 self.parameter_re.as_mut_slice()[index] = value.re;
                 self.parameter_im.as_mut_slice()[index] = value.im;
+                if !self.model_parameter_plane_re.is_empty() {
+                    let plane = index * stride;
+                    self.model_parameter_plane_re.as_mut_slice()[plane..plane + point_count]
+                        .fill(value.re);
+                }
                 for point in 1..point_count {
                     if state[point * global_parameter_count + parameter_start + index] != value {
                         return Err(RusticolError::invalid_argument(
@@ -848,6 +1049,18 @@ impl CompiledDirectEnginePrototype {
                 }
             }
         }
+        for stage in &mut self.stages {
+            refresh_compiled_stage_factors(
+                stage,
+                self.parameter_re.as_slice(),
+                self.parameter_im.as_slice(),
+            )?;
+        }
+        refresh_compiled_stage_factors(
+            &mut self.amplitude,
+            self.parameter_re.as_slice(),
+            self.parameter_im.as_slice(),
+        )?;
         let input_scalars = point_count
             .checked_mul(
                 self.value_component_count
@@ -886,7 +1099,7 @@ impl CompiledDirectEnginePrototype {
         &self,
         schedule: &CompiledColorSelectorSchedule,
     ) -> RusticolResult<CompiledDirectValidatedSchedule> {
-        validate_schedule(
+        let mut validated = validate_schedule(
             &self.stages,
             &self.amplitude,
             self.value_component_count,
@@ -894,7 +1107,10 @@ impl CompiledDirectEnginePrototype {
             self.amplitude_component_count,
             &schedule.active_stage_chunk_indices,
             &schedule.active_amplitude_chunk_indices,
-        )
+        )?;
+        #[cfg(feature = "f64-symjit")]
+        recompute_selected_table_rows(&self.stages, &mut validated, self.arena.tile_capacity())?;
+        Ok(validated)
     }
 
     /// Bind an already producer-validated compiled helicity schedule to this
@@ -903,7 +1119,7 @@ impl CompiledDirectEnginePrototype {
         &self,
         schedule: &CompiledHelicitySelectorSchedule,
     ) -> RusticolResult<CompiledDirectValidatedSchedule> {
-        validate_schedule(
+        let mut validated = validate_schedule(
             &self.stages,
             &self.amplitude,
             self.value_component_count,
@@ -911,7 +1127,10 @@ impl CompiledDirectEnginePrototype {
             self.amplitude_component_count,
             &schedule.active_stage_chunk_indices,
             &schedule.active_amplitude_chunk_indices,
-        )
+        )?;
+        #[cfg(feature = "f64-symjit")]
+        recompute_selected_table_rows(&self.stages, &mut validated, self.arena.tile_capacity())?;
+        Ok(validated)
     }
 
     /// Execute a cold-bound canonical preorder leaf schedule.
@@ -1191,7 +1410,7 @@ fn derive_stage_current_layout(
                 )?;
             }
         }
-        // Arena-v1 declares no input/output or output/output aliasing for the
+        // Stage-plan v2 declares no input/output or output/output aliasing for the
         // complete fused stage, not merely for one leaf. Give every output the
         // same inclusive definition event so the allocator preserves that
         // whole-stage contract.
@@ -1458,17 +1677,230 @@ fn point_count_u32(point_count: usize, active: u32) -> RusticolResult<u32> {
     Ok(point_count)
 }
 
+#[cfg(feature = "f64-symjit")]
+fn recompute_selected_table_rows(
+    stages: &[BoundStage],
+    schedule: &mut CompiledDirectValidatedSchedule,
+    tile_capacity: u32,
+) -> RusticolResult<()> {
+    if schedule.stage_table_rows.len() != stages.len()
+        || schedule.stage_finalizer_rows.len() != stages.len()
+    {
+        return Err(RusticolError::integrity(
+            "compiled selector-bound DirectTable row maps do not cover every stage",
+        ));
+    }
+    for (stage_index, stage) in stages.iter().enumerate() {
+        let selected = schedule
+            .active_stage_leaves
+            .get(stage_index)
+            .ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled selector schedule does not cover every DirectTable stage",
+                )
+            })?;
+        let mut initialized = BTreeSet::new();
+        let mut finalized = BTreeSet::new();
+        let table_rows = &mut schedule.stage_table_rows[stage_index];
+        let finalizer_rows = &mut schedule.stage_finalizer_rows[stage_index];
+        table_rows.clear();
+        finalizer_rows.clear();
+        for ordered in &stage.execution_order {
+            if selected
+                .binary_search(&ordered.original_chunk_index)
+                .is_err()
+            {
+                continue;
+            }
+            match ordered.operation {
+                CompiledStageOperation::TableCall(index) => {
+                    let call = stage.table_calls.get(index).ok_or_else(|| {
+                        RusticolError::integrity("selected compiled table call is out of bounds")
+                    })?;
+                    let rows = call
+                        .rows
+                        .with_recomputed_operations(call.output_complex_count, &mut initialized)?;
+                    call.application.validate_call_with_catalog(
+                        &rows,
+                        stage.table_catalog.as_ref().ok_or_else(|| {
+                            RusticolError::integrity("selected compiled table call has no catalog")
+                        })?,
+                        0,
+                        tile_capacity,
+                    )?;
+                    if table_rows.insert(index, rows).is_some() {
+                        return Err(RusticolError::integrity(
+                            "compiled table execution order repeats a call",
+                        ));
+                    }
+                }
+                CompiledStageOperation::FinalizerCall(index) => {
+                    let call = stage.finalizer_calls.get(index).ok_or_else(|| {
+                        RusticolError::integrity(
+                            "selected compiled finalizer call is out of bounds",
+                        )
+                    })?;
+                    let rows = call
+                        .rows
+                        .with_recomputed_operations(call.output_complex_count, &mut finalized)?;
+                    call.application.validate_call_with_catalog(
+                        &rows,
+                        stage.table_catalog.as_ref().ok_or_else(|| {
+                            RusticolError::integrity(
+                                "selected compiled finalizer call has no catalog",
+                            )
+                        })?,
+                        0,
+                        tile_capacity,
+                    )?;
+                    if finalizer_rows.insert(index, rows).is_some() {
+                        return Err(RusticolError::integrity(
+                            "compiled finalizer execution order repeats a call",
+                        ));
+                    }
+                }
+                CompiledStageOperation::ResidualLeaf(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_bound_stage_leaves(
     stage: &BoundStage,
     point_count: u32,
     selected: &[usize],
+    #[cfg(feature = "f64-symjit")] selected_table_rows: Option<&BTreeMap<usize, DirectTableRows>>,
+    #[cfg(feature = "f64-symjit")] selected_finalizer_rows: Option<
+        &BTreeMap<usize, DirectTableRows>,
+    >,
     traffic: &mut DirectArenaTrafficCounters,
 ) -> RusticolResult<()> {
-    for &leaf_index in selected {
-        stage.leaves[leaf_index].evaluate(0, point_count)?;
-        traffic.record_call(1, point_count);
+    for ordered in &stage.execution_order {
+        if selected
+            .binary_search(&ordered.original_chunk_index)
+            .is_err()
+        {
+            continue;
+        }
+        match ordered.operation {
+            CompiledStageOperation::ResidualLeaf(leaf_index) => {
+                stage.leaves[leaf_index].evaluate(0, point_count)?;
+                traffic.record_call(1, point_count);
+            }
+            #[cfg(feature = "f64-symjit")]
+            CompiledStageOperation::TableCall(call_index) => {
+                let rows = selected_table_rows
+                    .and_then(|rows| rows.get(&call_index))
+                    .ok_or_else(|| {
+                        RusticolError::integrity(
+                            "selected compiled table call has no selector-bound rows",
+                        )
+                    })?;
+                evaluate_compiled_table_call(stage, call_index, false, rows, point_count, traffic)?;
+            }
+            #[cfg(feature = "f64-symjit")]
+            CompiledStageOperation::FinalizerCall(call_index) => {
+                let rows = selected_finalizer_rows
+                    .and_then(|rows| rows.get(&call_index))
+                    .ok_or_else(|| {
+                        RusticolError::integrity(
+                            "selected compiled finalizer call has no selector-bound rows",
+                        )
+                    })?;
+                evaluate_compiled_table_call(stage, call_index, true, rows, point_count, traffic)?;
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "f64-symjit")]
+fn evaluate_compiled_table_call(
+    stage: &BoundStage,
+    call_index: usize,
+    finalizer: bool,
+    selected_rows: &DirectTableRows,
+    point_count: u32,
+    traffic: &mut DirectArenaTrafficCounters,
+) -> RusticolResult<()> {
+    let call = if finalizer {
+        stage.finalizer_calls.get(call_index)
+    } else {
+        stage.table_calls.get(call_index)
+    }
+    .ok_or_else(|| RusticolError::integrity("compiled DirectTable call index is out of bounds"))?;
+    let catalog = stage.table_catalog.as_ref().ok_or_else(|| {
+        RusticolError::integrity("compiled DirectTable call has no bound catalog")
+    })?;
+    // SAFETY: load-time validation authenticated the immutable rows/catalog,
+    // and every descriptor pointee is owned by the engine for this call.
+    unsafe {
+        call.application.evaluate_validated_with_catalog_unchecked(
+            selected_rows,
+            catalog,
+            0,
+            point_count,
+        )
+    }?;
+    traffic.record_call(selected_rows.invocation_count(), point_count);
+    Ok(())
+}
+
+fn refresh_compiled_stage_factors(
+    stage: &mut BoundStage,
+    parameter_re: &[f64],
+    _parameter_im: &[f64],
+) -> RusticolResult<()> {
+    #[cfg(feature = "f64-symjit")]
+    let Some(catalog) = stage.table_catalog.as_mut() else {
+        if stage.factor_specs.is_empty() {
+            return Ok(());
+        }
+        return Err(RusticolError::integrity(
+            "compiled stage factors exist without a DirectTable catalog",
+        ));
+    };
+    #[cfg(not(feature = "f64-symjit"))]
+    {
+        let _ = parameter_re;
+        if stage.factor_specs.is_empty() {
+            return Ok(());
+        }
+        return Err(RusticolError::compatibility(
+            "compiled stage factors require the f64-symjit runtime",
+        ));
+    }
+    #[cfg(feature = "f64-symjit")]
+    {
+        let (factor_re, factor_im) = catalog.factors_mut();
+        if factor_re.len() != stage.factor_specs.len() {
+            return Err(RusticolError::integrity(
+                "compiled factor catalog length changed after binding",
+            ));
+        }
+        for (index, spec) in stage.factor_specs.iter().copied().enumerate() {
+            let scale = match (spec.model_parameter_index, spec.parameter_component) {
+                (None, CompiledParameterComponent::None) => 1.0,
+                (
+                    Some(parameter),
+                    CompiledParameterComponent::Real | CompiledParameterComponent::Imag,
+                ) => *parameter_re.get(parameter).ok_or_else(|| {
+                    RusticolError::integrity(
+                        "compiled factor raw-f64 parameter index is out of bounds",
+                    )
+                })?,
+                _ => {
+                    return Err(RusticolError::integrity(
+                        "compiled factor parameter source is inconsistent",
+                    ));
+                }
+            };
+            factor_re[index] = spec.base[0] * scale;
+            factor_im[index] = spec.base[1] * scale;
+        }
+        Ok(())
+    }
 }
 
 fn validate_schedule<S: DirectStagePlan>(
@@ -1578,6 +2010,16 @@ fn validate_schedule<S: DirectStagePlan>(
         active_stage_leaves: validated_stages.into_boxed_slice(),
         active_amplitude_leaves: active_amplitude_leaves.to_vec().into_boxed_slice(),
         inactive_amplitude_components,
+        #[cfg(feature = "f64-symjit")]
+        stage_table_rows: (0..stages.len())
+            .map(|_| BTreeMap::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        #[cfg(feature = "f64-symjit")]
+        stage_finalizer_rows: (0..stages.len())
+            .map(|_| BTreeMap::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
     })
 }
 
@@ -1605,13 +2047,28 @@ fn evaluate_validated_schedule(
     point_count: u32,
     traffic: &mut DirectArenaTrafficCounters,
 ) -> RusticolResult<()> {
-    for (stage, selected) in stages.iter().zip(&schedule.active_stage_leaves) {
-        evaluate_bound_stage_leaves(stage, point_count, selected, traffic)?;
+    for (stage_index, (stage, selected)) in
+        stages.iter().zip(&schedule.active_stage_leaves).enumerate()
+    {
+        evaluate_bound_stage_leaves(
+            stage,
+            point_count,
+            selected,
+            #[cfg(feature = "f64-symjit")]
+            schedule.stage_table_rows.get(stage_index),
+            #[cfg(feature = "f64-symjit")]
+            schedule.stage_finalizer_rows.get(stage_index),
+            traffic,
+        )?;
     }
     evaluate_bound_stage_leaves(
         amplitude,
         point_count,
         &schedule.active_amplitude_leaves,
+        #[cfg(feature = "f64-symjit")]
+        None,
+        #[cfg(feature = "f64-symjit")]
+        None,
         traffic,
     )?;
     traffic.validate_direct()
@@ -1660,12 +2117,13 @@ fn load_stage(
         )));
     }
 
+    let (_, residual_output_len) = direct.residual_evaluator.io_len()?;
     let output_limit = if is_amplitude {
         amplitude_component_count
     } else {
         value_component_count
     };
-    let mut output_components = vec![None; stage.output_length];
+    let mut output_components = vec![None; residual_output_len];
     let mut seen_output_components = BTreeSet::new();
     let expected_arena = if is_amplitude { "amplitude" } else { "current" };
     for binding in &direct.output_bindings {
@@ -1701,7 +2159,7 @@ fn load_stage(
         )));
     }
     if is_amplitude
-        && (stage.output_length != amplitude_component_count
+        && (residual_output_len != amplitude_component_count
             || seen_output_components.len() != amplitude_component_count
             || seen_output_components
                 .iter()
@@ -1715,13 +2173,13 @@ fn load_stage(
         )));
     }
 
-    let leaf_layout = stage.evaluator.leaf_layout()?;
+    let leaf_layout = direct.residual_evaluator.leaf_layout()?;
     let mut loaded = Vec::with_capacity(leaf_layout.len());
     let mut leaf_plans = Vec::with_capacity(leaf_layout.len());
     let mut output_cursor = 0usize;
     for (leaf_index, leaf) in leaf_layout.into_iter().enumerate() {
         let (input_len, output_len) = leaf.evaluator.io_len()?;
-        let direct_leaf = direct.leaves.get(leaf_index).ok_or_else(|| {
+        let direct_leaf = direct.residual_leaves.get(leaf_index).ok_or_else(|| {
             RusticolError::integrity("compiled plane-arena leaf bindings are incomplete")
         })?;
         let direct_input_indices = direct_leaf.input_indices.as_slice();
@@ -1802,7 +2260,7 @@ fn load_stage(
             } => {
                 if *optimization_level > 3 {
                     return Err(RusticolError::compatibility(
-                        "compiled-plane-arena-v1 supports compiled JIT optimization levels 0 \
+                        "compiled stage-plan v2 supports compiled JIT optimization levels 0 \
                          through 3",
                     ));
                 }
@@ -1822,7 +2280,7 @@ fn load_stage(
                 })?;
                 if direct_leaf.application_path != *application_path
                     || direct_leaf.source_application_abi != *application_abi
-                    || direct_leaf.source_application_abi != direct.source_application_abi
+                    || direct_leaf.source_application_abi != direct.table_source_application_abi
                     || direct_leaf.optimization_level != *optimization_level
                     || direct_leaf.direct_codegen_optimization_level != 3
                 {
@@ -1883,8 +2341,7 @@ fn load_stage(
                     || direct_leaf.direct_codegen_optimization_level != 3
                     || direct_leaf.application_path != application.library_path
                     || direct_leaf.source_application_abi != application.application_abi
-                    || direct.source_application_abi != application.application_abi
-                    || direct.application_abi != application.application_abi
+                    || direct.residual_application_abi != application.application_abi
                 {
                     return Err(RusticolError::integrity(
                         "compiled native Direct-Arena leaf identity is inconsistent",
@@ -1957,16 +2414,397 @@ fn load_stage(
         });
         output_cursor = output_stop;
     }
-    if output_cursor != stage.output_length {
+    if output_cursor != residual_output_len {
         return Err(RusticolError::integrity(format!(
-            "compiled Direct-Arena stage {:?} leaf outputs do not cover the stage",
+            "compiled Direct-Arena stage {:?} residual leaves do not cover the residual evaluator",
             stage.evaluator_label
         )));
     }
+
+    let original_chunk_count = direct
+        .execution_order
+        .iter()
+        .map(|unit| unit.original_chunk_index as usize)
+        .max()
+        .map_or(0, |index| index + 1);
+    let mut chunk_inputs = vec![BTreeSet::new(); original_chunk_count];
+    let mut chunk_current_outputs = vec![BTreeSet::new(); original_chunk_count];
+    let mut chunk_amplitude_outputs = vec![BTreeSet::new(); original_chunk_count];
+    for (residual_index, plan) in leaf_plans.iter().enumerate() {
+        let chunk = direct.residual_leaves[residual_index].original_chunk_index;
+        chunk_inputs[chunk].extend(plan.input_current_components.iter().copied());
+        chunk_current_outputs[chunk].extend(plan.output_current_components.iter().copied());
+        chunk_amplitude_outputs[chunk].extend(plan.output_amplitude_components.iter().copied());
+    }
+    let current_components_by_id =
+        stage_output_current_components(stage, is_amplitude, value_component_count)?;
+    let mut execution_order = Vec::with_capacity(direct.execution_order.len());
+    for unit in &direct.execution_order {
+        let chunk = unit.original_chunk_index as usize;
+        let operation = match unit.kind.as_str() {
+            "residual-leaf" => CompiledStageOperation::ResidualLeaf(unit.index as usize),
+            #[cfg(feature = "f64-symjit")]
+            "table-call" => {
+                let call = direct.table_calls.get(unit.index as usize).ok_or_else(|| {
+                    RusticolError::integrity("compiled table execution index is out of bounds")
+                })?;
+                chunk_inputs[chunk].extend(call.dependency_current_components.iter().copied());
+                CompiledStageOperation::TableCall(unit.index as usize)
+            }
+            #[cfg(feature = "f64-symjit")]
+            "finalizer-call" => {
+                let call = direct
+                    .finalizer_calls
+                    .get(unit.index as usize)
+                    .ok_or_else(|| {
+                        RusticolError::integrity(
+                            "compiled finalizer execution index is out of bounds",
+                        )
+                    })?;
+                for current_id in &call.owned_current_ids {
+                    let components = current_components_by_id.get(current_id).ok_or_else(|| {
+                        RusticolError::integrity(
+                            "compiled finalizer owns a current absent from stage outputs",
+                        )
+                    })?;
+                    chunk_current_outputs[chunk].extend(components.iter().copied());
+                }
+                CompiledStageOperation::FinalizerCall(unit.index as usize)
+            }
+            _ => {
+                return Err(RusticolError::compatibility(
+                    "compiled stage-plan contains table operations but this build has no \
+                     f64-symjit DirectTable runtime",
+                ));
+            }
+        };
+        execution_order.push(CompiledStageOrderedOperation {
+            operation,
+            original_chunk_index: chunk,
+        });
+    }
+    let chunk_plans = (0..original_chunk_count)
+        .map(|chunk| DirectLeafPlan {
+            input_current_components: chunk_inputs[chunk]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            output_current_components: chunk_current_outputs[chunk]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            output_amplitude_components: chunk_amplitude_outputs[chunk]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        })
+        .collect::<Vec<_>>();
+
+    #[cfg(feature = "f64-symjit")]
+    let (table_calls, finalizer_calls) = {
+        let applications = direct
+            .table_kernels
+            .iter()
+            .map(|kernel| load_compiled_table_kernel(kernel, payloads).map(Arc::new))
+            .collect::<RusticolResult<Vec<_>>>()?;
+        let load_calls = |calls: &[CompiledTableCallGroupManifest]| -> RusticolResult<Vec<_>> {
+            calls
+                .iter()
+                .map(|call| {
+                    let kernel = direct
+                        .table_kernels
+                        .get(call.table_kernel_id as usize)
+                        .ok_or_else(|| {
+                            RusticolError::integrity(
+                                "compiled table call references an absent kernel",
+                            )
+                        })?;
+                    let application = applications
+                        .get(call.table_kernel_id as usize)
+                        .cloned()
+                        .ok_or_else(|| {
+                            RusticolError::integrity(
+                                "compiled table callable catalog is incomplete",
+                            )
+                        })?;
+                    let invocation_bytes = read_compiled_payload(&call.invocation_rows, payloads)?;
+                    let attachment_bytes = read_compiled_payload(&call.attachment_rows, payloads)?;
+                    let rows = application.load_rows(invocation_bytes, attachment_bytes)?;
+                    if rows.invocation_count() != call.invocation_rows.count
+                        || rows.attachment_count() != call.attachment_rows.count
+                    {
+                        return Err(RusticolError::integrity(
+                            "compiled table rows disagree with declared counts",
+                        ));
+                    }
+                    Ok(LoadedCompiledTableCall {
+                        application,
+                        rows,
+                        output_complex_count: kernel.output_complex_count,
+                    })
+                })
+                .collect()
+        };
+        (
+            load_calls(&direct.table_calls)?,
+            load_calls(&direct.finalizer_calls)?,
+        )
+    };
+
+    let factor_specs = direct
+        .factor_catalog
+        .iter()
+        .map(|factor| {
+            let parameter_component = match factor.parameter_component.as_str() {
+                "none" => CompiledParameterComponent::None,
+                "real" => CompiledParameterComponent::Real,
+                "imag" => CompiledParameterComponent::Imag,
+                _ => {
+                    return Err(RusticolError::integrity(
+                        "compiled factor parameter component is invalid",
+                    ));
+                }
+            };
+            Ok(CompiledFactorSpec {
+                base: factor.base,
+                model_parameter_index: factor.model_parameter_index,
+                parameter_component,
+            })
+        })
+        .collect::<RusticolResult<Vec<_>>>()?;
     Ok(LoadedStage {
         leaves: loaded,
-        leaf_plans,
+        leaf_plans: chunk_plans,
+        #[cfg(feature = "f64-symjit")]
+        table_calls,
+        #[cfg(feature = "f64-symjit")]
+        finalizer_calls,
+        execution_order,
+        plane_catalog: direct.plane_catalog.clone(),
+        factor_specs,
+        scratch_current_component_count: direct.scratch_current_component_count,
     })
+}
+
+fn stage_output_current_components(
+    stage: &GenericSerializedStageEvaluatorManifest,
+    is_amplitude: bool,
+    value_component_count: usize,
+) -> RusticolResult<BTreeMap<usize, Vec<usize>>> {
+    if is_amplitude {
+        return Ok(BTreeMap::new());
+    }
+    let mut result = BTreeMap::new();
+    for slot in &stage.output_slots {
+        let current_id = usize::try_from(slot.current_id).map_err(|_| {
+            RusticolError::integrity("compiled current stage output has a negative current id")
+        })?;
+        if slot.component_start >= slot.component_stop
+            || slot.component_stop > value_component_count
+        {
+            return Err(RusticolError::integrity(
+                "compiled current stage output component range is invalid",
+            ));
+        }
+        let components = (slot.component_start..slot.component_stop).collect::<Vec<_>>();
+        if result.insert(current_id, components).is_some() {
+            return Err(RusticolError::integrity(
+                "compiled current stage repeats a current id",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "f64-symjit")]
+fn load_compiled_table_kernel(
+    kernel: &CompiledTableKernelManifest,
+    payloads: &EvaluatorPayloadStore,
+) -> RusticolResult<LoadedSymjitEagerDirectTable> {
+    let source = read_compiled_payload(&kernel.source_application, payloads)?;
+    let descriptor = read_compiled_payload(&kernel.descriptor, payloads)?;
+    LoadedSymjitEagerDirectTable::load_prepared_application_bytes(
+        &source,
+        &descriptor,
+        PathBuf::from(&kernel.source_application.path),
+        &kernel.source_application_abi,
+        &kernel.descriptor_abi,
+        &kernel.binding_abi,
+    )
+}
+
+#[cfg(feature = "f64-symjit")]
+trait CompiledPayloadManifest {
+    fn path(&self) -> &str;
+    fn size_bytes(&self) -> u64;
+    fn sha256(&self) -> &str;
+}
+
+#[cfg(feature = "f64-symjit")]
+impl CompiledPayloadManifest for CompiledPayloadReferenceManifest {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+#[cfg(feature = "f64-symjit")]
+impl CompiledPayloadManifest for CompiledTableRowsManifest {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+#[cfg(feature = "f64-symjit")]
+fn read_compiled_payload(
+    payload: &impl CompiledPayloadManifest,
+    store: &EvaluatorPayloadStore,
+) -> RusticolResult<Vec<u8>> {
+    let source = store.source(payload.path())?;
+    let bytes = source.read()?;
+    if bytes.len() as u64 != payload.size_bytes() {
+        return Err(RusticolError::integrity(format!(
+            "compiled DirectTable payload {:?} has size {}, expected {}",
+            payload.path(),
+            bytes.len(),
+            payload.size_bytes()
+        )));
+    }
+    let actual = format!("{:x}", Sha256::digest(bytes.as_ref()));
+    if actual != payload.sha256() {
+        return Err(RusticolError::integrity(format!(
+            "compiled DirectTable payload {:?} digest mismatch",
+            payload.path()
+        )));
+    }
+    Ok(bytes.as_ref().to_vec())
+}
+
+#[cfg(feature = "f64-symjit")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn bind_compiled_table_catalog(
+    bindings: &[CompiledPlaneCatalogEntryManifest],
+    factor_specs: &[CompiledFactorSpec],
+    arena: crate::direct_arena::DirectArenaView,
+    momenta: DirectMomentumView,
+    model_parameter_re: *mut f64,
+    model_parameter_count: usize,
+    zero_plane: &AlignedF64Buffer,
+    scratch_current_base: u32,
+    current_component_map: &[u32],
+) -> RusticolResult<DirectTableCatalog> {
+    let stride = arena.point_stride as usize;
+    let current_shape = arena.current_shape()?;
+    let amplitude_shape = arena.amplitude_shape()?;
+    let mut planes = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let (values, len) = match binding.storage.as_str() {
+            "current" => {
+                let physical = current_component_map
+                    .get(binding.component)
+                    .copied()
+                    .filter(|component| *component != UNMAPPED_CURRENT_COMPONENT)
+                    .ok_or_else(|| {
+                        RusticolError::integrity(
+                            "compiled DirectTable current plane has no physical assignment",
+                        )
+                    })?;
+                let range =
+                    current_shape.checked_component_range(physical, 1, "table current plane")?;
+                let base = if binding.part == "real" {
+                    arena.current_re
+                } else {
+                    arena.current_im
+                };
+                (unsafe { base.add(range.start) }, range.len())
+            }
+            "scratch-current" => {
+                let component = scratch_current_base
+                    .checked_add(u32::try_from(binding.component).map_err(|_| {
+                        RusticolError::integrity("compiled scratch-current component exceeds u32")
+                    })?)
+                    .ok_or_else(|| {
+                        RusticolError::integrity("compiled scratch-current component overflows")
+                    })?;
+                let range =
+                    current_shape.checked_component_range(component, 1, "table scratch plane")?;
+                let base = if binding.part == "real" {
+                    arena.current_re
+                } else {
+                    arena.current_im
+                };
+                (unsafe { base.add(range.start) }, range.len())
+            }
+            "momentum" => {
+                if binding.part == "imag" {
+                    (zero_plane.as_ptr().cast_mut(), zero_plane.len())
+                } else {
+                    let offset = binding.component.checked_mul(stride).ok_or_else(|| {
+                        RusticolError::integrity("compiled momentum plane offset overflows")
+                    })?;
+                    (unsafe { momenta.values.add(offset).cast_mut() }, stride)
+                }
+            }
+            "model-parameter" => {
+                if binding.component >= model_parameter_count {
+                    return Err(RusticolError::integrity(
+                        "compiled model-parameter plane is out of bounds",
+                    ));
+                }
+                let offset = binding.component.checked_mul(stride).ok_or_else(|| {
+                    RusticolError::integrity("compiled model-parameter plane offset overflows")
+                })?;
+                // Model-parameter components are resolved raw-f64 runtime
+                // slots. `part` retains logical real/imaginary provenance but
+                // never selects the legacy complex side buffer.
+                (unsafe { model_parameter_re.add(offset) }, stride)
+            }
+            "zero" => (zero_plane.as_ptr().cast_mut(), zero_plane.len()),
+            "amplitude" => {
+                let component = u32::try_from(binding.component).map_err(|_| {
+                    RusticolError::integrity("compiled amplitude plane exceeds u32")
+                })?;
+                let range = amplitude_shape.checked_component_range(
+                    component,
+                    1,
+                    "table amplitude plane",
+                )?;
+                let base = if binding.part == "real" {
+                    arena.amplitude_re
+                } else {
+                    arena.amplitude_im
+                };
+                (unsafe { base.add(range.start) }, range.len())
+            }
+            _ => {
+                return Err(RusticolError::integrity(
+                    "compiled DirectTable plane storage is invalid",
+                ));
+            }
+        };
+        planes.push(unsafe { DirectPlane::from_raw_parts(values, len) });
+    }
+    let factor_re = factor_specs.iter().map(|spec| spec.base[0]).collect();
+    let factor_im = factor_specs.iter().map(|spec| spec.base[1]).collect();
+    unsafe { DirectTableCatalog::new(planes, Vec::new(), factor_re, factor_im) }
 }
 
 #[cfg(feature = "f64-symjit")]
@@ -2211,8 +3049,10 @@ fn append_component_bindings(
 #[cfg(all(test, feature = "f64-symjit"))]
 mod tests {
     use super::super::evaluator::count_test_allocations;
+    use super::super::evaluator::symjit_eager_direct::eager_direct_descriptor_for_source_application_bytes;
     use super::*;
     use std::fs;
+    use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
@@ -2232,6 +3072,12 @@ mod tests {
         LoadedStage {
             leaves: Vec::new(),
             leaf_plans: leaves,
+            table_calls: Vec::new(),
+            finalizer_calls: Vec::new(),
+            execution_order: Vec::new(),
+            plane_catalog: Vec::new(),
+            factor_specs: Vec::new(),
+            scratch_current_component_count: 0,
         }
     }
 
@@ -2343,6 +3189,40 @@ mod tests {
             required_defuns: Vec::new(),
             evaluator_state_path: None,
             evaluator_state_runtime_capability: None,
+        }
+    }
+
+    fn write_compiled_payload(
+        root: &Path,
+        relative: &str,
+        bytes: &[u8],
+    ) -> CompiledPayloadReferenceManifest {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+        CompiledPayloadReferenceManifest {
+            path: relative.to_string(),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    fn write_compiled_rows(
+        root: &Path,
+        relative: &str,
+        fields: &[u32],
+    ) -> CompiledTableRowsManifest {
+        let bytes = fields
+            .iter()
+            .flat_map(|field| field.to_le_bytes())
+            .collect::<Vec<_>>();
+        let payload = write_compiled_payload(root, relative, &bytes);
+        CompiledTableRowsManifest {
+            path: payload.path,
+            size_bytes: payload.size_bytes,
+            sha256: payload.sha256,
+            count: 1,
+            row_size: bytes.len() as u32,
         }
     }
 
@@ -2493,9 +3373,10 @@ extern "C" int native_direct_leaf_direct_application_v1(
         let leaf_layout = evaluator.leaf_layout().unwrap();
         let mut direct_application_abi = None;
         let mut direct_source_abi = None;
-        let direct_leaves = leaf_layout
+        let direct_leaves: Vec<CompiledPlaneLeafManifest> = leaf_layout
             .iter()
-            .map(|leaf| {
+            .enumerate()
+            .map(|(leaf_index, leaf)| {
                 let (application_path, application_abi, optimization_level, input_len, output_len) =
                     match leaf.evaluator {
                         EvaluatorManifest::SymjitApplication {
@@ -2540,6 +3421,8 @@ extern "C" int native_direct_leaf_direct_application_v1(
                         });
                 }
                 CompiledPlaneLeafManifest {
+                    residual_leaf_index: leaf_index,
+                    original_chunk_index: leaf_index,
                     application_path: application_path.clone(),
                     source_application_abi: application_abi.clone(),
                     optimization_level,
@@ -2570,24 +3453,60 @@ extern "C" int native_direct_leaf_direct_application_v1(
             .map(
                 |(output_index, component)| CompiledPlaneOutputBindingManifest {
                     output_index,
+                    original_output_index: output_index,
                     arena: if amplitude { "amplitude" } else { "current" }.to_string(),
                     component,
                 },
             )
             .collect();
+        let execution_order = (0..direct_leaves.len())
+            .map(|index| CompiledStageExecutionUnitManifest {
+                kind: "residual-leaf".to_string(),
+                index: index as u32,
+                original_chunk_index: index as u32,
+            })
+            .collect::<Vec<_>>();
+        let selector_partitions = if execution_order.is_empty() {
+            Vec::new()
+        } else {
+            vec![CompiledSelectorPartitionManifest {
+                partition_id: 0,
+                helicity_selector_domain_ids: Vec::new(),
+                color_selector_domain_ids: Vec::new(),
+                original_chunk_indices: (0..execution_order.len() as u32).collect(),
+            }]
+        };
         let compiled_plane_arena = Some(CompiledPlaneArenaStageManifest {
-            schema_version: 1,
-            kind: "compiled-plane-arena-stage".to_string(),
-            application_abi: direct_application_abi.unwrap(),
-            source_application_abi: direct_source_abi.unwrap(),
+            schema_version: 2,
+            kind: "compiled-stage-plan".to_string(),
+            plan_abi: COMPILED_STAGE_PLAN_ABI.to_string(),
+            residual_application_abi: direct_application_abi.unwrap(),
+            table_source_application_abi: COMPILED_PLANE_SOURCE_APPLICATION_ABI.to_string(),
+            direct_table_descriptor_abi: COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI.to_string(),
+            direct_table_binding_abi: COMPILED_DIRECT_TABLE_BINDING_ABI.to_string(),
             element_layout: "split-complex-component-major".to_string(),
-            output_operation: "overwrite".to_string(),
-            output_factor: "identity".to_string(),
-            input_output_aliasing: "forbidden".to_string(),
-            output_output_aliasing: "forbidden".to_string(),
             input_bindings: direct_inputs,
             output_bindings: direct_outputs,
-            leaves: direct_leaves,
+            residual_evaluator: Box::new(evaluator.clone()),
+            residual_leaves: direct_leaves,
+            scratch_current_component_count: 0,
+            plane_catalog: Vec::new(),
+            factor_catalog: Vec::new(),
+            table_kernels: Vec::new(),
+            table_calls: Vec::new(),
+            finalizer_calls: Vec::new(),
+            execution_order,
+            selector_partitions,
+            diagnostics: CompiledStagePlanDiagnosticsManifest {
+                island_count: 0,
+                kernel_count: 0,
+                invocation_count: 0,
+                attachment_count: 0,
+                table_source_bytes: 0,
+                descriptor_bytes: 0,
+                semantic_row_bytes: 0,
+                scratch_current_component_count: 0,
+            },
         });
         let value_parameter_count = inputs.iter().filter(|item| item.kind == "value").count();
         let momentum_parameter_count = inputs.iter().filter(|item| item.kind == "momentum").count();
@@ -2635,6 +3554,247 @@ extern "C" int native_direct_leaf_direct_application_v1(
             blockers: Vec::new(),
             evaluator,
             compiled_plane_arena,
+        }
+    }
+
+    #[test]
+    fn tableized_stage_plan_executes_contribution_and_finalizer_without_residual_leaves() {
+        let payload_root = test_payload_directory();
+        fs::create_dir_all(&payload_root).unwrap();
+        let x = Expr::var("x");
+        let identity_bytes = source_application(std::slice::from_ref(&x), std::slice::from_ref(&x));
+        fs::write(payload_root.join("identity.symjit"), &identity_bytes).unwrap();
+        fs::write(payload_root.join("amplitude.symjit"), &identity_bytes).unwrap();
+        let descriptor = eager_direct_descriptor_for_source_application_bytes(
+            &identity_bytes,
+            1,
+            1,
+            Path::new("identity.symjit"),
+        )
+        .unwrap();
+        let source_payload =
+            write_compiled_payload(&payload_root, "table/identity.symjit", &identity_bytes);
+        let descriptor_payload =
+            write_compiled_payload(&payload_root, "table/identity.direct-table", &descriptor);
+        let contribution_invocations = write_compiled_rows(
+            &payload_root,
+            "table/contribution-invocations.bin",
+            &[0, 1, 0, 1],
+        );
+        let contribution_attachments = write_compiled_rows(
+            &payload_root,
+            "table/contribution-attachments.bin",
+            &[2, 3, 0, 0],
+        );
+        let finalizer_invocations = write_compiled_rows(
+            &payload_root,
+            "table/finalizer-invocations.bin",
+            &[2, 3, 0, 1],
+        );
+        let finalizer_attachments = write_compiled_rows(
+            &payload_root,
+            "table/finalizer-attachments.bin",
+            &[4, 5, 0, 0],
+        );
+
+        let mut stage = stage_manifest(
+            "tableized-stage",
+            vec![input_component("value", 0, 0, 0, 0, false)],
+            &[1],
+            evaluator("identity.symjit", 1, 1),
+            false,
+        );
+        let plan = stage.compiled_plane_arena.as_mut().unwrap();
+        plan.residual_evaluator = Box::new(EvaluatorManifest::CompiledStageEmptyResidual {
+            input_len: 0,
+            output_len: 0,
+            required_runtime_capabilities: Vec::new(),
+        });
+        plan.output_bindings.clear();
+        plan.residual_leaves.clear();
+        plan.scratch_current_component_count = 1;
+        plan.plane_catalog = vec![
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 0,
+                storage: "current".to_string(),
+                component: 0,
+                part: "real".to_string(),
+                current_id: Some(0),
+                proven_real: false,
+            },
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 1,
+                storage: "current".to_string(),
+                component: 0,
+                part: "imag".to_string(),
+                current_id: Some(0),
+                proven_real: false,
+            },
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 2,
+                storage: "scratch-current".to_string(),
+                component: 0,
+                part: "real".to_string(),
+                current_id: Some(1),
+                proven_real: false,
+            },
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 3,
+                storage: "scratch-current".to_string(),
+                component: 0,
+                part: "imag".to_string(),
+                current_id: Some(1),
+                proven_real: false,
+            },
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 4,
+                storage: "current".to_string(),
+                component: 1,
+                part: "real".to_string(),
+                current_id: Some(1),
+                proven_real: false,
+            },
+            CompiledPlaneCatalogEntryManifest {
+                plane_id: 5,
+                storage: "current".to_string(),
+                component: 1,
+                part: "imag".to_string(),
+                current_id: Some(1),
+                proven_real: false,
+            },
+        ];
+        plan.factor_catalog = vec![CompiledFactorCatalogEntryManifest {
+            factor_id: 0,
+            base: [1.0, 0.0],
+            model_parameter_index: None,
+            parameter_component: "none".to_string(),
+        }];
+        let kernel =
+            |table_kernel_id, role: &str, prepared_kernel_id| CompiledTableKernelManifest {
+                table_kernel_id,
+                prepared_kernel_id,
+                role: role.to_string(),
+                canonical_signature: format!("identity-{role}"),
+                source_application: source_payload.clone(),
+                descriptor: descriptor_payload.clone(),
+                source_application_abi: COMPILED_PLANE_SOURCE_APPLICATION_ABI.to_string(),
+                descriptor_abi: COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI.to_string(),
+                binding_abi: COMPILED_DIRECT_TABLE_BINDING_ABI.to_string(),
+                input_complex_count: 1,
+                output_complex_count: 1,
+                scalar_input_count: 0,
+                optimization_level: 3,
+                input_contracts: vec![serde_json::json!({"kind": "complex"})],
+                output_layout: vec!["complex".to_string()],
+            };
+        plan.table_kernels = vec![
+            kernel(0, "contribution", Some(0)),
+            kernel(1, "finalizer", None),
+        ];
+        let call =
+            |table_kernel_id,
+             invocation_rows,
+             attachment_rows,
+             dependency_current_ids,
+             dependency_current_components| CompiledTableCallGroupManifest {
+                table_kernel_id,
+                invocation_rows,
+                attachment_rows,
+                owned_current_ids: vec![1],
+                dependency_current_ids,
+                dependency_current_components,
+                selector_partition_ids: vec![0],
+            };
+        plan.table_calls = vec![call(
+            0,
+            contribution_invocations,
+            contribution_attachments,
+            vec![0],
+            vec![0],
+        )];
+        plan.finalizer_calls = vec![call(
+            1,
+            finalizer_invocations,
+            finalizer_attachments,
+            Vec::new(),
+            Vec::new(),
+        )];
+        plan.execution_order = vec![
+            CompiledStageExecutionUnitManifest {
+                kind: "table-call".to_string(),
+                index: 0,
+                original_chunk_index: 0,
+            },
+            CompiledStageExecutionUnitManifest {
+                kind: "finalizer-call".to_string(),
+                index: 0,
+                original_chunk_index: 0,
+            },
+        ];
+        plan.diagnostics = CompiledStagePlanDiagnosticsManifest {
+            island_count: 1,
+            kernel_count: 2,
+            invocation_count: 2,
+            attachment_count: 2,
+            table_source_bytes: source_payload.size_bytes * 2,
+            descriptor_bytes: descriptor_payload.size_bytes * 2,
+            semantic_row_bytes: 64,
+            scratch_current_component_count: 1,
+        };
+
+        let amplitude = stage_manifest(
+            "amplitude-stage",
+            vec![input_component("value", 1, 0, 1, 0, false)],
+            &[0],
+            evaluator("amplitude.symjit", 1, 1),
+            true,
+        );
+        let payloads = EvaluatorPayloadStore::directory(&payload_root);
+        let point_count = 5;
+        let mut direct = CompiledDirectEnginePrototype::load(
+            std::slice::from_ref(&stage),
+            &amplitude,
+            &payloads,
+            &[0],
+            1,
+            2,
+            4,
+            0,
+            1,
+            point_count as u32,
+        )
+        .unwrap();
+        let expected = (0..point_count)
+            .map(|point| Complex::new(point as f64 + 0.25, 0.5 - point as f64))
+            .collect::<Vec<_>>();
+        let state = expected
+            .iter()
+            .flat_map(|value| {
+                [
+                    *value,
+                    Complex::new(0.0, 0.0),
+                    Complex::new(0.0, 0.0),
+                    Complex::new(0.0, 0.0),
+                    Complex::new(0.0, 0.0),
+                    Complex::new(0.0, 0.0),
+                ]
+            })
+            .collect::<Vec<_>>();
+        direct
+            .begin_tile_from_state(point_count, 6, &state)
+            .unwrap();
+        direct.evaluate_all(point_count).unwrap();
+        let (result, allocations, allocated_bytes) =
+            count_test_allocations(|| direct.evaluate_all(point_count));
+        result.unwrap();
+        assert_eq!(allocations, 0, "warmed tableized stage allocated");
+        assert_eq!(allocated_bytes, 0, "warmed tableized stage allocated bytes");
+        let mut output = vec![Complex::new(0.0, 0.0); point_count];
+        direct
+            .extract_amplitudes_row_major(point_count, &mut output)
+            .unwrap();
+        for (actual, expected) in output.into_iter().zip(expected) {
+            assert_close(actual, expected);
         }
     }
 

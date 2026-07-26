@@ -20,6 +20,7 @@ pub(crate) use crate::eager_layout::{
 };
 use crate::{RusticolError, RusticolResult};
 use std::any::Any;
+use std::collections::BTreeSet;
 #[cfg(feature = "f64-compiled")]
 use std::ffi::CStr;
 #[cfg(feature = "f64-compiled")]
@@ -32,7 +33,7 @@ use symjit::{
     Application, Config, DIRECT_STATUS_EXECUTION_FAILED, DIRECT_STATUS_INVALID_ARGUMENT,
     DIRECT_STATUS_INVALID_CONTEXT, DIRECT_STATUS_OK, Defuns, DirectPlane, DirectScalar,
     DirectTableApplication, DirectTableApplicationMetadata, DirectTableAttachmentLayout,
-    DirectTableCallViewV1, DirectTableCallable, DirectTableInvocationLayout,
+    DirectTableCallViewV1, DirectTableCallable, DirectTableCodeShape, DirectTableInvocationLayout,
     DirectTableParameterBinding, Storage,
 };
 
@@ -162,13 +163,21 @@ pub(crate) enum EagerDirectArenaPlaneBinding {
 }
 
 /// Immutable invocation and attachment tables for one eager callable.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EagerDirectTableRows {
     invocations: Box<[u8]>,
     invocation_count: u32,
     attachments: Box<[u8]>,
     attachment_count: u32,
 }
+
+/// Lane-neutral immutable DirectTable rows.
+///
+/// Eager introduced the adapter, but compiled stage-plan v2 deliberately uses
+/// the exact same binding-v1 row contract.  Keep the original name as the
+/// eager API while exposing an explicit neutral alias to avoid a second,
+/// subtly different row decoder.
+pub(crate) type DirectTableRows = EagerDirectTableRows;
 
 impl EagerDirectTableRows {
     pub(crate) fn invocation_count(&self) -> u32 {
@@ -177,6 +186,58 @@ impl EagerDirectTableRows {
 
     pub(crate) fn attachment_count(&self) -> u32 {
         self.attachment_count
+    }
+
+    /// Clone immutable rows while rebuilding first-retained
+    /// overwrite/accumulate operations for a cold-bound selector schedule.
+    pub(crate) fn with_recomputed_operations(
+        &self,
+        output_complex_count: u32,
+        initialized_destinations: &mut BTreeSet<Vec<u32>>,
+    ) -> RusticolResult<Self> {
+        if output_complex_count == 0 {
+            return Err(RusticolError::integrity(
+                "DirectTable output width must be positive",
+            ));
+        }
+        let destination_count = output_complex_count
+            .checked_mul(2)
+            .ok_or_else(|| RusticolError::integrity("DirectTable destination width overflows"))?;
+        let row_size = destination_count
+            .checked_add(2)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| RusticolError::integrity("DirectTable attachment row size overflows"))?;
+        let row_size = usize::try_from(row_size)
+            .map_err(|_| RusticolError::integrity("DirectTable row size exceeds usize"))?;
+        if !self.attachments.len().is_multiple_of(row_size) {
+            return Err(RusticolError::integrity(
+                "DirectTable attachment bytes disagree with output width",
+            ));
+        }
+        let operation_offset = usize::try_from(
+            destination_count
+                .checked_add(1)
+                .and_then(|field| field.checked_mul(4))
+                .ok_or_else(|| {
+                    RusticolError::integrity("DirectTable operation offset overflows")
+                })?,
+        )
+        .map_err(|_| RusticolError::integrity("DirectTable operation offset exceeds usize"))?;
+        let mut attachments = self.attachments.to_vec();
+        for row in attachments.chunks_exact_mut(row_size) {
+            let destinations = row[..destination_count as usize * 4]
+                .chunks_exact(4)
+                .map(|field| u32::from_le_bytes(field.try_into().expect("four-byte field")))
+                .collect::<Vec<_>>();
+            let operation = u32::from(!initialized_destinations.insert(destinations));
+            row[operation_offset..operation_offset + 4].copy_from_slice(&operation.to_le_bytes());
+        }
+        Ok(Self {
+            invocations: self.invocations.clone(),
+            invocation_count: self.invocation_count,
+            attachments: attachments.into_boxed_slice(),
+            attachment_count: self.attachment_count,
+        })
     }
 }
 
@@ -191,6 +252,104 @@ pub(crate) struct EagerDirectTableWorkspace {
     scalars: Box<[DirectScalar]>,
     factor_re: Box<[f64]>,
     factor_im: Box<[f64]>,
+}
+
+/// Stable lane-neutral catalogs referenced by a DirectTable call view.
+///
+/// Plane and scalar descriptors may point into storage owned by another
+/// runtime object.  Construction is therefore unsafe and restricted to
+/// cold-bound runtime loaders that prove the pointees outlive this catalog.
+/// Factor values are owned here so model-parameter mutation can refresh them
+/// in place without rebuilding any descriptor or allocating in the warmed
+/// path.
+pub(crate) struct DirectTableCatalog {
+    planes: Box<[DirectPlane]>,
+    scalars: Box<[DirectScalar]>,
+    factor_re: Box<[f64]>,
+    factor_im: Box<[f64]>,
+}
+
+impl DirectTableCatalog {
+    /// # Safety
+    ///
+    /// Every plane and scalar descriptor must remain live and retain its
+    /// address for the lifetime of this catalog and every call that borrows
+    /// it.
+    pub(crate) unsafe fn new(
+        planes: Vec<DirectPlane>,
+        scalars: Vec<DirectScalar>,
+        factor_re: Vec<f64>,
+        factor_im: Vec<f64>,
+    ) -> RusticolResult<Self> {
+        if planes.is_empty() {
+            return Err(RusticolError::invalid_argument(
+                "direct-table plane catalog must not be empty",
+            ));
+        }
+        if factor_re.is_empty() || factor_re.len() != factor_im.len() {
+            return Err(RusticolError::invalid_argument(
+                "direct-table factors must be nonempty split-complex pairs",
+            ));
+        }
+        u32::try_from(planes.len())
+            .and_then(|_| u32::try_from(scalars.len()))
+            .and_then(|_| u32::try_from(factor_re.len()))
+            .map_err(|_| {
+                RusticolError::invalid_argument("direct-table catalog count exceeds u32")
+            })?;
+        Ok(Self {
+            planes: planes.into_boxed_slice(),
+            scalars: scalars.into_boxed_slice(),
+            factor_re: factor_re.into_boxed_slice(),
+            factor_im: factor_im.into_boxed_slice(),
+        })
+    }
+
+    pub(crate) fn factors_mut(&mut self) -> (&mut [f64], &mut [f64]) {
+        (&mut self.factor_re, &mut self.factor_im)
+    }
+
+    fn view(
+        &self,
+        rows: &DirectTableRows,
+        invocation_stride: u32,
+        attachment_stride: u32,
+        point_start: u32,
+        point_count: u32,
+    ) -> RusticolResult<DirectTableCallViewV1> {
+        if point_count == 0 {
+            return Err(RusticolError::invalid_argument(
+                "direct-table point count must be positive",
+            ));
+        }
+        let _ = point_start.checked_add(point_count).ok_or_else(|| {
+            RusticolError::invalid_argument("direct-table point range overflows u32")
+        })?;
+        Ok(DirectTableCallViewV1 {
+            invocations: rows.invocations.as_ptr(),
+            invocation_count: rows.invocation_count,
+            invocation_stride,
+            attachments: rows.attachments.as_ptr(),
+            attachment_count: rows.attachment_count,
+            attachment_stride,
+            planes: self.planes.as_ptr(),
+            plane_count: u32::try_from(self.planes.len())
+                .map_err(|_| RusticolError::internal("direct-table plane catalog exceeds u32"))?,
+            scalar_count: u32::try_from(self.scalars.len())
+                .map_err(|_| RusticolError::internal("direct-table scalar catalog exceeds u32"))?,
+            scalars: if self.scalars.is_empty() {
+                ptr::null()
+            } else {
+                self.scalars.as_ptr()
+            },
+            scale_re: self.factor_re.as_ptr(),
+            scale_im: self.factor_im.as_ptr(),
+            scale_count: u32::try_from(self.factor_re.len())
+                .map_err(|_| RusticolError::internal("direct-table factor catalog exceeds u32"))?,
+            point_start,
+            point_count,
+        })
+    }
 }
 
 impl EagerDirectTableWorkspace {
@@ -638,6 +797,16 @@ impl LoadedSymjitEagerDirectTable {
         }
     }
 
+    pub(crate) fn code_shapes(&self) -> Option<(DirectTableCodeShape, DirectTableCodeShape)> {
+        match &self.callable {
+            EagerDirectTableCallable::Symjit(callable) => {
+                Some((callable.scalar_code_shape(), callable.simd_code_shape()))
+            }
+            #[cfg(feature = "f64-compiled")]
+            EagerDirectTableCallable::Native(_) => None,
+        }
+    }
+
     pub(crate) fn load_rows(
         &self,
         invocation_bytes: Vec<u8>,
@@ -682,6 +851,42 @@ impl LoadedSymjitEagerDirectTable {
         .map_err(|error| {
             RusticolError::integrity(format!(
                 "invalid eager Direct-Arena table call {}: {error}",
+                self.display_path.display()
+            ))
+        })
+    }
+
+    /// Validate immutable rows against a lane-neutral descriptor catalog.
+    pub(crate) fn validate_call_with_catalog(
+        &self,
+        rows: &DirectTableRows,
+        catalog: &DirectTableCatalog,
+        point_start: u32,
+        point_count: u32,
+    ) -> RusticolResult<()> {
+        let metadata = self.metadata();
+        if catalog.scalars.len() != metadata.scalar_input_count as usize {
+            return Err(RusticolError::integrity(format!(
+                "DirectTable scalar catalog has {} entries, expected {}",
+                catalog.scalars.len(),
+                metadata.scalar_input_count
+            )));
+        }
+        let view = catalog.view(
+            rows,
+            metadata.invocation.row_stride,
+            metadata.attachment.row_stride,
+            point_start,
+            point_count,
+        )?;
+        guard_symjit_panic(
+            || unsafe { self.metadata().validate_call_view(&view) },
+            &self.display_path,
+            "validate table call",
+        )?
+        .map_err(|error| {
+            RusticolError::integrity(format!(
+                "invalid DirectTable call {}: {error}",
                 self.display_path.display()
             ))
         })
@@ -732,6 +937,42 @@ impl LoadedSymjitEagerDirectTable {
         point_count: u32,
     ) -> RusticolResult<()> {
         let view = self.call_view(rows, workspace, point_start, point_count)?;
+        let status = guard_symjit_panic(
+            || unsafe {
+                match &self.callable {
+                    EagerDirectTableCallable::Symjit(callable) => callable.invoke_unchecked(&view),
+                    #[cfg(feature = "f64-compiled")]
+                    EagerDirectTableCallable::Native(callable) => (callable.call)(&view),
+                }
+            },
+            &self.display_path,
+            "execute validated table call",
+        )?;
+        map_direct_status(status, &self.display_path)
+    }
+
+    /// Execute immutable rows against a previously authenticated
+    /// lane-neutral catalog.
+    ///
+    /// # Safety
+    ///
+    /// The caller must preserve every row, descriptor, and descriptor pointee
+    /// authenticated by [`Self::validate_call_with_catalog`].
+    pub(crate) unsafe fn evaluate_validated_with_catalog_unchecked(
+        &self,
+        rows: &DirectTableRows,
+        catalog: &DirectTableCatalog,
+        point_start: u32,
+        point_count: u32,
+    ) -> RusticolResult<()> {
+        let metadata = self.metadata();
+        let view = catalog.view(
+            rows,
+            metadata.invocation.row_stride,
+            metadata.attachment.row_stride,
+            point_start,
+            point_count,
+        )?;
         let status = guard_symjit_panic(
             || unsafe {
                 match &self.callable {

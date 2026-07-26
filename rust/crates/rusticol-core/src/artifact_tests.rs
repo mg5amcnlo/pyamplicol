@@ -1188,23 +1188,27 @@ fn mixed_backend_runtime_artifact() -> TestArtifact {
     let direct_stage = &mut direct_execution["compiled"]["stage_evaluators"]["amplitude_stage"];
     direct_stage["parameter_layout"] = json!("stage-local-value-momentum");
     direct_stage["input_components"] = json!(input_bindings);
+    let residual_evaluator = direct_stage["evaluator"].clone();
     direct_stage["compiled_plane_arena"] = json!({
-        "schema_version": 1,
-        "kind": "compiled-plane-arena-stage",
-        "application_abi": crate::engine::COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-        "source_application_abi": crate::engine::COMPILED_PLANE_SOURCE_APPLICATION_ABI,
+        "schema_version": 2,
+        "kind": "compiled-stage-plan",
+        "plan_abi": crate::engine::COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": crate::engine::COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+        "table_source_application_abi": crate::engine::COMPILED_PLANE_SOURCE_APPLICATION_ABI,
+        "direct_table_descriptor_abi": crate::engine::COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": crate::engine::COMPILED_DIRECT_TABLE_BINDING_ABI,
         "element_layout": "split-complex-component-major",
-        "output_operation": "overwrite",
-        "output_factor": "identity",
-        "input_output_aliasing": "forbidden",
-        "output_output_aliasing": "forbidden",
         "input_bindings": (0..14).map(input_binding).collect::<Vec<_>>(),
         "output_bindings": [{
             "output_index": 0,
+            "original_output_index": 0,
             "arena": "amplitude",
             "component": 0,
         }],
-        "leaves": [{
+        "residual_evaluator": residual_evaluator,
+        "residual_leaves": [{
+            "residual_leaf_index": 0,
+            "original_chunk_index": 0,
             "application_path": "evaluators/direct.symjit",
             "source_application_abi": crate::engine::COMPILED_PLANE_SOURCE_APPLICATION_ABI,
             "optimization_level": 3,
@@ -1215,6 +1219,33 @@ fn mixed_backend_runtime_artifact() -> TestArtifact {
             "output_start": 0,
             "output_stop": 1,
         }],
+        "scratch_current_component_count": 0,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [],
+        "table_calls": [],
+        "finalizer_calls": [],
+        "execution_order": [{
+            "kind": "residual-leaf",
+            "index": 0,
+            "original_chunk_index": 0,
+        }],
+        "selector_partitions": [{
+            "partition_id": 0,
+            "helicity_selector_domain_ids": [],
+            "color_selector_domain_ids": [],
+            "original_chunk_indices": [0],
+        }],
+        "diagnostics": {
+            "island_count": 0,
+            "kernel_count": 0,
+            "invocation_count": 0,
+            "attachment_count": 0,
+            "table_source_bytes": 0,
+            "descriptor_bytes": 0,
+            "semantic_row_bytes": 0,
+            "scratch_current_component_count": 0,
+        },
     });
     direct_execution["compiled"]["stage_evaluators"]["parameter_layout"] =
         json!("stage-local-value-momentum");

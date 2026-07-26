@@ -446,8 +446,10 @@ pub(super) fn validate_evaluator_payload_references(
     if let Some(stages) = &manifest.compiled.stage_evaluators {
         for stage in &stages.stages {
             validate_evaluator_reference(artifact, relative_root, &stage.evaluator)?;
+            validate_compiled_stage_plan_references(artifact, relative_root, stage)?;
         }
         validate_evaluator_reference(artifact, relative_root, &stages.amplitude_stage.evaluator)?;
+        validate_compiled_stage_plan_references(artifact, relative_root, &stages.amplitude_stage)?;
     }
     if let Some(sum_manifest) = manifest.helicity_sum_execution.as_deref() {
         validate_evaluator_payload_references(artifact, evaluator_root, sum_manifest)?;
@@ -461,12 +463,36 @@ pub(super) fn validate_evaluator_payload_references(
     Ok(())
 }
 
+fn validate_compiled_stage_plan_references(
+    artifact: &VerifiedArtifact,
+    relative_root: &Path,
+    stage: &GenericSerializedStageEvaluatorManifest,
+) -> RusticolResult<()> {
+    let Some(plan) = stage.compiled_plane_arena.as_ref() else {
+        return Ok(());
+    };
+    validate_evaluator_reference(artifact, relative_root, &plan.residual_evaluator)?;
+    for kernel in &plan.table_kernels {
+        validate_evaluator_state_path(artifact, relative_root, &kernel.source_application.path)?;
+        validate_evaluator_state_path(artifact, relative_root, &kernel.descriptor.path)?;
+    }
+    for call in plan.table_calls.iter().chain(&plan.finalizer_calls) {
+        validate_evaluator_state_path(artifact, relative_root, &call.invocation_rows.path)?;
+        validate_evaluator_state_path(artifact, relative_root, &call.attachment_rows.path)?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_evaluator_reference(
     artifact: &VerifiedArtifact,
     relative_root: &Path,
     evaluator: &EvaluatorManifest,
 ) -> RusticolResult<()> {
     match evaluator {
+        EvaluatorManifest::CompiledStageEmptyResidual { .. } => {
+            evaluator.io_len()?;
+            Ok(())
+        }
         EvaluatorManifest::SymjitApplication {
             application_path,
             evaluator_state_path,

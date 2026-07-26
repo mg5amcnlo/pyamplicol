@@ -2194,6 +2194,10 @@ fn flatten_exact_evaluators_from_store(
     output: &mut Vec<LoadedEvaluator>,
 ) -> RusticolResult<()> {
     match manifest {
+        EvaluatorManifest::CompiledStageEmptyResidual { .. } => {
+            manifest.io_len()?;
+            Ok(())
+        }
         EvaluatorManifest::SymjitApplication {
             input_len,
             output_len,
@@ -2266,6 +2270,10 @@ pub(crate) fn flatten_evaluators_from_store(
     output: &mut Vec<LoadedEvaluator>,
 ) -> RusticolResult<()> {
     match manifest {
+        EvaluatorManifest::CompiledStageEmptyResidual { .. } => {
+            manifest.io_len()?;
+            Ok(())
+        }
         EvaluatorManifest::SymjitApplication {
             runtime_capability,
             application_path,
@@ -2486,6 +2494,10 @@ fn collect_evaluator_capabilities(
     output: &mut BTreeSet<String>,
 ) -> RusticolResult<()> {
     match manifest {
+        EvaluatorManifest::CompiledStageEmptyResidual { .. } => {
+            manifest.io_len()?;
+            Ok(())
+        }
         EvaluatorManifest::SymjitApplication {
             runtime_capability, ..
         } => validate_and_insert_capability(

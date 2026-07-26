@@ -10,7 +10,7 @@ fn validate_compiled_plane_arena_contract(manifest: &ExecutionManifest) -> Rusti
     let Some(stages) = manifest.compiled.stage_evaluators.as_ref() else {
         if declared_execution {
             return Err(RusticolError::integrity(
-                "compiled-plane-arena-v1 is declared without fused stage evaluators",
+                "compiled plane-arena v2 is declared without stage evaluators",
             ));
         }
         return Ok(false);
@@ -24,21 +24,6 @@ fn validate_compiled_plane_arena_contract(manifest: &ExecutionManifest) -> Rusti
         .iter()
         .chain(std::iter::once(&stages.amplitude_stage))
         .collect::<Vec<_>>();
-    let all_direct_capable = all_stages.iter().all(|stage| {
-        stage.evaluator.leaf_layout().is_ok_and(|leaves| {
-            !leaves.is_empty()
-                && leaves.iter().all(|leaf| {
-                    matches!(
-                        leaf.evaluator,
-                        EvaluatorManifest::SymjitApplication { .. }
-                            | EvaluatorManifest::CompiledComplex {
-                                native_direct_application: Some(_),
-                                ..
-                            }
-                    )
-                })
-        })
-    });
     let direct_count = all_stages
         .iter()
         .filter(|stage| stage.compiled_plane_arena.is_some())
@@ -46,26 +31,21 @@ fn validate_compiled_plane_arena_contract(manifest: &ExecutionManifest) -> Rusti
 
     if !declared_execution && !declared_stage && direct_count == 0 {
         return Err(RusticolError::compatibility(
-            "this compiled f64 artifact predates compiled-plane-arena-v1; regenerate it with \
+            "this compiled f64 artifact predates compiled stage-plan v2; regenerate it with \
              `pyamplicol generate-process` using the current pyAmpliCol build",
         ));
     }
-    if !declared_execution
-        || !declared_stage
-        || direct_count != all_stages.len()
-        || !all_direct_capable
-    {
+    if !declared_execution || !declared_stage || direct_count != all_stages.len() {
         return Err(RusticolError::integrity(
-            "compiled-plane-arena-v1 capability, fused direct-capable leaves, and stage bindings \
-             do not form one complete execution contract",
+            "compiled plane-arena v2 capability and stage plans do not form one complete \
+             execution contract",
         ));
     }
     for (position, stage) in all_stages.into_iter().enumerate() {
         validate_compiled_plane_arena_stage(
             stage,
             position == stages.stages.len(),
-            manifest.runtime_schema.value_storage.component_count,
-            manifest.runtime_schema.amplitude_stage.output_count,
+            &manifest.runtime_schema,
         )?;
     }
     Ok(true)
@@ -74,77 +54,80 @@ fn validate_compiled_plane_arena_contract(manifest: &ExecutionManifest) -> Rusti
 fn validate_compiled_plane_arena_stage(
     stage: &GenericSerializedStageEvaluatorManifest,
     is_amplitude: bool,
-    value_component_count: usize,
-    amplitude_component_count: usize,
+    runtime: &ExecutionPlan,
 ) -> RusticolResult<()> {
-    let direct = stage.compiled_plane_arena.as_ref().ok_or_else(|| {
-        RusticolError::integrity("compiled plane-arena fused stage has no direct bindings")
-    })?;
-    let symjit_contract = direct.application_abi == COMPILED_PLANE_DIRECT_APPLICATION_ABI
-        && direct.source_application_abi == COMPILED_PLANE_SOURCE_APPLICATION_ABI;
-    #[cfg(feature = "f64-compiled")]
-    let native_contract = direct.application_abi
-        == super::evaluator::native_compiled_direct::NATIVE_COMPILED_DIRECT_APPLICATION_ABI
-        && direct.source_application_abi
-            == super::evaluator::native_compiled_direct::NATIVE_COMPILED_DIRECT_APPLICATION_ABI;
-    #[cfg(not(feature = "f64-compiled"))]
-    let native_contract = false;
-    if direct.schema_version != 1
-        || direct.kind != "compiled-plane-arena-stage"
-        || !(symjit_contract || native_contract)
-        || direct.element_layout != "split-complex-component-major"
-        || direct.output_operation != "overwrite"
-        || direct.output_factor != "identity"
-        || direct.input_output_aliasing != "forbidden"
-        || direct.output_output_aliasing != "forbidden"
+    validate_compiled_stage_plan_v2(stage, is_amplitude, runtime)
+}
+
+fn validate_compiled_stage_plan_v2(
+    stage: &GenericSerializedStageEvaluatorManifest,
+    is_amplitude: bool,
+    runtime: &ExecutionPlan,
+) -> RusticolResult<()> {
+    let plan = stage
+        .compiled_plane_arena
+        .as_ref()
+        .ok_or_else(|| RusticolError::integrity("compiled stage has no compiled stage-plan v2"))?;
+    if plan.schema_version != 2
+        || plan.kind != "compiled-stage-plan"
+        || plan.plan_abi != COMPILED_STAGE_PLAN_ABI
+        || plan.residual_application_abi != COMPILED_PLANE_DIRECT_APPLICATION_ABI
+        || plan.table_source_application_abi != COMPILED_PLANE_SOURCE_APPLICATION_ABI
+        || plan.direct_table_descriptor_abi != COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI
+        || plan.direct_table_binding_abi != COMPILED_DIRECT_TABLE_BINDING_ABI
+        || plan.element_layout != "split-complex-component-major"
     {
         return Err(RusticolError::compatibility(format!(
-            "compiled plane-arena stage {:?} has an incompatible direct ABI",
+            "compiled stage {:?} is not a compiled stage-plan v2 with DirectTable binding-v1; \
+             regenerate the artifact",
             stage.evaluator_label
         )));
     }
     if stage.parameter_layout != "stage-local-value-momentum"
-        || direct.input_bindings.len() != stage.parameter_count
-        || direct.output_bindings.len() != stage.output_length
-        || direct.leaves.is_empty()
+        || plan.input_bindings.len() != stage.parameter_count
     {
         return Err(RusticolError::integrity(format!(
-            "compiled plane-arena stage {:?} has incomplete direct bindings",
+            "compiled stage-plan {:?} has incomplete input bindings",
             stage.evaluator_label
         )));
     }
-    u32::try_from(value_component_count)
-        .and_then(|_| u32::try_from(amplitude_component_count))
-        .and_then(|_| u32::try_from(stage.parameter_count))
-        .and_then(|_| u32::try_from(stage.output_length))
-        .map_err(|_| {
-            RusticolError::integrity(
-                "compiled plane-arena plane or scalar address space exceeds u32",
-            )
+
+    let value_component_count = runtime.value_storage.component_count;
+    let amplitude_component_count = runtime.amplitude_stage.output_count;
+    let momentum_component_count = runtime.parameter_layout.momentum_parameter_count;
+    let model_parameter_count = runtime.parameter_layout.model_parameter_count;
+    for count in [
+        value_component_count,
+        amplitude_component_count,
+        momentum_component_count,
+        model_parameter_count,
+        stage.parameter_count,
+        stage.output_length,
+        plan.scratch_current_component_count,
+    ] {
+        u32::try_from(count).map_err(|_| {
+            RusticolError::integrity("compiled stage-plan address space exceeds u32")
         })?;
+    }
 
     let mut canonical_inputs = vec![None; stage.parameter_count];
     for component in &stage.input_components {
         let slot = canonical_inputs
             .get_mut(component.parameter_index)
             .ok_or_else(|| {
-                RusticolError::integrity(
-                    "compiled plane-arena input binding index is out of bounds",
-                )
+                RusticolError::integrity("compiled stage-plan input binding index is out of bounds")
             })?;
-        if slot
-            .replace(CompiledPlaneInputBindingManifest {
-                parameter_index: component.parameter_index,
-                kind: component.kind.clone(),
-                source_id: component.source_id,
-                component: component.component,
-                global_component: component.global_component,
-                real_valued: component.real_valued,
-            })
-            .is_some()
-        {
+        let binding = CompiledPlaneInputBindingManifest {
+            parameter_index: component.parameter_index,
+            kind: component.kind.clone(),
+            source_id: component.source_id,
+            component: component.component,
+            global_component: component.global_component,
+            real_valued: component.real_valued,
+        };
+        if slot.replace(binding).is_some() {
             return Err(RusticolError::integrity(
-                "compiled plane-arena input bindings contain duplicates",
+                "compiled stage-plan input bindings contain duplicates",
             ));
         }
     }
@@ -152,10 +135,10 @@ fn validate_compiled_plane_arena_stage(
         || canonical_inputs
             .into_iter()
             .map(Option::unwrap)
-            .ne(direct.input_bindings.iter().cloned())
+            .ne(plan.input_bindings.iter().cloned())
     {
         return Err(RusticolError::integrity(format!(
-            "compiled plane-arena stage {:?} input bindings disagree with the DAG",
+            "compiled stage-plan {:?} input bindings disagree with the DAG",
             stage.evaluator_label
         )));
     }
@@ -167,6 +150,7 @@ fn validate_compiled_plane_arena_stage(
         value_component_count
     };
     let mut canonical_outputs = vec![None; stage.output_length];
+    let mut canonical_output_currents = vec![None; stage.output_length];
     let mut output_components = BTreeSet::new();
     for slot in &stage.output_slots {
         let output_len = slot
@@ -174,130 +158,119 @@ fn validate_compiled_plane_arena_stage(
             .checked_sub(slot.output_start)
             .filter(|length| slot.component_stop.checked_sub(slot.component_start) == Some(*length))
             .ok_or_else(|| {
-                RusticolError::integrity("compiled plane-arena output binding range is invalid")
+                RusticolError::integrity("compiled stage-plan output binding range is invalid")
             })?;
         if slot.output_stop > stage.output_length || slot.component_stop > output_limit {
             return Err(RusticolError::integrity(
-                "compiled plane-arena output binding is out of bounds",
+                "compiled stage-plan output binding is out of bounds",
             ));
         }
         for offset in 0..output_len {
-            let output_index = slot.output_start + offset;
+            let original_output_index = slot.output_start + offset;
             let component = slot.component_start + offset;
             if !output_components.insert(component)
-                || canonical_outputs[output_index]
-                    .replace(CompiledPlaneOutputBindingManifest {
-                        output_index,
-                        arena: expected_arena.to_string(),
-                        component,
-                    })
+                || canonical_outputs[original_output_index]
+                    .replace((expected_arena, component))
                     .is_some()
             {
                 return Err(RusticolError::integrity(
-                    "compiled plane-arena output bindings alias",
+                    "compiled stage-plan canonical output bindings alias",
                 ));
             }
+            canonical_output_currents[original_output_index] =
+                usize::try_from(slot.current_id).ok();
         }
     }
-    if canonical_outputs.iter().any(Option::is_none)
-        || canonical_outputs
-            .into_iter()
-            .map(Option::unwrap)
-            .ne(direct.output_bindings.iter().cloned())
-    {
-        return Err(RusticolError::integrity(format!(
-            "compiled plane-arena stage {:?} output bindings disagree with the DAG",
-            stage.evaluator_label
-        )));
-    }
-    if !is_amplitude {
-        let input_currents = direct
-            .input_bindings
-            .iter()
-            .filter(|binding| binding.kind == "value")
-            .map(|binding| binding.global_component)
-            .collect::<BTreeSet<_>>();
-        if output_components
-            .iter()
-            .any(|component| input_currents.contains(component))
-        {
-            return Err(RusticolError::integrity(
-                "compiled plane-arena fused stage aliases an input and output plane",
-            ));
-        }
-    }
-
-    let canonical_leaves = stage.evaluator.leaf_layout()?;
-    if canonical_leaves.len() != direct.leaves.len() {
+    if canonical_outputs.iter().any(Option::is_none) {
         return Err(RusticolError::integrity(
-            "compiled plane-arena leaf bindings do not cover the evaluator",
+            "compiled stage-plan canonical outputs are incomplete",
         ));
     }
-    for (canonical, binding) in canonical_leaves.iter().zip(&direct.leaves) {
-        let (
-            application_path,
-            application_abi,
-            input_len,
-            output_len,
-            optimization_level,
-            supported_optimization_level,
-        ) = match canonical.evaluator {
-            EvaluatorManifest::SymjitApplication {
-                application_path,
-                application_abi,
-                input_len,
-                output_len,
-                optimization_level,
-                ..
-            } => (
-                application_path.as_str(),
-                application_abi.as_str(),
-                *input_len,
-                *output_len,
-                *optimization_level,
-                *optimization_level <= 3,
-            ),
-            EvaluatorManifest::CompiledComplex {
-                function_name,
-                input_len,
-                output_len,
-                native_direct_application: Some(application),
-                ..
-            } => {
-                application.validate(function_name, *input_len, *output_len)?;
-                (
-                    application.library_path.as_str(),
-                    application.application_abi.as_str(),
+
+    if stage.evaluator.io_len()? != (stage.parameter_count, stage.output_length) {
+        return Err(RusticolError::integrity(
+            "compiled stage exact/reference evaluator no longer covers the original stage",
+        ));
+    }
+    let (residual_input_len, residual_output_len) = plan.residual_evaluator.io_len()?;
+    if (residual_output_len != 0 && residual_input_len != stage.parameter_count)
+        || plan.output_bindings.len() != residual_output_len
+    {
+        return Err(RusticolError::integrity(
+            "compiled residual evaluator I/O disagrees with its stage-plan bindings",
+        ));
+    }
+    let mut residual_outputs = vec![false; residual_output_len];
+    let mut residual_current_ids = BTreeSet::new();
+    for binding in &plan.output_bindings {
+        let (arena, component) = canonical_outputs
+            .get(binding.original_output_index)
+            .and_then(|binding| *binding)
+            .ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled residual output references an absent original output",
+                )
+            })?;
+        if binding.output_index >= residual_outputs.len()
+            || std::mem::replace(&mut residual_outputs[binding.output_index], true)
+            || binding.arena != arena
+            || binding.component != component
+        {
+            return Err(RusticolError::integrity(
+                "compiled residual output binding disagrees with the original DAG",
+            ));
+        }
+        if let Some(current_id) = canonical_output_currents[binding.original_output_index] {
+            residual_current_ids.insert(current_id);
+        }
+    }
+    if residual_outputs.iter().any(|covered| !covered) {
+        return Err(RusticolError::integrity(
+            "compiled residual output bindings contain holes",
+        ));
+    }
+
+    let canonical_leaves = plan.residual_evaluator.leaf_layout()?;
+    if canonical_leaves.len() != plan.residual_leaves.len() {
+        return Err(RusticolError::integrity(
+            "compiled residual leaf bindings do not cover the residual evaluator",
+        ));
+    }
+    let mut residual_original_chunks = BTreeSet::new();
+    for (leaf_index, (canonical, binding)) in canonical_leaves
+        .iter()
+        .zip(&plan.residual_leaves)
+        .enumerate()
+    {
+        let (application_path, application_abi, input_len, output_len, optimization_level) =
+            match canonical.evaluator {
+                EvaluatorManifest::SymjitApplication {
+                    application_path,
+                    application_abi,
+                    input_len,
+                    output_len,
+                    optimization_level,
+                    ..
+                } if *optimization_level <= 3 => (
+                    application_path.as_str(),
+                    application_abi.as_str(),
                     *input_len,
                     *output_len,
-                    3,
-                    true,
-                )
-            }
-            _ => {
-                return Err(RusticolError::integrity(
-                    "compiled plane-arena stage contains a leaf without a direct application",
-                ));
-            }
-        };
-        if !supported_optimization_level {
-            return Err(RusticolError::compatibility(
-                "compiled-plane-arena-v1 supports compiled JIT optimization levels 0 through 3",
-            ));
-        }
-        if binding.optimization_level != optimization_level {
-            return Err(RusticolError::integrity(
-                "compiled plane-arena leaf optimization level disagrees with its source payload",
-            ));
-        }
-        if binding.direct_codegen_optimization_level != 3 {
-            return Err(RusticolError::compatibility(
-                "compiled plane-arena leaf requires authenticated O3 direct code generation",
-            ));
-        }
-        if binding.application_path != application_path
+                    *optimization_level,
+                ),
+                _ => {
+                    return Err(RusticolError::compatibility(
+                        "compiled stage-plan v2 residuals require SymJIT DirectApplication sources",
+                    ));
+                }
+            };
+        if binding.residual_leaf_index != leaf_index
+            || !residual_original_chunks.insert(binding.original_chunk_index)
+            || binding.application_path != application_path
             || binding.source_application_abi != application_abi
-            || binding.source_application_abi != direct.source_application_abi
+            || binding.source_application_abi != COMPILED_PLANE_SOURCE_APPLICATION_ABI
+            || binding.optimization_level != optimization_level
+            || binding.direct_codegen_optimization_level != 3
             || binding.input_len != input_len
             || binding.output_len != output_len
             || binding.input_indices != canonical.input_indices
@@ -305,10 +278,528 @@ fn validate_compiled_plane_arena_stage(
             || binding.output_stop != canonical.output_range.end
         {
             return Err(RusticolError::integrity(format!(
-                "compiled plane-arena stage {:?} leaf bindings disagree with its source payload",
+                "compiled residual leaf bindings for {:?} disagree with their source payload",
                 stage.evaluator_label
             )));
         }
+    }
+
+    validate_compiled_plane_catalog(
+        plan,
+        value_component_count,
+        momentum_component_count,
+        model_parameter_count,
+        amplitude_component_count,
+        &runtime.current_storage,
+    )?;
+    validate_compiled_factor_catalog(plan, model_parameter_count)?;
+    validate_compiled_table_kernels(plan)?;
+    let known_current_ids = runtime
+        .current_storage
+        .current_slots
+        .iter()
+        .map(|slot| slot.current_id)
+        .collect::<BTreeSet<_>>();
+    let (table_invocations, table_attachments, table_owned) = validate_compiled_table_call_groups(
+        plan,
+        &plan.table_calls,
+        "contribution",
+        &known_current_ids,
+        value_component_count,
+    )?;
+    let (finalizer_invocations, finalizer_attachments, finalizer_owned) =
+        validate_compiled_table_call_groups(
+            plan,
+            &plan.finalizer_calls,
+            "finalizer",
+            &known_current_ids,
+            value_component_count,
+        )?;
+    if table_owned != finalizer_owned {
+        return Err(RusticolError::integrity(
+            "compiled table contribution and finalizer ownership differ",
+        ));
+    }
+    if table_owned
+        .iter()
+        .any(|current_id| residual_current_ids.contains(current_id))
+    {
+        return Err(RusticolError::integrity(
+            "compiled stage mixes table and residual contributions to one current",
+        ));
+    }
+    if is_amplitude && (!table_owned.is_empty() || plan.scratch_current_component_count != 0) {
+        return Err(RusticolError::compatibility(
+            "compiled stage-plan v2 does not tableize the amplitude stage",
+        ));
+    }
+
+    validate_compiled_execution_order(plan, &residual_original_chunks)?;
+    validate_compiled_selector_partitions(plan)?;
+    validate_compiled_stage_diagnostics(
+        plan,
+        table_invocations,
+        table_attachments,
+        finalizer_invocations,
+        finalizer_attachments,
+        table_owned.len(),
+    )
+}
+
+fn require_compiled_sha256(value: &str, label: &str) -> RusticolResult<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RusticolError::integrity(format!(
+            "compiled {label} is not a lowercase SHA-256 digest"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_compiled_payload_reference(
+    payload: &CompiledPayloadReferenceManifest,
+    label: &str,
+) -> RusticolResult<()> {
+    if payload.path.is_empty() || payload.size_bytes == 0 {
+        return Err(RusticolError::integrity(format!(
+            "compiled {label} has an empty path or payload"
+        )));
+    }
+    require_compiled_sha256(&payload.sha256, label)
+}
+
+fn validate_compiled_rows_reference(
+    rows: &CompiledTableRowsManifest,
+    expected_row_size: u32,
+    label: &str,
+) -> RusticolResult<()> {
+    let expected_size = u64::from(rows.count)
+        .checked_mul(u64::from(rows.row_size))
+        .ok_or_else(|| RusticolError::integrity(format!("compiled {label} size overflows")))?;
+    if rows.path.is_empty()
+        || rows.count == 0
+        || rows.row_size != expected_row_size
+        || rows.size_bytes != expected_size
+    {
+        return Err(RusticolError::integrity(format!(
+            "compiled {label} shape is inconsistent"
+        )));
+    }
+    require_compiled_sha256(&rows.sha256, label)
+}
+
+fn validate_compiled_plane_catalog(
+    plan: &CompiledPlaneArenaStageManifest,
+    _value_component_count: usize,
+    momentum_component_count: usize,
+    model_parameter_count: usize,
+    amplitude_component_count: usize,
+    current_storage: &GenericCurrentStorageManifest,
+) -> RusticolResult<()> {
+    let has_tables = !plan.table_calls.is_empty() || !plan.finalizer_calls.is_empty();
+    if has_tables == plan.plane_catalog.is_empty() {
+        return Err(RusticolError::integrity(
+            "compiled DirectTable plane catalog presence disagrees with table calls",
+        ));
+    }
+    for (expected, plane) in plan.plane_catalog.iter().enumerate() {
+        if plane.plane_id as usize != expected || !matches!(plane.part.as_str(), "real" | "imag") {
+            return Err(RusticolError::integrity(
+                "compiled DirectTable plane catalog is not dense or has an invalid part",
+            ));
+        }
+        let current_slot = plane.current_id.and_then(|current_id| {
+            current_storage
+                .current_slots
+                .iter()
+                .find(|slot| slot.current_id == current_id as usize)
+        });
+        let valid = match plane.storage.as_str() {
+            "current" => {
+                !plane.proven_real
+                    && current_slot.is_some_and(|slot| {
+                        plane.component >= slot.component_start
+                            && plane.component < slot.component_stop
+                    })
+            }
+            "scratch-current" => {
+                !plane.proven_real
+                    && current_slot.is_some()
+                    && plane.component < plan.scratch_current_component_count
+            }
+            "momentum" => {
+                plane.current_id.is_none()
+                    && plane.proven_real
+                    && plane.component < momentum_component_count
+            }
+            "model-parameter" => {
+                plane.current_id.is_none()
+                    && plane.proven_real
+                    && plane.component < model_parameter_count
+            }
+            "zero" => plane.current_id.is_none() && plane.proven_real && plane.component == 0,
+            "amplitude" => {
+                plane.current_id.is_none()
+                    && !plane.proven_real
+                    && plane.component < amplitude_component_count
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(RusticolError::integrity(
+                "compiled DirectTable plane catalog binding is invalid",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_compiled_factor_catalog(
+    plan: &CompiledPlaneArenaStageManifest,
+    model_parameter_count: usize,
+) -> RusticolResult<()> {
+    let has_tables = !plan.table_calls.is_empty() || !plan.finalizer_calls.is_empty();
+    if has_tables == plan.factor_catalog.is_empty() {
+        return Err(RusticolError::integrity(
+            "compiled DirectTable factor catalog presence disagrees with table calls",
+        ));
+    }
+    for (expected, factor) in plan.factor_catalog.iter().enumerate() {
+        if factor.factor_id as usize != expected
+            || factor.base.iter().any(|value| !value.is_finite())
+        {
+            return Err(RusticolError::integrity(
+                "compiled DirectTable factor catalog is not dense or finite",
+            ));
+        }
+        match (
+            factor.model_parameter_index,
+            factor.parameter_component.as_str(),
+        ) {
+            (None, "none") => {}
+            (Some(index), "real" | "imag") if index < model_parameter_count => {}
+            _ => {
+                return Err(RusticolError::integrity(
+                    "compiled DirectTable factor has an invalid model-parameter source",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_compiled_table_kernels(plan: &CompiledPlaneArenaStageManifest) -> RusticolResult<()> {
+    if plan.table_kernels.len() > 8 {
+        return Err(RusticolError::compatibility(
+            "compiled stage-plan exceeds the eight-kernel slice cap",
+        ));
+    }
+    let mut signatures = BTreeSet::new();
+    for (expected, kernel) in plan.table_kernels.iter().enumerate() {
+        if kernel.table_kernel_id as usize != expected
+            || !matches!(kernel.role.as_str(), "contribution" | "finalizer")
+            || kernel.canonical_signature.is_empty()
+            || !signatures.insert((kernel.role.as_str(), kernel.canonical_signature.as_str()))
+            || kernel.input_complex_count == 0
+            || kernel.input_complex_count > 16
+            || kernel.output_complex_count == 0
+            || kernel.output_complex_count > 4
+            || kernel.source_application_abi != plan.table_source_application_abi
+            || kernel.descriptor_abi != plan.direct_table_descriptor_abi
+            || kernel.binding_abi != plan.direct_table_binding_abi
+            || kernel.scalar_input_count != 0
+            || kernel.optimization_level != 3
+            || kernel.input_contracts.len() != kernel.input_complex_count as usize
+            || kernel.output_layout.len() != kernel.output_complex_count as usize
+            || (kernel.role == "contribution" && kernel.prepared_kernel_id.is_none())
+        {
+            return Err(RusticolError::integrity(
+                "compiled DirectTable kernel identity or bounded shape is invalid",
+            ));
+        }
+        validate_compiled_payload_reference(&kernel.source_application, "table source")?;
+        validate_compiled_payload_reference(&kernel.descriptor, "table descriptor")?;
+        if kernel.source_application.size_bytes > 64 * 1024
+            || kernel.descriptor.size_bytes > 16 * 1024
+        {
+            return Err(RusticolError::compatibility(
+                "compiled DirectTable kernel exceeds its source or descriptor cap",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_compiled_table_call_groups(
+    plan: &CompiledPlaneArenaStageManifest,
+    calls: &[CompiledTableCallGroupManifest],
+    expected_role: &str,
+    known_current_ids: &BTreeSet<usize>,
+    value_component_count: usize,
+) -> RusticolResult<(u32, u32, BTreeSet<usize>)> {
+    let mut invocation_count = 0_u32;
+    let mut attachment_count = 0_u32;
+    let mut owned = BTreeSet::new();
+    for call in calls {
+        let kernel = plan
+            .table_kernels
+            .get(call.table_kernel_id as usize)
+            .filter(|kernel| kernel.table_kernel_id == call.table_kernel_id)
+            .ok_or_else(|| {
+                RusticolError::integrity("compiled table call references an absent kernel")
+            })?;
+        if kernel.role != expected_role
+            || call.owned_current_ids.is_empty()
+            || call
+                .owned_current_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || call
+                .dependency_current_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || call
+                .dependency_current_components
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || call
+                .selector_partition_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || call.selector_partition_ids.len() != 1
+            || call
+                .selector_partition_ids
+                .iter()
+                .any(|partition| (*partition as usize) >= plan.selector_partitions.len())
+            || call
+                .owned_current_ids
+                .iter()
+                .chain(&call.dependency_current_ids)
+                .any(|current_id| !known_current_ids.contains(current_id))
+            || call
+                .dependency_current_components
+                .iter()
+                .any(|component| *component >= value_component_count)
+        {
+            return Err(RusticolError::integrity(
+                "compiled table call role, ownership, dependency, or selector order is invalid",
+            ));
+        }
+        let invocation_row_size = kernel
+            .input_complex_count
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(2))
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| RusticolError::integrity("compiled invocation row size overflows"))?;
+        let attachment_row_size = kernel
+            .output_complex_count
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(2))
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| RusticolError::integrity("compiled attachment row size overflows"))?;
+        validate_compiled_rows_reference(
+            &call.invocation_rows,
+            invocation_row_size,
+            "invocation rows",
+        )?;
+        validate_compiled_rows_reference(
+            &call.attachment_rows,
+            attachment_row_size,
+            "attachment rows",
+        )?;
+        invocation_count = invocation_count
+            .checked_add(call.invocation_rows.count)
+            .ok_or_else(|| RusticolError::integrity("compiled invocation count overflows"))?;
+        attachment_count = attachment_count
+            .checked_add(call.attachment_rows.count)
+            .ok_or_else(|| RusticolError::integrity("compiled attachment count overflows"))?;
+        owned.extend(call.owned_current_ids.iter().copied());
+    }
+    Ok((invocation_count, attachment_count, owned))
+}
+
+fn validate_compiled_execution_order(
+    plan: &CompiledPlaneArenaStageManifest,
+    residual_original_chunks: &BTreeSet<usize>,
+) -> RusticolResult<()> {
+    let expected_entry_count = plan
+        .residual_leaves
+        .len()
+        .checked_add(plan.table_calls.len())
+        .and_then(|count| count.checked_add(plan.finalizer_calls.len()))
+        .ok_or_else(|| RusticolError::integrity("compiled execution-order size overflows"))?;
+    if plan.execution_order.len() != expected_entry_count {
+        return Err(RusticolError::integrity(
+            "compiled execution order does not cover every residual/table/finalizer call",
+        ));
+    }
+    let mut residuals = BTreeSet::new();
+    let mut tables = BTreeSet::new();
+    let mut finalizers = BTreeSet::new();
+    let mut original_chunks = BTreeSet::new();
+    let mut previous_chunk = None;
+    for unit in &plan.execution_order {
+        if previous_chunk.is_some_and(|value| value > unit.original_chunk_index) {
+            return Err(RusticolError::integrity(
+                "compiled execution order reverses original contribution order",
+            ));
+        }
+        previous_chunk = Some(unit.original_chunk_index);
+        original_chunks.insert(unit.original_chunk_index as usize);
+        let inserted = match unit.kind.as_str() {
+            "residual-leaf" if (unit.index as usize) < plan.residual_leaves.len() => {
+                if plan.residual_leaves[unit.index as usize].original_chunk_index
+                    != unit.original_chunk_index as usize
+                {
+                    return Err(RusticolError::integrity(
+                        "compiled residual execution unit lost its original chunk index",
+                    ));
+                }
+                residuals.insert(unit.index)
+            }
+            "table-call" if (unit.index as usize) < plan.table_calls.len() => {
+                tables.insert(unit.index)
+            }
+            "finalizer-call" if (unit.index as usize) < plan.finalizer_calls.len() => {
+                finalizers.insert(unit.index)
+            }
+            _ => false,
+        };
+        if !inserted {
+            return Err(RusticolError::integrity(
+                "compiled execution order contains an invalid or duplicate unit",
+            ));
+        }
+    }
+    if residuals.len() != plan.residual_leaves.len()
+        || tables.len() != plan.table_calls.len()
+        || finalizers.len() != plan.finalizer_calls.len()
+        || !residual_original_chunks.is_subset(&original_chunks)
+        || original_chunks.iter().copied().ne(0..original_chunks.len())
+    {
+        return Err(RusticolError::integrity(
+            "compiled execution order does not preserve dense original chunks",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_compiled_selector_partitions(
+    plan: &CompiledPlaneArenaStageManifest,
+) -> RusticolResult<()> {
+    if plan.execution_order.is_empty() {
+        return if plan.selector_partitions.is_empty() {
+            Ok(())
+        } else {
+            Err(RusticolError::integrity(
+                "empty compiled execution order has selector partitions",
+            ))
+        };
+    }
+    let mut covered = vec![false; plan.execution_order.len()];
+    for (expected, partition) in plan.selector_partitions.iter().enumerate() {
+        if partition.partition_id as usize != expected
+            || partition
+                .helicity_selector_domain_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || partition
+                .color_selector_domain_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || partition
+                .original_chunk_indices
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(RusticolError::integrity(
+                "compiled selector partitions are not canonical",
+            ));
+        }
+        for &chunk in &partition.original_chunk_indices {
+            let matching = plan
+                .execution_order
+                .iter()
+                .enumerate()
+                .filter_map(|(index, unit)| (unit.original_chunk_index == chunk).then_some(index))
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(RusticolError::integrity(
+                    "compiled selector partition references an absent original chunk",
+                ));
+            }
+            for unit in matching {
+                if std::mem::replace(&mut covered[unit], true) {
+                    return Err(RusticolError::integrity(
+                        "compiled selector partitions overlap",
+                    ));
+                }
+            }
+        }
+    }
+    if covered.iter().any(|covered| !covered) {
+        return Err(RusticolError::integrity(
+            "compiled selector partitions do not cover every execution unit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_compiled_stage_diagnostics(
+    plan: &CompiledPlaneArenaStageManifest,
+    table_invocations: u32,
+    table_attachments: u32,
+    finalizer_invocations: u32,
+    finalizer_attachments: u32,
+    island_count: usize,
+) -> RusticolResult<()> {
+    let diagnostics = &plan.diagnostics;
+    let expected_kernel_count = u32::try_from(plan.table_kernels.len())
+        .map_err(|_| RusticolError::integrity("compiled table kernel count exceeds u32"))?;
+    let expected_invocation_count = table_invocations
+        .checked_add(finalizer_invocations)
+        .ok_or_else(|| RusticolError::integrity("compiled invocation count overflows"))?;
+    let expected_attachment_count = table_attachments
+        .checked_add(finalizer_attachments)
+        .ok_or_else(|| RusticolError::integrity("compiled attachment count overflows"))?;
+    let expected_table_source_bytes =
+        plan.table_kernels.iter().try_fold(0_u64, |total, kernel| {
+            total
+                .checked_add(kernel.source_application.size_bytes)
+                .ok_or_else(|| RusticolError::integrity("compiled table source bytes overflow"))
+        })?;
+    let expected_descriptor_bytes =
+        plan.table_kernels.iter().try_fold(0_u64, |total, kernel| {
+            total
+                .checked_add(kernel.descriptor.size_bytes)
+                .ok_or_else(|| RusticolError::integrity("compiled descriptor bytes overflow"))
+        })?;
+    let expected_semantic_row_bytes = plan
+        .table_calls
+        .iter()
+        .chain(&plan.finalizer_calls)
+        .try_fold(0_u64, |total, call| {
+            total
+                .checked_add(call.invocation_rows.size_bytes)
+                .and_then(|value| value.checked_add(call.attachment_rows.size_bytes))
+                .ok_or_else(|| RusticolError::integrity("compiled semantic row bytes overflow"))
+        })?;
+    if diagnostics.island_count as usize != island_count
+        || diagnostics.kernel_count != expected_kernel_count
+        || diagnostics.invocation_count != expected_invocation_count
+        || diagnostics.attachment_count != expected_attachment_count
+        || diagnostics.table_source_bytes != expected_table_source_bytes
+        || diagnostics.descriptor_bytes != expected_descriptor_bytes
+        || diagnostics.semantic_row_bytes != expected_semantic_row_bytes
+        || diagnostics.scratch_current_component_count as usize
+            != plan.scratch_current_component_count
+    {
+        return Err(RusticolError::integrity(
+            "compiled stage-plan diagnostics disagree with authenticated contents",
+        ));
     }
     Ok(())
 }
@@ -3731,7 +4222,7 @@ fn ensure_execution_capabilities_supported(manifest: &ExecutionManifest) -> Rust
                 .all(|stage| stage.compiled_plane_arena.is_some());
             if !all_direct {
                 return Err(RusticolError::integrity(
-                    "compiled-plane-arena-v1 capability has incomplete stage metadata",
+                    "compiled stage-plan v2 capability has incomplete stage metadata",
                 ));
             }
             stage_capabilities.insert(COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY.to_string());
@@ -3881,23 +4372,27 @@ mod compiled_plane_arena_contract_tests {
         stage["parameter_layout"] = json!("stage-local-value-momentum");
         stage["input_components"] = Value::Array((0..14).map(source_binding).collect());
         stage["evaluator"]["optimization_level"] = json!(optimization_level);
+        let residual_evaluator = stage["evaluator"].clone();
         stage["compiled_plane_arena"] = json!({
-            "schema_version": 1,
-            "kind": "compiled-plane-arena-stage",
-            "application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-            "source_application_abi": COMPILED_PLANE_SOURCE_APPLICATION_ABI,
+            "schema_version": 2,
+            "kind": "compiled-stage-plan",
+            "plan_abi": COMPILED_STAGE_PLAN_ABI,
+            "residual_application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+            "table_source_application_abi": COMPILED_PLANE_SOURCE_APPLICATION_ABI,
+            "direct_table_descriptor_abi": COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+            "direct_table_binding_abi": COMPILED_DIRECT_TABLE_BINDING_ABI,
             "element_layout": "split-complex-component-major",
-            "output_operation": "overwrite",
-            "output_factor": "identity",
-            "input_output_aliasing": "forbidden",
-            "output_output_aliasing": "forbidden",
             "input_bindings": (0..14).map(source_binding).collect::<Vec<_>>(),
             "output_bindings": [{
                 "output_index": 0,
+                "original_output_index": 0,
                 "arena": "amplitude",
                 "component": 0,
             }],
-            "leaves": [{
+            "residual_evaluator": residual_evaluator,
+            "residual_leaves": [{
+                "residual_leaf_index": 0,
+                "original_chunk_index": 0,
                 "application_path": "evaluators/direct.symjit",
                 "source_application_abi": COMPILED_PLANE_SOURCE_APPLICATION_ABI,
                 "optimization_level": optimization_level,
@@ -3908,6 +4403,33 @@ mod compiled_plane_arena_contract_tests {
                 "output_start": 0,
                 "output_stop": 1,
             }],
+            "scratch_current_component_count": 0,
+            "plane_catalog": [],
+            "factor_catalog": [],
+            "table_kernels": [],
+            "table_calls": [],
+            "finalizer_calls": [],
+            "execution_order": [{
+                "kind": "residual-leaf",
+                "index": 0,
+                "original_chunk_index": 0,
+            }],
+            "selector_partitions": [{
+                "partition_id": 0,
+                "helicity_selector_domain_ids": [],
+                "color_selector_domain_ids": [],
+                "original_chunk_indices": [0],
+            }],
+            "diagnostics": {
+                "island_count": 0,
+                "kernel_count": 0,
+                "invocation_count": 0,
+                "attachment_count": 0,
+                "table_source_bytes": 0,
+                "descriptor_bytes": 0,
+                "semantic_row_bytes": 0,
+                "scratch_current_component_count": 0,
+            },
         });
         value["compiled"]["stage_evaluators"]["parameter_layout"] =
             json!("stage-local-value-momentum");
@@ -3941,7 +4463,7 @@ mod compiled_plane_arena_contract_tests {
             .expect_err("pre-arena compiled f64 must fail closed");
 
         assert_eq!(error.kind(), crate::RusticolErrorKind::Compatibility);
-        assert!(error.to_string().contains("compiled-plane-arena-v1"));
+        assert!(error.to_string().contains("compiled stage-plan v2"));
         assert!(error.to_string().contains("generate-process"));
     }
 
@@ -3961,7 +4483,7 @@ mod compiled_plane_arena_contract_tests {
         let error = validate_compiled_plane_arena_contract(&manifest)
             .expect_err("pre-arena non-O3 compiled f64 must fail closed");
         assert_eq!(error.kind(), crate::RusticolErrorKind::Compatibility);
-        assert!(error.to_string().contains("compiled-plane-arena-v1"));
+        assert!(error.to_string().contains("compiled stage-plan v2"));
     }
 
     #[test]
@@ -4016,11 +4538,15 @@ mod compiled_plane_arena_contract_tests {
             .as_mut()
             .unwrap()
             .amplitude_stage;
-        stage.compiled_plane_arena.as_mut().unwrap().leaves[0].optimization_level = 2;
+        stage.compiled_plane_arena.as_mut().unwrap().residual_leaves[0].optimization_level = 2;
 
         let error = validate_compiled_plane_arena_contract(&manifest).unwrap_err();
         assert_eq!(error.kind(), crate::RusticolErrorKind::Integrity);
-        assert!(error.to_string().contains("optimization level disagrees"));
+        assert!(
+            error
+                .to_string()
+                .contains("disagree with their source payload")
+        );
     }
 
     #[test]
@@ -4039,11 +4565,23 @@ mod compiled_plane_arena_contract_tests {
             panic!("compiled plane fixture must use one SymJIT evaluator");
         };
         *optimization_level = 4;
-        stage.compiled_plane_arena.as_mut().unwrap().leaves[0].optimization_level = 4;
+        let plan = stage.compiled_plane_arena.as_mut().unwrap();
+        let EvaluatorManifest::SymjitApplication {
+            optimization_level, ..
+        } = plan.residual_evaluator.as_mut()
+        else {
+            panic!("compiled residual fixture must use one SymJIT evaluator");
+        };
+        *optimization_level = 4;
+        plan.residual_leaves[0].optimization_level = 4;
 
         let error = validate_compiled_plane_arena_contract(&manifest).unwrap_err();
         assert_eq!(error.kind(), crate::RusticolErrorKind::Compatibility);
-        assert!(error.to_string().contains("levels 0 through 3"));
+        assert!(
+            error
+                .to_string()
+                .contains("residuals require SymJIT DirectApplication")
+        );
     }
 }
 

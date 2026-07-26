@@ -177,9 +177,12 @@ pub const RECURRENCE_LC_COLOR_RUNTIME_CAPABILITY: &str =
 pub const RECURRENCE_CONTRACTED_COLOR_RUNTIME_CAPABILITY: &str =
     crate::recurrence::RECURRENCE_CONTRACTED_COLOR_CAPABILITY;
 pub const COMPILED_RUNTIME_SELECTORS_CAPABILITY: &str = "rusticol.compiled.runtime-selectors.v1";
-pub const COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY: &str = "compiled-plane-arena-v1";
+pub const COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY: &str = "rusticol.compiled.plane-arena.v2";
+pub const COMPILED_STAGE_PLAN_ABI: &str = "pyamplicol-compiled-stage-plan-v2";
 pub const COMPILED_PLANE_DIRECT_APPLICATION_ABI: &str = "symjit-direct-application-storage-v1";
 pub const COMPILED_PLANE_SOURCE_APPLICATION_ABI: &str = "symjit-application-storage-v3";
+pub const COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI: &str = "symjit-direct-table-descriptor-v1";
+pub const COMPILED_DIRECT_TABLE_BINDING_ABI: &str = "symjit-direct-table-binding-v1";
 pub const COMPILED_HELICITY_DUAL_LANE_CAPABILITY: &str = "rusticol.compiled.helicity-dual-lane.v1";
 pub const COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY: &str =
     "rusticol.compiled.helicity-selector-union.v1";
@@ -239,7 +242,7 @@ pub enum RuntimeCapability {
     CompiledHelicityDualLaneV1,
     CompiledHelicityPrimaryRecurrenceV1,
     CompiledHelicitySelectorUnionV1,
-    CompiledPlaneArenaV1,
+    CompiledPlaneArenaV2,
     CompiledRuntimeSelectorsV1,
     EagerDagComplexF64V1,
     EagerDirectArenaV1,
@@ -267,7 +270,7 @@ impl RuntimeCapability {
                 COMPILED_HELICITY_PRIMARY_RECURRENCE_CAPABILITY
             }
             Self::CompiledHelicitySelectorUnionV1 => COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY,
-            Self::CompiledPlaneArenaV1 => COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
+            Self::CompiledPlaneArenaV2 => COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY,
             Self::CompiledRuntimeSelectorsV1 => COMPILED_RUNTIME_SELECTORS_CAPABILITY,
             Self::EagerDagComplexF64V1 => EAGER_DAG_RUNTIME_CAPABILITY,
             Self::EagerDirectArenaV1 => EAGER_DIRECT_ARENA_RUNTIME_CAPABILITY,
@@ -912,16 +915,25 @@ struct GenericSerializedStageEvaluatorManifest {
 struct CompiledPlaneArenaStageManifest {
     schema_version: u32,
     kind: String,
-    application_abi: String,
-    source_application_abi: String,
+    plan_abi: String,
+    residual_application_abi: String,
+    table_source_application_abi: String,
+    direct_table_descriptor_abi: String,
+    direct_table_binding_abi: String,
     element_layout: String,
-    output_operation: String,
-    output_factor: String,
-    input_output_aliasing: String,
-    output_output_aliasing: String,
     input_bindings: Vec<CompiledPlaneInputBindingManifest>,
     output_bindings: Vec<CompiledPlaneOutputBindingManifest>,
-    leaves: Vec<CompiledPlaneLeafManifest>,
+    residual_evaluator: Box<EvaluatorManifest>,
+    residual_leaves: Vec<CompiledPlaneLeafManifest>,
+    scratch_current_component_count: usize,
+    plane_catalog: Vec<CompiledPlaneCatalogEntryManifest>,
+    factor_catalog: Vec<CompiledFactorCatalogEntryManifest>,
+    table_kernels: Vec<CompiledTableKernelManifest>,
+    table_calls: Vec<CompiledTableCallGroupManifest>,
+    finalizer_calls: Vec<CompiledTableCallGroupManifest>,
+    execution_order: Vec<CompiledStageExecutionUnitManifest>,
+    selector_partitions: Vec<CompiledSelectorPartitionManifest>,
+    diagnostics: CompiledStagePlanDiagnosticsManifest,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -940,6 +952,7 @@ struct CompiledPlaneInputBindingManifest {
 #[serde(deny_unknown_fields)]
 struct CompiledPlaneOutputBindingManifest {
     output_index: usize,
+    original_output_index: usize,
     arena: String,
     component: usize,
 }
@@ -947,6 +960,8 @@ struct CompiledPlaneOutputBindingManifest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct CompiledPlaneLeafManifest {
+    residual_leaf_index: usize,
+    original_chunk_index: usize,
     application_path: String,
     source_application_abi: String,
     optimization_level: u8,
@@ -956,6 +971,109 @@ struct CompiledPlaneLeafManifest {
     input_indices: Vec<usize>,
     output_start: usize,
     output_stop: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledPlaneCatalogEntryManifest {
+    plane_id: u32,
+    storage: String,
+    component: usize,
+    part: String,
+    #[serde(default)]
+    current_id: Option<u32>,
+    proven_real: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledFactorCatalogEntryManifest {
+    factor_id: u32,
+    base: [f64; 2],
+    #[serde(default)]
+    model_parameter_index: Option<usize>,
+    parameter_component: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledPayloadReferenceManifest {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompiledTableKernelManifest {
+    table_kernel_id: u32,
+    #[serde(default)]
+    prepared_kernel_id: Option<u32>,
+    role: String,
+    canonical_signature: String,
+    source_application: CompiledPayloadReferenceManifest,
+    descriptor: CompiledPayloadReferenceManifest,
+    source_application_abi: String,
+    descriptor_abi: String,
+    binding_abi: String,
+    input_complex_count: u32,
+    output_complex_count: u32,
+    scalar_input_count: u32,
+    optimization_level: u8,
+    input_contracts: Vec<Value>,
+    output_layout: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledTableRowsManifest {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+    count: u32,
+    row_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompiledTableCallGroupManifest {
+    table_kernel_id: u32,
+    invocation_rows: CompiledTableRowsManifest,
+    attachment_rows: CompiledTableRowsManifest,
+    owned_current_ids: Vec<usize>,
+    dependency_current_ids: Vec<usize>,
+    dependency_current_components: Vec<usize>,
+    selector_partition_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledStageExecutionUnitManifest {
+    kind: String,
+    index: u32,
+    original_chunk_index: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CompiledSelectorPartitionManifest {
+    partition_id: u32,
+    helicity_selector_domain_ids: Vec<i64>,
+    color_selector_domain_ids: Vec<i64>,
+    original_chunk_indices: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompiledStagePlanDiagnosticsManifest {
+    island_count: u32,
+    kernel_count: u32,
+    invocation_count: u32,
+    attachment_count: u32,
+    table_source_bytes: u64,
+    descriptor_bytes: u64,
+    semantic_row_bytes: u64,
+    scratch_current_component_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1807,6 +1925,12 @@ impl NativeCompiledDirectApplicationManifest {
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind")]
 enum EvaluatorManifest {
+    #[serde(rename = "compiled-stage-empty-residual")]
+    CompiledStageEmptyResidual {
+        input_len: usize,
+        output_len: usize,
+        required_runtime_capabilities: Vec<String>,
+    },
     #[serde(rename = "symjit-application-evaluator")]
     SymjitApplication {
         runtime_capability: String,
@@ -1870,6 +1994,19 @@ struct EvaluatorLeafLayout<'a> {
 impl EvaluatorManifest {
     fn io_len(&self) -> RusticolResult<(usize, usize)> {
         match self {
+            Self::CompiledStageEmptyResidual {
+                input_len,
+                output_len,
+                required_runtime_capabilities,
+            } => {
+                if *input_len != 0 || *output_len != 0 || !required_runtime_capabilities.is_empty()
+                {
+                    return Err(RusticolError::integrity(
+                        "compiled empty residual evaluator must have zero I/O and no capabilities",
+                    ));
+                }
+                Ok((0, 0))
+            }
             Self::SymjitApplication {
                 input_len,
                 output_len,
@@ -1966,6 +2103,14 @@ impl EvaluatorManifest {
             leaves: &mut Vec<EvaluatorLeafLayout<'a>>,
         ) -> RusticolResult<()> {
             match evaluator {
+                EvaluatorManifest::CompiledStageEmptyResidual { .. } => {
+                    evaluator.io_len()?;
+                    if !parent_inputs.is_empty() {
+                        return Err(RusticolError::integrity(
+                            "compiled empty residual evaluator has parent inputs",
+                        ));
+                    }
+                }
                 EvaluatorManifest::Chunked {
                     input_len,
                     chunk_input_indices,
