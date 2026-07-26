@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: 0BSD
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from pyamplicol.generation.compiled_microkernels import (
     _KernelSource,
     _output_chunk_ranges,
     _PlaneCatalog,
+    _prune_residual_stage_inputs,
     _residual_stage,
     _selector_partitions,
 )
@@ -38,6 +40,7 @@ from pyamplicol.generation.stage_planning import (
 )
 from pyamplicol.generation.stage_types import (
     GenericCompiledStageBlueprint,
+    GenericStageInputComponent,
     GenericStageOutputSlot,
 )
 from pyamplicol.models import BuiltinSMModel
@@ -226,6 +229,23 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         for item in current_stages
         for call in item.table_calls
     ) == 103
+    subset_three_residual = current_stages[1].residual_stage
+    assert subset_three_residual.parameter_count == 134
+    assert subset_three_residual.value_parameter_count == 74
+    assert subset_three_residual.momentum_parameter_count == 60
+    assert subset_three_residual.model_parameter_count == 0
+    assert tuple(
+        component.parameter_index
+        for component in subset_three_residual.input_components
+    ) == tuple(range(134))
+    assert {
+        component.global_component
+        for component in subset_three_residual.input_components
+        if component.kind == "value"
+    }.isdisjoint(range(36, 44))
+    assert set(subset_three_residual.input_value_slot_ids).isdisjoint(
+        {11, 12, 13, 14}
+    )
     assert not lowerings[-1].has_islands
 
 
@@ -607,6 +627,104 @@ def test_residual_stage_clips_split_slots_and_maps_original_outputs() -> None:
         (3, 0, 2, 2, 4),
         (3, 2, 4, 4, 6),
     ]
+
+
+def test_residual_input_projection_retains_function_closure_and_renumbers() -> None:
+    value, unused, momentum, model, argument = symbolica_module.S(
+        "residual_value",
+        "residual_unused",
+        "residual_momentum",
+        "residual_model",
+        "residual_argument",
+    )
+    function = symbolica_module.S("residual_function")
+    output = momentum + function(value)
+    stage = replace(
+        _chunk_test_stage((1,), selector_partitions=((0, 1),)),
+        input_value_slot_ids=(10, 11),
+        input_components=(
+            GenericStageInputComponent("value", 10, 0, 4, 0),
+            GenericStageInputComponent("value", 11, 0, 5, 1),
+            GenericStageInputComponent(
+                "momentum",
+                2,
+                0,
+                100,
+                2,
+                real_valued=True,
+            ),
+            GenericStageInputComponent(
+                "model_parameter",
+                7,
+                0,
+                200,
+                3,
+                real_valued=True,
+            ),
+        ),
+        parameter_count=4,
+        value_parameter_count=2,
+        momentum_parameter_count=1,
+        model_parameter_count=1,
+        real_valued_inputs=(2, 3),
+        parameter_symbols=(value, unused, momentum, model),
+        output_expressions=(output,),
+        symbolica_functions=((function, (argument,), argument + model),),
+    )
+
+    projected = _prune_residual_stage_inputs(stage)
+
+    assert value in set(output.get_all_symbols(False))
+    assert projected.parameter_symbols == (value, momentum, model)
+    assert projected.parameter_count == 3
+    assert projected.value_parameter_count == 1
+    assert projected.momentum_parameter_count == 1
+    assert projected.model_parameter_count == 1
+    assert projected.real_valued_inputs == (1, 2)
+    assert projected.input_value_slot_ids == (10,)
+    assert [
+        (
+            component.kind,
+            component.source_id,
+            component.global_component,
+            component.parameter_index,
+        )
+        for component in projected.input_components
+    ] == [
+        ("value", 10, 4, 0),
+        ("momentum", 2, 100, 1),
+        ("model_parameter", 7, 200, 2),
+    ]
+    assert projected.output_expressions == stage.output_expressions
+    assert projected.selector_output_partitions == stage.selector_output_partitions
+
+
+def test_empty_residual_input_projection_has_an_empty_abi() -> None:
+    value = symbolica_module.S("unused_empty_residual_value")
+    stage = replace(
+        _chunk_test_stage((1,), selector_partitions=((0, 1),)),
+        input_value_slot_ids=(10,),
+        input_components=(
+            GenericStageInputComponent("value", 10, 0, 4, 0),
+        ),
+        parameter_count=1,
+        value_parameter_count=1,
+        momentum_parameter_count=0,
+        model_parameter_count=0,
+        parameter_symbols=(value,),
+        output_length=0,
+        output_slots=(),
+        output_value_slot_ids=(),
+        output_expressions=(),
+        selector_output_partitions=(),
+    )
+
+    projected = _prune_residual_stage_inputs(stage)
+
+    assert projected.parameter_count == 0
+    assert projected.input_components == ()
+    assert projected.input_value_slot_ids == ()
+    assert projected.parameter_symbols == ()
 
 
 def test_selector_partitions_cover_every_chunk_overlapped_by_a_slot() -> None:

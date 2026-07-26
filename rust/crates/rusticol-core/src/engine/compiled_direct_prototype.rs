@@ -2089,15 +2089,20 @@ fn load_stage(
             stage.evaluator_label
         ))
     })?;
-    if stage.parameter_layout != "stage-local-value-momentum"
-        || direct.input_bindings.len() != stage.parameter_count
-    {
+    if stage.parameter_layout != "stage-local-value-momentum" {
         return Err(RusticolError::compatibility(format!(
-            "compiled Direct-Arena stage {:?} requires complete serialized input bindings",
+            "compiled Direct-Arena stage {:?} requires stage-local serialized input bindings",
             stage.evaluator_label
         )));
     }
-    let mut components = vec![None; stage.parameter_count];
+    let (residual_input_len, residual_output_len) = direct.residual_evaluator.io_len()?;
+    if residual_input_len != direct.input_bindings.len() {
+        return Err(RusticolError::integrity(format!(
+            "compiled Direct-Arena stage {:?} residual input width disagrees with its bindings",
+            stage.evaluator_label
+        )));
+    }
+    let mut components = vec![None; direct.input_bindings.len()];
     for component in &direct.input_bindings {
         if component.parameter_index >= components.len()
             || components[component.parameter_index]
@@ -2117,7 +2122,6 @@ fn load_stage(
         )));
     }
 
-    let (_, residual_output_len) = direct.residual_evaluator.io_len()?;
     let output_limit = if is_amplitude {
         amplitude_component_count
     } else {
@@ -3610,6 +3614,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
             output_len: 0,
             required_runtime_capabilities: Vec::new(),
         });
+        plan.input_bindings.clear();
         plan.output_bindings.clear();
         plan.residual_leaves.clear();
         plan.scratch_current_component_count = 1;

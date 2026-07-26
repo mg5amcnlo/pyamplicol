@@ -90,11 +90,9 @@ fn validate_compiled_stage_plan_v2(
             stage.evaluator_label
         )));
     }
-    if stage.parameter_layout != "stage-local-value-momentum"
-        || plan.input_bindings.len() != stage.parameter_count
-    {
+    if stage.parameter_layout != "stage-local-value-momentum" {
         return Err(RusticolError::integrity(format!(
-            "compiled stage-plan {:?} has incomplete input bindings",
+            "compiled stage-plan {:?} requires stage-local input bindings",
             stage.evaluator_label
         )));
     }
@@ -109,6 +107,7 @@ fn validate_compiled_stage_plan_v2(
         momentum_component_count,
         model_parameter_count,
         stage.parameter_count,
+        plan.input_bindings.len(),
         stage.output_length,
         plan.scratch_current_component_count,
     ] {
@@ -138,16 +137,54 @@ fn validate_compiled_stage_plan_v2(
             ));
         }
     }
-    if canonical_inputs.iter().any(Option::is_none)
-        || canonical_inputs
-            .into_iter()
-            .map(Option::unwrap)
-            .ne(plan.input_bindings.iter().cloned())
-    {
+    if canonical_inputs.iter().any(Option::is_none) {
         return Err(RusticolError::integrity(format!(
-            "compiled stage-plan {:?} input bindings disagree with the DAG",
+            "compiled stage-plan {:?} DAG input bindings are incomplete",
             stage.evaluator_label
         )));
+    }
+    let canonical_inputs = canonical_inputs
+        .into_iter()
+        .map(Option::unwrap)
+        .collect::<Vec<_>>();
+    let mut previous_original_index = None;
+    for (projected_index, binding) in plan.input_bindings.iter().enumerate() {
+        if binding.parameter_index != projected_index {
+            return Err(RusticolError::integrity(format!(
+                "compiled stage-plan {:?} residual input bindings are not dense",
+                stage.evaluator_label
+            )));
+        }
+        let mut matches = canonical_inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, canonical)| {
+                canonical.kind == binding.kind
+                    && canonical.source_id == binding.source_id
+                    && canonical.component == binding.component
+                    && canonical.global_component == binding.global_component
+                    && canonical.real_valued == binding.real_valued
+            })
+            .map(|(index, _)| index);
+        let Some(original_index) = matches.next() else {
+            return Err(RusticolError::integrity(format!(
+                "compiled stage-plan {:?} residual input bindings disagree with the DAG",
+                stage.evaluator_label
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(RusticolError::integrity(format!(
+                "compiled stage-plan {:?} residual input binding is ambiguous in the DAG",
+                stage.evaluator_label
+            )));
+        }
+        if previous_original_index.is_some_and(|previous| original_index <= previous) {
+            return Err(RusticolError::integrity(format!(
+                "compiled stage-plan {:?} residual input bindings reorder or duplicate DAG inputs",
+                stage.evaluator_label
+            )));
+        }
+        previous_original_index = Some(original_index);
     }
 
     let expected_arena = if is_amplitude { "amplitude" } else { "current" };
@@ -200,7 +237,7 @@ fn validate_compiled_stage_plan_v2(
         ));
     }
     let (residual_input_len, residual_output_len) = plan.residual_evaluator.io_len()?;
-    if (residual_output_len != 0 && residual_input_len != stage.parameter_count)
+    if residual_input_len != plan.input_bindings.len()
         || plan.output_bindings.len() != residual_output_len
     {
         return Err(RusticolError::integrity(
@@ -4481,6 +4518,43 @@ mod compiled_plane_arena_contract_tests {
         arena_manifest_at(3)
     }
 
+    fn project_amplitude_residual_inputs(
+        manifest: &mut ExecutionManifest,
+        original_indices: &[usize],
+    ) {
+        let stage = &mut manifest
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage;
+        let canonical = stage.input_components.clone();
+        let plan = stage.compiled_plane_arena.as_mut().unwrap();
+        plan.input_bindings = original_indices
+            .iter()
+            .enumerate()
+            .map(|(projected_index, original_index)| {
+                let input = &canonical[*original_index];
+                CompiledPlaneInputBindingManifest {
+                    parameter_index: projected_index,
+                    kind: input.kind.clone(),
+                    source_id: input.source_id,
+                    component: input.component,
+                    global_component: input.global_component,
+                    real_valued: input.real_valued,
+                }
+            })
+            .collect();
+        let EvaluatorManifest::SymjitApplication { input_len, .. } =
+            plan.residual_evaluator.as_mut()
+        else {
+            panic!("compiled residual fixture must use one SymJIT evaluator");
+        };
+        *input_len = original_indices.len();
+        plan.residual_leaves[0].input_len = original_indices.len();
+        plan.residual_leaves[0].input_indices = (0..original_indices.len()).collect();
+    }
+
     #[cfg(feature = "f64-compiled")]
     fn native_residual_manifest() -> ExecutionManifest {
         let mut manifest = arena_manifest();
@@ -4579,6 +4653,70 @@ mod compiled_plane_arena_contract_tests {
         }
         assert!(
             supported_runtime_capabilities().contains(&COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY)
+        );
+    }
+
+    #[test]
+    fn plane_contract_accepts_only_dense_ordered_residual_input_projections() {
+        let mut projected = arena_manifest();
+        project_amplitude_residual_inputs(&mut projected, &[0, 2, 5, 13]);
+        validate_compiled_plane_arena_contract(&projected)
+            .expect("ordered residual input projection must validate");
+
+        let mut reordered = projected.clone();
+        let bindings = &mut reordered
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage
+            .compiled_plane_arena
+            .as_mut()
+            .unwrap()
+            .input_bindings;
+        bindings.swap(1, 2);
+        for (index, binding) in bindings.iter_mut().enumerate() {
+            binding.parameter_index = index;
+        }
+        let error = validate_compiled_plane_arena_contract(&reordered).unwrap_err();
+        assert!(error.to_string().contains("reorder or duplicate"));
+
+        let mut sparse = projected.clone();
+        sparse
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage
+            .compiled_plane_arena
+            .as_mut()
+            .unwrap()
+            .input_bindings[1]
+            .parameter_index = 3;
+        let error = validate_compiled_plane_arena_contract(&sparse).unwrap_err();
+        assert!(error.to_string().contains("not dense"));
+
+        let mut width_mismatch = projected;
+        let plan = width_mismatch
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage
+            .compiled_plane_arena
+            .as_mut()
+            .unwrap();
+        let EvaluatorManifest::SymjitApplication { input_len, .. } =
+            plan.residual_evaluator.as_mut()
+        else {
+            panic!("compiled residual fixture must use one SymJIT evaluator");
+        };
+        *input_len += 1;
+        let error = validate_compiled_plane_arena_contract(&width_mismatch).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("residual evaluator I/O disagrees")
         );
     }
 

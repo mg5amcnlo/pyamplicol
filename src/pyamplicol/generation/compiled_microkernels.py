@@ -2211,7 +2211,7 @@ def _residual_stage(
     output_slot_ids = tuple(
         dict.fromkeys(slot.value_slot_id for slot in residual_slots)
     )
-    return (
+    residual = _prune_residual_stage_inputs(
         replace(
             stage,
             output_length=len(residual_outputs),
@@ -2229,9 +2229,126 @@ def _residual_stage(
             ),
             selector_output_partitions=tuple(partitions),
             output_expressions=tuple(residual_outputs),
-        ),
+        )
+    )
+    return (
+        residual,
         tuple(residual_chunks),
         tuple(original_output_indices),
+    )
+
+
+def _prune_residual_stage_inputs(
+    stage: GenericCompiledStageBlueprint,
+) -> GenericCompiledStageBlueprint:
+    """Retain only runtime parameters referenced by residual expressions.
+
+    The ordinary chunk compiler performs this projection whenever an evaluator
+    has multiple chunks.  Removing complete table-owned currents can leave one
+    residual chunk, for which SymJIT intentionally keeps the complete declared
+    parameter list.  Projecting the stage first preserves the original chunk's
+    exact dependency/liveness contract without changing any expression or its
+    contribution order.
+    """
+
+    if not stage.output_expressions:
+        return replace(
+            stage,
+            input_value_slot_ids=(),
+            input_components=(),
+            parameter_count=0,
+            value_parameter_count=0,
+            momentum_parameter_count=0,
+            model_parameter_count=0,
+            real_valued_inputs=(),
+            parameter_symbols=(),
+        )
+    if stage.parameter_count == 0:
+        if stage.parameter_symbols or stage.input_components:
+            raise ValueError(
+                "compiled residual stage parameter bindings are inconsistent"
+            )
+        return stage
+    if (
+        len(stage.parameter_symbols) != stage.parameter_count
+        or len(stage.input_components) != stage.parameter_count
+    ):
+        raise ValueError("compiled residual stage parameter bindings are incomplete")
+    components_by_parameter: list[object | None] = [None] * stage.parameter_count
+    for component in stage.input_components:
+        parameter_index = int(component.parameter_index)
+        if (
+            parameter_index < 0
+            or parameter_index >= stage.parameter_count
+            or components_by_parameter[parameter_index] is not None
+        ):
+            raise ValueError("compiled residual stage parameter bindings are invalid")
+        components_by_parameter[parameter_index] = component
+    if any(component is None for component in components_by_parameter):
+        raise ValueError("compiled residual stage parameter bindings are incomplete")
+
+    used_symbols: set[object] = set()
+    for expression in stage.output_expressions:
+        getter = getattr(expression, "get_all_symbols", None)
+        if not callable(getter):
+            raise ValueError(
+                "compiled residual expression lacks structural symbol discovery"
+            )
+        used_symbols.update(getter(False))
+    for _function, _arguments, body in stage.symbolica_functions:
+        getter = getattr(body, "get_all_symbols", None)
+        if not callable(getter):
+            raise ValueError(
+                "compiled residual function body lacks structural symbol discovery"
+            )
+        used_symbols.update(getter(False))
+
+    retained_indices = tuple(
+        index
+        for index, symbol in enumerate(stage.parameter_symbols)
+        if symbol in used_symbols
+    )
+    old_real_inputs = set(stage.real_valued_inputs)
+    retained_components = tuple(
+        replace(
+            components_by_parameter[old_index],
+            parameter_index=new_index,
+        )
+        for new_index, old_index in enumerate(retained_indices)
+    )
+    value_components = tuple(
+        component for component in retained_components if component.kind == "value"
+    )
+    momentum_components = tuple(
+        component for component in retained_components if component.kind == "momentum"
+    )
+    model_parameter_components = tuple(
+        component
+        for component in retained_components
+        if component.kind == "model_parameter"
+    )
+    if len(value_components) + len(momentum_components) + len(
+        model_parameter_components
+    ) != len(retained_components):
+        raise ValueError("compiled residual stage has an unsupported input kind")
+    return replace(
+        stage,
+        input_value_slot_ids=tuple(
+            dict.fromkeys(component.source_id for component in value_components)
+        ),
+        input_components=retained_components,
+        parameter_count=len(retained_indices),
+        value_parameter_count=len(value_components),
+        momentum_parameter_count=len(momentum_components),
+        model_parameter_count=len(model_parameter_components),
+        real_valued_inputs=tuple(
+            new_index
+            for new_index, old_index in enumerate(retained_indices)
+            if old_index in old_real_inputs
+        ),
+        parameter_symbols=tuple(
+            stage.parameter_symbols[index] for index in retained_indices
+        ),
     )
 
 
