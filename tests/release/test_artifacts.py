@@ -160,9 +160,7 @@ def candidate_dependency_provenance(
 ) -> None:
     contributor_path = tmp_path / "contributor-lock.toml"
     state_path = tmp_path / "install-state.json"
-    contributor_data = (
-        ROOT / "dependencies" / "contributor-lock.toml"
-    ).read_bytes()
+    contributor_data = (ROOT / "dependencies" / "contributor-lock.toml").read_bytes()
     contributor_path.write_bytes(contributor_data)
     symbolica = _CONTRIBUTOR_LOCK["symbolica"]
     state_path.write_text(
@@ -173,9 +171,7 @@ def candidate_dependency_provenance(
                 "release_lock_sha256": hashlib.sha256(
                     (ROOT / "dependencies" / "release-lock.toml").read_bytes()
                 ).hexdigest(),
-                "contributor_lock_sha256": hashlib.sha256(
-                    contributor_data
-                ).hexdigest(),
+                "contributor_lock_sha256": hashlib.sha256(contributor_data).hexdigest(),
                 "sources": {
                     "symbolica": {
                         "url": symbolica["source_url"],
@@ -230,9 +226,7 @@ def _prepared_model_files(
             },
             "build_contract": {"candidate_fingerprint": None, "mode": mode},
             "producer": {
-                "prepared_pack_compiler_sha256": (
-                    _prepared_pack_compiler_digest()
-                )
+                "prepared_pack_compiler_sha256": (_prepared_pack_compiler_digest())
             },
             "target": {
                 "portable": True,
@@ -312,25 +306,28 @@ def _selftest_arena_stage(
         ],
         "evaluator": evaluator,
         "compiled_plane_arena": {
-            "schema_version": 1,
-            "kind": "compiled-plane-arena-stage",
-            "application_abi": "symjit-direct-application-storage-v1",
-            "source_application_abi": "symjit-application-storage-v3",
+            "schema_version": 2,
+            "kind": "compiled-stage-plan",
+            "plan_abi": "pyamplicol-compiled-stage-plan-v2",
+            "residual_application_abi": "symjit-direct-application-storage-v1",
+            "table_source_application_abi": "symjit-application-storage-v3",
+            "direct_table_descriptor_abi": "symjit-direct-table-descriptor-v1",
+            "direct_table_binding_abi": "symjit-direct-table-binding-v1",
             "element_layout": "split-complex-component-major",
-            "output_operation": "overwrite",
-            "output_factor": "identity",
-            "input_output_aliasing": "forbidden",
-            "output_output_aliasing": "forbidden",
+            "residual_evaluator": evaluator,
             "input_bindings": [input_component],
             "output_bindings": [
                 {
                     "output_index": 0,
+                    "original_output_index": 0,
                     "arena": arena,
                     "component": output_component,
                 }
             ],
-            "leaves": [
+            "residual_leaves": [
                 {
+                    "residual_leaf_index": 0,
+                    "original_chunk_index": 0,
                     "application_path": application_path,
                     "source_application_abi": "symjit-application-storage-v3",
                     "optimization_level": 2,
@@ -344,6 +341,37 @@ def _selftest_arena_stage(
                     "output_stop": 1,
                 }
             ],
+            "scratch_current_component_count": 0,
+            "plane_catalog": [],
+            "factor_catalog": [],
+            "table_kernels": [],
+            "table_calls": [],
+            "finalizer_calls": [],
+            "execution_order": [
+                {
+                    "kind": "residual-leaf",
+                    "index": 0,
+                    "original_chunk_index": 0,
+                }
+            ],
+            "selector_partitions": [
+                {
+                    "partition_id": 0,
+                    "helicity_selector_domain_ids": [],
+                    "color_selector_domain_ids": [],
+                    "original_chunk_indices": [0],
+                }
+            ],
+            "diagnostics": {
+                "island_count": 0,
+                "kernel_count": 0,
+                "invocation_count": 0,
+                "attachment_count": 0,
+                "table_source_bytes": 0,
+                "descriptor_bytes": 0,
+                "semantic_row_bytes": 0,
+                "scratch_current_component_count": 0,
+            },
         },
     }
 
@@ -354,7 +382,7 @@ def _selftest_execution(
     missing_symjit_capability: str | None = None,
     direct_codegen_optimization_level: int = 3,
 ) -> dict[str, object]:
-    arena_capability = "compiled-plane-arena-v1"
+    arena_capability = "rusticol.compiled.plane-arena.v2"
     symjit_capability = "symjit.application.complex-f64.v1"
     execution_capabilities: list[str] = []
     stage_capabilities: list[str] = []
@@ -537,11 +565,11 @@ def _selftest_files(
     artifact_capabilities = []
     process_capabilities = []
     if missing_arena_capability != "artifact_runtime":
-        artifact_capabilities.append("compiled-plane-arena-v1")
+        artifact_capabilities.append("rusticol.compiled.plane-arena.v2")
     if missing_symjit_capability != "artifact_runtime":
         artifact_capabilities.append("symjit.application.complex-f64.v1")
     if missing_arena_capability != "process":
-        process_capabilities.append("compiled-plane-arena-v1")
+        process_capabilities.append("rusticol.compiled.plane-arena.v2")
     if missing_symjit_capability != "process":
         process_capabilities.append("symjit.application.complex-f64.v1")
     manifest = {
@@ -671,9 +699,7 @@ def _wheel(
         [requirement]
         if requirement is not None
         else list(
-            (
-                _CANDIDATE_REQUIREMENTS if candidate else _DEFAULT_REQUIREMENTS
-            )
+            (_CANDIDATE_REQUIREMENTS if candidate else _DEFAULT_REQUIREMENTS)
             if requirements is None
             else requirements
         )
@@ -921,9 +947,10 @@ def test_required_sdist_keeps_the_portable_source_selftest() -> None:
 
 
 def test_required_sdist_keeps_both_prepared_model_architectures() -> None:
-    assert prepared_model_asset_members(
-        "src/pyamplicol/assets/prepared_models"
-    ) <= REQUIRED_SDIST_MEMBERS
+    assert (
+        prepared_model_asset_members("src/pyamplicol/assets/prepared_models")
+        <= REQUIRED_SDIST_MEMBERS
+    )
 
 
 @pytest.mark.parametrize(
@@ -1319,7 +1346,10 @@ def test_wheel_selftest_requires_complete_arena_capability(
 
     with pytest.raises(
         ArtifactError,
-        match=rf"Arena {contract} contract.*must require compiled-plane-arena-v1",
+        match=(
+            rf"Arena {contract} contract.*must require "
+            r"rusticol\.compiled\.plane-arena\.v2"
+        ),
     ):
         audit_wheel(wheel, mode="release", native_scan=False)
 
@@ -1838,9 +1868,7 @@ def test_sdist_rejects_candidate_prepared_model_assets(tmp_path: Path) -> None:
 def test_sdist_rejects_prepared_payload_compiler_drift(tmp_path: Path) -> None:
     sdist = _sdist(
         tmp_path,
-        extra_files={
-            "src/pyamplicol/evaluators/symbolica_compile.py": b"# drift\n"
-        },
+        extra_files={"src/pyamplicol/evaluators/symbolica_compile.py": b"# drift\n"},
     )
 
     with pytest.raises(ArtifactError, match="payload compiler digest is stale"):

@@ -15,9 +15,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools/release/prepare_selftest_fixture.py"
 FIXTURE = ROOT / "src/pyamplicol/assets/selftest/portable-64le"
-ARENA_CAPABILITY = "compiled-plane-arena-v1"
+ARENA_CAPABILITY = "rusticol.compiled.plane-arena.v2"
+STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
 SOURCE_APPLICATION_ABI = "symjit-application-storage-v3"
 DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
+DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
+DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
 SYMJIT_CAPABILITY = "symjit.application.complex-f64.v1"
 
 
@@ -75,25 +78,28 @@ def _portable_stage(
         "output_slots": [output_slot],
         "evaluator": evaluator,
         "compiled_plane_arena": {
-            "schema_version": 1,
-            "kind": "compiled-plane-arena-stage",
-            "application_abi": DIRECT_APPLICATION_ABI,
-            "source_application_abi": SOURCE_APPLICATION_ABI,
+            "schema_version": 2,
+            "kind": "compiled-stage-plan",
+            "plan_abi": STAGE_PLAN_ABI,
+            "residual_application_abi": DIRECT_APPLICATION_ABI,
+            "table_source_application_abi": SOURCE_APPLICATION_ABI,
+            "direct_table_descriptor_abi": DIRECT_TABLE_DESCRIPTOR_ABI,
+            "direct_table_binding_abi": DIRECT_TABLE_BINDING_ABI,
             "element_layout": "split-complex-component-major",
-            "output_operation": "overwrite",
-            "output_factor": "identity",
-            "input_output_aliasing": "forbidden",
-            "output_output_aliasing": "forbidden",
+            "residual_evaluator": evaluator,
             "input_bindings": [input_component],
             "output_bindings": [
                 {
                     "output_index": 0,
+                    "original_output_index": 0,
                     "arena": arena,
                     "component": output_component,
                 }
             ],
-            "leaves": [
+            "residual_leaves": [
                 {
+                    "residual_leaf_index": 0,
+                    "original_chunk_index": 0,
                     "application_path": application_path,
                     "source_application_abi": SOURCE_APPLICATION_ABI,
                     "optimization_level": optimization_level,
@@ -105,6 +111,37 @@ def _portable_stage(
                     "output_stop": 1,
                 }
             ],
+            "scratch_current_component_count": 0,
+            "plane_catalog": [],
+            "factor_catalog": [],
+            "table_kernels": [],
+            "table_calls": [],
+            "finalizer_calls": [],
+            "execution_order": [
+                {
+                    "kind": "residual-leaf",
+                    "index": 0,
+                    "original_chunk_index": 0,
+                }
+            ],
+            "selector_partitions": [
+                {
+                    "partition_id": 0,
+                    "helicity_selector_domain_ids": [],
+                    "color_selector_domain_ids": [],
+                    "original_chunk_indices": [0],
+                }
+            ],
+            "diagnostics": {
+                "island_count": 0,
+                "kernel_count": 0,
+                "invocation_count": 0,
+                "attachment_count": 0,
+                "table_source_bytes": 0,
+                "descriptor_bytes": 0,
+                "semantic_row_bytes": 0,
+                "scratch_current_component_count": 0,
+            },
         },
     }
 
@@ -296,6 +333,145 @@ def test_portable_fixture_accepts_portable_o2_mir(tmp_path: Path) -> None:
     assert module._validate_portable_evaluator_configuration(tmp_path, manifest) == 2
 
 
+def test_portable_fixture_accepts_v2_direct_table_stage(tmp_path: Path) -> None:
+    module = _module()
+    execution = _portable_execution()
+    descriptor = execution["compiled"]["stage_evaluators"]["stages"][0][
+        "compiled_plane_arena"
+    ]
+    descriptor.update(
+        {
+            "residual_evaluator": {
+                "kind": "compiled-stage-empty-residual",
+                "input_len": 0,
+                "output_len": 0,
+                "required_runtime_capabilities": [],
+            },
+            "output_bindings": [],
+            "residual_leaves": [],
+            "table_kernels": [
+                {
+                    "table_kernel_id": 0,
+                    "prepared_kernel_id": 7,
+                    "role": "contribution",
+                    "canonical_signature": "vector-weyl:test",
+                    "source_application": {
+                        "path": "evaluators/contribution.symjit",
+                        "size_bytes": 64,
+                        "sha256": "0" * 64,
+                    },
+                    "descriptor": {
+                        "path": "evaluators/contribution.table",
+                        "size_bytes": 32,
+                        "sha256": "1" * 64,
+                    },
+                    "source_application_abi": SOURCE_APPLICATION_ABI,
+                    "descriptor_abi": DIRECT_TABLE_DESCRIPTOR_ABI,
+                    "binding_abi": DIRECT_TABLE_BINDING_ABI,
+                    "input_complex_count": 1,
+                    "output_complex_count": 1,
+                    "scalar_input_count": 0,
+                    "optimization_level": 3,
+                    "input_contracts": [{}],
+                    "output_layout": ["complex"],
+                },
+                {
+                    "table_kernel_id": 1,
+                    "prepared_kernel_id": None,
+                    "role": "finalizer",
+                    "canonical_signature": "identity:test",
+                    "source_application": {
+                        "path": "evaluators/finalizer.symjit",
+                        "size_bytes": 64,
+                        "sha256": "2" * 64,
+                    },
+                    "descriptor": {
+                        "path": "evaluators/finalizer.table",
+                        "size_bytes": 32,
+                        "sha256": "3" * 64,
+                    },
+                    "source_application_abi": SOURCE_APPLICATION_ABI,
+                    "descriptor_abi": DIRECT_TABLE_DESCRIPTOR_ABI,
+                    "binding_abi": DIRECT_TABLE_BINDING_ABI,
+                    "input_complex_count": 1,
+                    "output_complex_count": 1,
+                    "scalar_input_count": 0,
+                    "optimization_level": 3,
+                    "input_contracts": [{}],
+                    "output_layout": ["complex"],
+                },
+            ],
+            "table_calls": [
+                {
+                    "table_kernel_id": 0,
+                    "invocation_rows": {
+                        "path": "evaluators/contribution.invocations",
+                        "size_bytes": 16,
+                        "sha256": "4" * 64,
+                        "count": 1,
+                        "row_size": 16,
+                    },
+                    "attachment_rows": {
+                        "path": "evaluators/contribution.attachments",
+                        "size_bytes": 16,
+                        "sha256": "5" * 64,
+                        "count": 1,
+                        "row_size": 16,
+                    },
+                    "owned_current_ids": [7],
+                    "dependency_current_ids": [],
+                    "dependency_current_components": [],
+                    "selector_partition_ids": [0],
+                }
+            ],
+            "finalizer_calls": [
+                {
+                    "table_kernel_id": 1,
+                    "invocation_rows": {
+                        "path": "evaluators/finalizer.invocations",
+                        "size_bytes": 16,
+                        "sha256": "6" * 64,
+                        "count": 1,
+                        "row_size": 16,
+                    },
+                    "attachment_rows": {
+                        "path": "evaluators/finalizer.attachments",
+                        "size_bytes": 16,
+                        "sha256": "7" * 64,
+                        "count": 1,
+                        "row_size": 16,
+                    },
+                    "owned_current_ids": [7],
+                    "dependency_current_ids": [],
+                    "dependency_current_components": [],
+                    "selector_partition_ids": [0],
+                }
+            ],
+            "execution_order": [
+                {"kind": "table-call", "index": 0, "original_chunk_index": 0},
+                {"kind": "finalizer-call", "index": 0, "original_chunk_index": 0},
+            ],
+        }
+    )
+    manifest = _write_portable_execution(tmp_path, execution)
+
+    assert module._validate_portable_evaluator_configuration(tmp_path, manifest) == 2
+
+
+def test_portable_fixture_rejects_v1_arena_stage(tmp_path: Path) -> None:
+    module = _module()
+    execution = _portable_execution()
+    descriptor = execution["compiled"]["stage_evaluators"]["stages"][0][
+        "compiled_plane_arena"
+    ]
+    descriptor["schema_version"] = 1
+    descriptor["kind"] = "compiled-plane-arena-stage"
+    manifest = _write_portable_execution(tmp_path, execution)
+
+    with pytest.raises(RuntimeError, match="compiled stage-plan v2"):
+        module._validate_portable_evaluator_configuration(tmp_path, manifest)
+
+
 @pytest.mark.parametrize("capability_owner", ("execution", "stage_evaluators"))
 @pytest.mark.parametrize(
     "capability",
@@ -385,7 +561,7 @@ def test_portable_fixture_requires_o3_arena_direct_codegen(tmp_path: Path) -> No
     descriptor = execution["compiled"]["stage_evaluators"]["amplitude_stage"][
         "compiled_plane_arena"
     ]
-    descriptor["leaves"][0]["direct_codegen_optimization_level"] = 2
+    descriptor["residual_leaves"][0]["direct_codegen_optimization_level"] = 2
     manifest = _write_portable_execution(tmp_path, execution)
 
     with pytest.raises(RuntimeError, match=r"direct codegen.*optimization level 3"):
@@ -398,10 +574,10 @@ def test_portable_fixture_binds_arena_leaf_to_o2_source(tmp_path: Path) -> None:
     descriptor = execution["compiled"]["stage_evaluators"]["stages"][0][
         "compiled_plane_arena"
     ]
-    descriptor["leaves"][0]["application_path"] = "evaluators/drift.symjit"
+    descriptor["residual_leaves"][0]["application_path"] = "evaluators/drift.symjit"
     manifest = _write_portable_execution(tmp_path, execution)
 
-    with pytest.raises(RuntimeError, match="does not bind its SymJIT source"):
+    with pytest.raises(RuntimeError, match="does not bind its portable SymJIT source"):
         module._validate_portable_evaluator_configuration(tmp_path, manifest)
 
 
@@ -414,7 +590,7 @@ def test_portable_fixture_validates_nested_selector_executions(
     descriptor = nested["compiled"]["stage_evaluators"]["amplitude_stage"][
         "compiled_plane_arena"
     ]
-    descriptor["leaves"][0]["direct_codegen_optimization_level"] = 1
+    descriptor["residual_leaves"][0]["direct_codegen_optimization_level"] = 1
     execution["helicity_sum_execution"] = nested
     manifest = _write_portable_execution(tmp_path, execution)
 

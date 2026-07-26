@@ -21,9 +21,12 @@ FIXTURE_ROOT = ROOT / "src" / "pyamplicol" / "assets" / "selftest"
 PORTABLE_TEMPLATE = "portable-64le"
 PORTABLE_OPTIMIZATION_LEVEL = 2
 PORTABLE_DIRECT_CODEGEN_OPTIMIZATION_LEVEL = 3
-COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY = "compiled-plane-arena-v1"
+COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY = "rusticol.compiled.plane-arena.v2"
+COMPILED_STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
 COMPILED_PLANE_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
 SYMJIT_APPLICATION_ABI = "symjit-application-storage-v3"
+DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
+DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
 SYMJIT_F64_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
 COMPATIBLE_TARGETS = (
     "aarch64-apple-darwin",
@@ -240,7 +243,7 @@ def _validate_portable_symjit_source(
         )
 
 
-def _portable_arena_source_leaves(
+def _portable_residual_source_leaves(
     evaluator: Mapping[str, object],
     parent_inputs: tuple[int, ...],
     output_start: int,
@@ -248,6 +251,16 @@ def _portable_arena_source_leaves(
     context: str,
 ) -> tuple[list[dict[str, object]], int]:
     kind = evaluator.get("kind")
+    if kind == "compiled-stage-empty-residual":
+        if (
+            evaluator.get("input_len") != 0
+            or evaluator.get("output_len") != 0
+            or evaluator.get("required_runtime_capabilities") != []
+            or parent_inputs
+            or output_start != 0
+        ):
+            raise RuntimeError(f"{context} has an invalid empty residual evaluator")
+        return [], 0
     if kind == "chunked-symbolica-evaluator":
         input_len = evaluator.get("input_len")
         if input_len is not None and input_len != len(parent_inputs):
@@ -294,7 +307,7 @@ def _portable_arena_source_leaves(
         ):
             if not isinstance(raw_chunk, Mapping):
                 raise RuntimeError(f"{context} evaluator child is invalid")
-            child, cursor = _portable_arena_source_leaves(
+            child, cursor = _portable_residual_source_leaves(
                 raw_chunk,
                 mapped,
                 cursor,
@@ -451,6 +464,306 @@ def _portable_stage_output_bindings(
     return [binding for binding in expected if binding is not None]
 
 
+def _portable_sorted_unique_nonnegative_ints(
+    value: object,
+    *,
+    context: str,
+) -> list[int]:
+    values = _portable_sequence(value, context=context)
+    result: list[int] = []
+    for item in values:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise RuntimeError(f"{context} contains an invalid index")
+        result.append(item)
+    if result != sorted(set(result)):
+        raise RuntimeError(f"{context} is not canonical")
+    return result
+
+
+def _portable_sorted_unique_ints(
+    value: object,
+    *,
+    context: str,
+) -> list[int]:
+    values = _portable_sequence(value, context=context)
+    result: list[int] = []
+    for item in values:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise RuntimeError(f"{context} contains an invalid index")
+        result.append(item)
+    if result != sorted(set(result)):
+        raise RuntimeError(f"{context} is not canonical")
+    return result
+
+
+def _validate_portable_table_kernels(
+    descriptor: Mapping[str, object],
+    *,
+    context: str,
+) -> list[Mapping[str, object]]:
+    raw_kernels = _portable_sequence(
+        descriptor.get("table_kernels"),
+        context=f"{context} compiled stage-plan table kernels",
+    )
+    if len(raw_kernels) > 8:
+        raise RuntimeError(f"{context} exceeds the eight-kernel slice cap")
+    kernels: list[Mapping[str, object]] = []
+    signatures: set[tuple[object, object]] = set()
+    for kernel_index, raw_kernel in enumerate(raw_kernels):
+        if not isinstance(raw_kernel, Mapping):
+            raise RuntimeError(f"{context} table kernel {kernel_index} is invalid")
+        input_count = _portable_nonnegative_int(
+            raw_kernel,
+            "input_complex_count",
+            context=f"{context} table kernel {kernel_index}",
+        )
+        output_count = _portable_nonnegative_int(
+            raw_kernel,
+            "output_complex_count",
+            context=f"{context} table kernel {kernel_index}",
+        )
+        role = raw_kernel.get("role")
+        signature = (role, raw_kernel.get("canonical_signature"))
+        if (
+            raw_kernel.get("table_kernel_id") != kernel_index
+            or role not in {"contribution", "finalizer"}
+            or not isinstance(signature[1], str)
+            or not signature[1]
+            or signature in signatures
+            or not 1 <= input_count <= 16
+            or not 1 <= output_count <= 4
+            or raw_kernel.get("scalar_input_count") != 0
+            or raw_kernel.get("optimization_level") != 3
+            or raw_kernel.get("source_application_abi") != SYMJIT_APPLICATION_ABI
+            or raw_kernel.get("descriptor_abi") != DIRECT_TABLE_DESCRIPTOR_ABI
+            or raw_kernel.get("binding_abi") != DIRECT_TABLE_BINDING_ABI
+        ):
+            raise RuntimeError(
+                f"{context} table kernel {kernel_index} has an invalid ABI or shape"
+            )
+        input_contracts = _portable_sequence(
+            raw_kernel.get("input_contracts"),
+            context=f"{context} table kernel {kernel_index} input contracts",
+        )
+        output_layout = _portable_sequence(
+            raw_kernel.get("output_layout"),
+            context=f"{context} table kernel {kernel_index} output layout",
+        )
+        if len(input_contracts) != input_count or len(output_layout) != output_count:
+            raise RuntimeError(
+                f"{context} table kernel {kernel_index} dimensions are inconsistent"
+            )
+        for name in ("source_application", "descriptor"):
+            payload = raw_kernel.get(name)
+            if (
+                not isinstance(payload, Mapping)
+                or not isinstance(payload.get("path"), str)
+                or not payload["path"]
+                or _portable_nonnegative_int(
+                    payload,
+                    "size_bytes",
+                    context=f"{context} table kernel {kernel_index} {name}",
+                )
+                == 0
+            ):
+                raise RuntimeError(
+                    f"{context} table kernel {kernel_index} has an empty {name}"
+                )
+        signatures.add(signature)
+        kernels.append(raw_kernel)
+    return kernels
+
+
+def _validate_portable_table_rows(
+    value: object,
+    *,
+    expected_row_size: int,
+    context: str,
+) -> int:
+    if not isinstance(value, Mapping):
+        raise RuntimeError(f"{context} is invalid")
+    count = _portable_nonnegative_int(value, "count", context=context)
+    row_size = _portable_nonnegative_int(value, "row_size", context=context)
+    size_bytes = _portable_nonnegative_int(value, "size_bytes", context=context)
+    if (
+        count == 0
+        or row_size != expected_row_size
+        or size_bytes != count * row_size
+        or not isinstance(value.get("path"), str)
+        or not value["path"]
+    ):
+        raise RuntimeError(f"{context} has an invalid shape")
+    return count
+
+
+def _validate_portable_table_calls(
+    value: object,
+    kernels: Sequence[Mapping[str, object]],
+    selector_partitions: Sequence[object],
+    *,
+    expected_role: str,
+    context: str,
+) -> set[int]:
+    calls = _portable_sequence(
+        value,
+        context=f"{context} compiled stage-plan {expected_role} calls",
+    )
+    owned: set[int] = set()
+    for call_index, raw_call in enumerate(calls):
+        if not isinstance(raw_call, Mapping):
+            raise RuntimeError(
+                f"{context} {expected_role} call {call_index} is invalid"
+            )
+        kernel_id = _portable_nonnegative_int(
+            raw_call,
+            "table_kernel_id",
+            context=f"{context} {expected_role} call {call_index}",
+        )
+        if kernel_id >= len(kernels) or kernels[kernel_id].get("role") != expected_role:
+            raise RuntimeError(
+                f"{context} {expected_role} call {call_index} references "
+                "an absent kernel"
+            )
+        call_owned = _portable_sorted_unique_nonnegative_ints(
+            raw_call.get("owned_current_ids"),
+            context=f"{context} {expected_role} call {call_index} ownership",
+        )
+        if not call_owned:
+            raise RuntimeError(f"{context} {expected_role} call has no owner")
+        _portable_sorted_unique_nonnegative_ints(
+            raw_call.get("dependency_current_ids"),
+            context=f"{context} {expected_role} call {call_index} dependencies",
+        )
+        _portable_sorted_unique_nonnegative_ints(
+            raw_call.get("dependency_current_components"),
+            context=f"{context} {expected_role} call {call_index} components",
+        )
+        partitions = _portable_sorted_unique_nonnegative_ints(
+            raw_call.get("selector_partition_ids"),
+            context=f"{context} {expected_role} call {call_index} partitions",
+        )
+        if len(partitions) != 1 or partitions[0] >= len(selector_partitions):
+            raise RuntimeError(
+                f"{context} {expected_role} call has an invalid selector partition"
+            )
+        kernel = kernels[kernel_id]
+        input_count = int(kernel["input_complex_count"])
+        output_count = int(kernel["output_complex_count"])
+        _validate_portable_table_rows(
+            raw_call.get("invocation_rows"),
+            expected_row_size=(input_count * 2 + 2) * 4,
+            context=f"{context} {expected_role} call {call_index} invocation rows",
+        )
+        _validate_portable_table_rows(
+            raw_call.get("attachment_rows"),
+            expected_row_size=(output_count * 2 + 2) * 4,
+            context=f"{context} {expected_role} call {call_index} attachment rows",
+        )
+        owned.update(call_owned)
+    return owned
+
+
+def _validate_portable_execution_order(
+    descriptor: Mapping[str, object],
+    residual_chunks: set[int],
+    selector_partitions: Sequence[object],
+    *,
+    context: str,
+) -> None:
+    order = _portable_sequence(
+        descriptor.get("execution_order"),
+        context=f"{context} compiled stage-plan execution order",
+    )
+    table_calls = _portable_sequence(
+        descriptor.get("table_calls"),
+        context=f"{context} compiled stage-plan table calls",
+    )
+    finalizer_calls = _portable_sequence(
+        descriptor.get("finalizer_calls"),
+        context=f"{context} compiled stage-plan finalizer calls",
+    )
+    residual_leaves = _portable_sequence(
+        descriptor.get("residual_leaves"),
+        context=f"{context} compiled stage-plan residual leaves",
+    )
+    expected_count = len(residual_leaves) + len(table_calls) + len(finalizer_calls)
+    if len(order) != expected_count:
+        raise RuntimeError(f"{context} execution order is incomplete")
+    seen = {
+        "residual-leaf": set(),
+        "table-call": set(),
+        "finalizer-call": set(),
+    }
+    limits = {
+        "residual-leaf": len(residual_leaves),
+        "table-call": len(table_calls),
+        "finalizer-call": len(finalizer_calls),
+    }
+    chunks: list[int] = []
+    for raw_unit in order:
+        if not isinstance(raw_unit, Mapping) or raw_unit.get("kind") not in limits:
+            raise RuntimeError(f"{context} execution order contains an invalid unit")
+        kind = str(raw_unit["kind"])
+        index = _portable_nonnegative_int(
+            raw_unit,
+            "index",
+            context=f"{context} execution unit",
+        )
+        chunk = _portable_nonnegative_int(
+            raw_unit,
+            "original_chunk_index",
+            context=f"{context} execution unit",
+        )
+        if index >= limits[kind] or index in seen[kind]:
+            raise RuntimeError(f"{context} execution order contains a duplicate unit")
+        if kind == "residual-leaf":
+            leaf = residual_leaves[index]
+            if (
+                not isinstance(leaf, Mapping)
+                or leaf.get("original_chunk_index") != chunk
+            ):
+                raise RuntimeError(
+                    f"{context} residual execution unit lost its original chunk"
+                )
+        seen[kind].add(index)
+        chunks.append(chunk)
+    if chunks != sorted(chunks) or set(chunks) != set(
+        range(max(chunks, default=-1) + 1)
+    ):
+        raise RuntimeError(
+            f"{context} execution order reverses or skips original chunks"
+        )
+    if not residual_chunks.issubset(chunks):
+        raise RuntimeError(f"{context} execution order omits a residual chunk")
+
+    covered = [False] * len(order)
+    for expected_id, raw_partition in enumerate(selector_partitions):
+        if not isinstance(raw_partition, Mapping):
+            raise RuntimeError(f"{context} selector partition {expected_id} is invalid")
+        if raw_partition.get("partition_id") != expected_id:
+            raise RuntimeError(f"{context} selector partitions are not dense")
+        for name in ("helicity_selector_domain_ids", "color_selector_domain_ids"):
+            _portable_sorted_unique_ints(
+                raw_partition.get(name),
+                context=f"{context} selector partition {expected_id} {name}",
+            )
+        _portable_sorted_unique_nonnegative_ints(
+            raw_partition.get("original_chunk_indices"),
+            context=(
+                f"{context} selector partition {expected_id} original_chunk_indices"
+            ),
+        )
+        partition_chunks = set(raw_partition["original_chunk_indices"])
+        for unit_index, raw_unit in enumerate(order):
+            assert isinstance(raw_unit, Mapping)
+            if raw_unit["original_chunk_index"] in partition_chunks:
+                if covered[unit_index]:
+                    raise RuntimeError(f"{context} selector partitions overlap")
+                covered[unit_index] = True
+    if any(not item for item in covered):
+        raise RuntimeError(f"{context} selector partitions are incomplete")
+
+
 def _validate_portable_arena_stage(
     stage: Mapping[str, object],
     *,
@@ -474,6 +787,16 @@ def _validate_portable_arena_stage(
     evaluator = stage.get("evaluator")
     if not isinstance(evaluator, Mapping):
         raise RuntimeError(f"{context} has no compiled evaluator")
+    _outer_leaves, outer_output_length = _portable_residual_source_leaves(
+        evaluator,
+        tuple(range(parameter_count)),
+        0,
+        context=f"{context} exact/reference evaluator",
+    )
+    if outer_output_length != output_length:
+        raise RuntimeError(
+            f"{context} exact/reference evaluator does not cover the original stage"
+        )
     descriptor = stage.get("compiled_plane_arena")
     if not isinstance(descriptor, Mapping):
         raise RuntimeError(
@@ -481,18 +804,19 @@ def _validate_portable_arena_stage(
         )
 
     contract = {
-        "schema_version": 1,
-        "kind": "compiled-plane-arena-stage",
-        "application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-        "source_application_abi": SYMJIT_APPLICATION_ABI,
+        "schema_version": 2,
+        "kind": "compiled-stage-plan",
+        "plan_abi": COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+        "table_source_application_abi": SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": DIRECT_TABLE_BINDING_ABI,
         "element_layout": "split-complex-component-major",
-        "output_operation": "overwrite",
-        "output_factor": "identity",
-        "input_output_aliasing": "forbidden",
-        "output_output_aliasing": "forbidden",
     }
     if any(descriptor.get(name) != value for name, value in contract.items()):
-        raise RuntimeError(f"{context} compiled_plane_arena contract is incompatible")
+        raise RuntimeError(
+            f"{context} is not a compiled stage-plan v2 with DirectTable binding-v1"
+        )
 
     expected_inputs = _portable_stage_input_bindings(
         stage,
@@ -508,55 +832,128 @@ def _validate_portable_arena_stage(
             f"{context} compiled_plane_arena input bindings are incomplete"
         )
 
-    expected_outputs = _portable_stage_output_bindings(
+    canonical_outputs = _portable_stage_output_bindings(
         stage,
         output_length,
         arena=arena,
         context=context,
     )
+    residual_evaluator = descriptor.get("residual_evaluator")
+    if not isinstance(residual_evaluator, Mapping):
+        raise RuntimeError(f"{context} compiled stage-plan has no residual evaluator")
+    residual_inputs = (
+        ()
+        if residual_evaluator.get("kind") == "compiled-stage-empty-residual"
+        else tuple(range(parameter_count))
+    )
+    expected_leaves, residual_output_length = _portable_residual_source_leaves(
+        residual_evaluator,
+        residual_inputs,
+        0,
+        context=f"{context} residual evaluator",
+    )
     output_bindings = _portable_sequence(
         descriptor.get("output_bindings"),
-        context=f"{context} compiled_plane_arena output bindings",
+        context=f"{context} compiled stage-plan output bindings",
     )
-    if list(output_bindings) != expected_outputs:
-        raise RuntimeError(
-            f"{context} compiled_plane_arena output bindings are incomplete"
+    residual_outputs: list[dict[str, object] | None] = [None] * residual_output_length
+    seen_original_outputs: set[int] = set()
+    for raw_binding in output_bindings:
+        if not isinstance(raw_binding, Mapping):
+            raise RuntimeError(f"{context} residual output binding is invalid")
+        output_index = _portable_nonnegative_int(
+            raw_binding,
+            "output_index",
+            context=f"{context} residual output binding",
         )
+        original_output_index = _portable_nonnegative_int(
+            raw_binding,
+            "original_output_index",
+            context=f"{context} residual output binding",
+        )
+        if (
+            output_index >= residual_output_length
+            or original_output_index >= output_length
+            or residual_outputs[output_index] is not None
+            or original_output_index in seen_original_outputs
+        ):
+            raise RuntimeError(f"{context} residual output bindings alias or escape")
+        canonical = canonical_outputs[original_output_index]
+        if (
+            raw_binding.get("arena") != canonical["arena"]
+            or raw_binding.get("component") != canonical["component"]
+        ):
+            raise RuntimeError(
+                f"{context} residual output binding disagrees with the original DAG"
+            )
+        residual_outputs[output_index] = dict(raw_binding)
+        seen_original_outputs.add(original_output_index)
+    if any(binding is None for binding in residual_outputs):
+        raise RuntimeError(f"{context} residual output bindings contain holes")
 
-    expected_leaves, output_stop = _portable_arena_source_leaves(
-        evaluator,
-        tuple(range(parameter_count)),
-        0,
-        context=f"{context} evaluator",
-    )
-    if output_stop != output_length:
-        raise RuntimeError(f"{context} evaluator leaves do not cover its outputs")
     leaves = _portable_sequence(
-        descriptor.get("leaves"),
-        context=f"{context} compiled_plane_arena leaves",
+        descriptor.get("residual_leaves"),
+        context=f"{context} compiled stage-plan residual leaves",
     )
     if len(leaves) != len(expected_leaves):
-        raise RuntimeError(f"{context} compiled_plane_arena leaves are incomplete")
+        raise RuntimeError(f"{context} residual leaf bindings are incomplete")
+    residual_chunks: set[int] = set()
     for leaf_index, (raw_leaf, expected_leaf) in enumerate(
         zip(leaves, expected_leaves, strict=True)
     ):
         if not isinstance(raw_leaf, Mapping):
-            raise RuntimeError(
-                f"{context} compiled_plane_arena leaf {leaf_index} is invalid"
-            )
+            raise RuntimeError(f"{context} residual leaf {leaf_index} is invalid")
+        original_chunk_index = _portable_nonnegative_int(
+            raw_leaf,
+            "original_chunk_index",
+            context=f"{context} residual leaf {leaf_index}",
+        )
         if (
-            raw_leaf.get("direct_codegen_optimization_level")
+            raw_leaf.get("residual_leaf_index") != leaf_index
+            or original_chunk_index in residual_chunks
+            or any(raw_leaf.get(name) != value for name, value in expected_leaf.items())
+            or raw_leaf.get("direct_codegen_optimization_level")
             != PORTABLE_DIRECT_CODEGEN_OPTIMIZATION_LEVEL
         ):
             raise RuntimeError(
-                f"{context} compiled_plane_arena direct codegen must use "
-                f"optimization level {PORTABLE_DIRECT_CODEGEN_OPTIMIZATION_LEVEL}"
+                f"{context} residual leaf {leaf_index} does not bind its "
+                "portable SymJIT source at direct codegen optimization level "
+                f"{PORTABLE_DIRECT_CODEGEN_OPTIMIZATION_LEVEL}"
             )
-        if any(raw_leaf.get(name) != value for name, value in expected_leaf.items()):
-            raise RuntimeError(
-                f"{context} compiled_plane_arena leaf {leaf_index} "
-                "does not bind its SymJIT source"
-            )
+        residual_chunks.add(original_chunk_index)
+
+    table_kernels = _validate_portable_table_kernels(
+        descriptor,
+        context=context,
+    )
+    selector_partitions = _portable_sequence(
+        descriptor.get("selector_partitions"),
+        context=f"{context} compiled stage-plan selector partitions",
+    )
+    table_owned = _validate_portable_table_calls(
+        descriptor.get("table_calls"),
+        table_kernels,
+        selector_partitions,
+        expected_role="contribution",
+        context=context,
+    )
+    finalizer_owned = _validate_portable_table_calls(
+        descriptor.get("finalizer_calls"),
+        table_kernels,
+        selector_partitions,
+        expected_role="finalizer",
+        context=context,
+    )
+    if table_owned != finalizer_owned:
+        raise RuntimeError(f"{context} contribution and finalizer ownership differ")
+    if arena == "amplitude" and table_owned:
+        raise RuntimeError(f"{context} tableizes the amplitude stage")
+    _validate_portable_execution_order(
+        descriptor,
+        residual_chunks,
+        selector_partitions,
+        context=context,
+    )
 
 
 def _validate_portable_compiled_execution(
