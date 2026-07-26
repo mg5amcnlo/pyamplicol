@@ -37,32 +37,38 @@ def _source_leaf(optimization_level: int) -> dict[str, object]:
 
 def _stage(optimization_level: int) -> dict[str, object]:
     path = f"evaluators/stage-o{optimization_level}.symjit"
+    source = _source_leaf(optimization_level)
+    input_binding = {
+        "kind": "value",
+        "parameter_index": 0,
+        "source_id": 0,
+        "component": 0,
+    }
     return {
         "stage_kind": "amplitude-roots",
+        "parameter_count": 1,
         "output_length": 1,
-        "evaluator": _source_leaf(optimization_level),
+        "evaluator": source,
         "compiled_plane_arena": {
-            "kind": "compiled-plane-arena-stage",
-            "schema_version": 1,
-            "application_abi": gate.COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-            "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+            "kind": gate.COMPILED_STAGE_PLAN_KIND,
+            "schema_version": gate.COMPILED_STAGE_PLAN_SCHEMA_VERSION,
+            "plan_abi": gate.COMPILED_STAGE_PLAN_ABI,
+            "residual_application_abi": gate.COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+            "table_source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+            "direct_table_descriptor_abi": (gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI),
+            "direct_table_binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
             "element_layout": "split-complex-component-major",
-            "input_output_aliasing": "forbidden",
-            "output_output_aliasing": "forbidden",
-            "output_operation": "overwrite",
-            "output_factor": "identity",
-            "input_bindings": [
+            "input_bindings": [input_binding],
+            "output_bindings": [
                 {
-                    "kind": "value",
-                    "parameter_index": 0,
-                    "source_id": 0,
+                    "arena": "amplitude",
                     "component": 0,
+                    "output_index": 0,
+                    "original_output_index": 0,
                 }
             ],
-            "output_bindings": [
-                {"arena": "amplitude", "component": 0, "output_index": 0}
-            ],
-            "leaves": [
+            "residual_evaluator": source,
+            "residual_leaves": [
                 {
                     "application_path": path,
                     "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
@@ -73,8 +79,41 @@ def _stage(optimization_level: int) -> dict[str, object]:
                     "output_len": 1,
                     "output_start": 0,
                     "output_stop": 1,
+                    "residual_leaf_index": 0,
+                    "original_chunk_index": 0,
                 }
             ],
+            "scratch_current_component_count": 0,
+            "plane_catalog": [],
+            "factor_catalog": [],
+            "table_kernels": [],
+            "table_calls": [],
+            "finalizer_calls": [],
+            "execution_order": [
+                {
+                    "kind": "residual-leaf",
+                    "index": 0,
+                    "original_chunk_index": 0,
+                }
+            ],
+            "selector_partitions": [
+                {
+                    "partition_id": 0,
+                    "helicity_selector_domain_ids": [],
+                    "color_selector_domain_ids": [],
+                    "original_chunk_indices": [0],
+                }
+            ],
+            "diagnostics": {
+                "island_count": 0,
+                "kernel_count": 0,
+                "invocation_count": 0,
+                "attachment_count": 0,
+                "table_source_bytes": 0,
+                "descriptor_bytes": 0,
+                "semantic_row_bytes": 0,
+                "scratch_current_component_count": 0,
+            },
         },
     }
 
@@ -91,6 +130,64 @@ def _stage_set(optimization_level: int) -> dict[str, object]:
         "stages": [],
         "amplitude_stage": _stage(optimization_level),
     }
+
+
+def _table_stage(optimization_level: int) -> dict[str, object]:
+    stage = _stage(optimization_level)
+    stage["stage_kind"] = "current-combine"
+    stage["output_length"] = 2
+    plan = stage["compiled_plane_arena"]
+    assert isinstance(plan, dict)
+    plan["residual_evaluator"] = {
+        "kind": "compiled-stage-empty-residual",
+        "input_len": 0,
+        "output_len": 0,
+    }
+    plan["residual_leaves"] = []
+    plan["output_bindings"] = []
+    plan["table_kernels"] = [
+        {
+            "table_kernel_id": 0,
+            "role": "contribution",
+            "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+            "descriptor_abi": gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+            "binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
+            "optimization_level": 3,
+            "scalar_input_count": 0,
+            "input_complex_count": 1,
+            "output_complex_count": 2,
+        },
+        {
+            "table_kernel_id": 1,
+            "role": "finalizer",
+            "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+            "descriptor_abi": gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+            "binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
+            "optimization_level": 3,
+            "scalar_input_count": 0,
+            "input_complex_count": 1,
+            "output_complex_count": 2,
+        },
+    ]
+    plan["table_calls"] = [
+        {
+            "table_kernel_id": 0,
+            "owned_current_ids": [7],
+            "selector_partition_ids": [0],
+        }
+    ]
+    plan["finalizer_calls"] = [
+        {
+            "table_kernel_id": 1,
+            "owned_current_ids": [7],
+            "selector_partition_ids": [0],
+        }
+    ]
+    plan["execution_order"] = [
+        {"kind": "table-call", "index": 0, "original_chunk_index": 0},
+        {"kind": "finalizer-call", "index": 0, "original_chunk_index": 0},
+    ]
+    return stage
 
 
 def _execution_payload(optimization_level: int) -> dict[str, object]:
@@ -163,6 +260,23 @@ def test_recursive_audit_accepts_every_jit_level(
     assert result["passes"] is True
 
 
+def test_direct_table_stage_plan_is_a_complete_v2_execution_unit() -> None:
+    stage = _table_stage(3)
+    plan = stage["compiled_plane_arena"]
+    assert isinstance(plan, dict)
+
+    result = gate._audit_direct_descriptor(
+        plan,
+        stage=stage,
+        optimization_level=3,
+        label="table-stage",
+    )
+
+    assert result["leaf_count"] == 0
+    assert result["kernel_count"] == 2
+    assert result["executable_unit_count"] == 2
+
+
 @pytest.mark.parametrize(
     "mutation, message",
     [
@@ -175,13 +289,13 @@ def test_recursive_audit_accepts_every_jit_level(
         (
             lambda payload: payload["compiled"]["stage_evaluators"]["amplitude_stage"][
                 "compiled_plane_arena"
-            ]["leaves"][0].update({"optimization_level": 3}),
+            ]["residual_leaves"][0].update({"optimization_level": 3}),
             "does not retain JIT O1",
         ),
         (
             lambda payload: payload["compiled"]["stage_evaluators"]["amplitude_stage"][
                 "compiled_plane_arena"
-            ]["leaves"][0].update({"direct_codegen_optimization_level": 2}),
+            ]["residual_leaves"][0].update({"direct_codegen_optimization_level": 2}),
             "fixed O3",
         ),
         (
@@ -192,7 +306,7 @@ def test_recursive_audit_accepts_every_jit_level(
         ),
         (
             lambda payload: payload["compiled"]["model_parameter_evaluator"].update(
-                {"compiled_plane_arena": {"kind": "compiled-plane-arena-stage"}}
+                {"compiled_plane_arena": {"kind": gate.COMPILED_STAGE_PLAN_KIND}}
             ),
             "model_parameter_evaluator illegally",
         ),

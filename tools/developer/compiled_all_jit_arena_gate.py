@@ -8,9 +8,9 @@ must be built and evaluated by a candidate installed from the exact clean
 source revision.  The gate then:
 
 * authenticates every artifact payload and the native loader's artifact ID;
-* recursively requires ``compiled-plane-arena-v1`` for every fused stage;
-* requires every source and Direct-Arena leaf to retain the requested JIT
-  optimization level;
+* recursively requires ``rusticol.compiled.plane-arena.v2`` for every fused stage;
+* requires every residual source and DirectApplication leaf to retain the
+  requested JIT optimization level and every DirectTable kernel to use O3;
 * rejects DirectApplication metadata below every model-parameter evaluator;
 * evaluates deterministic physical points through native f64 and retained
   precision-32 execution;
@@ -168,13 +168,18 @@ VALIDATION_SEED = 20260725
 SQRT_S = 1_000.0
 RELATIVE_TOLERANCE = 1.0e-12
 ABSOLUTE_TOLERANCE = 1.0e-15
-COMPILED_PLANE_ARENA_CAPABILITY = "compiled-plane-arena-v1"
+COMPILED_PLANE_ARENA_CAPABILITY = "rusticol.compiled.plane-arena.v2"
+COMPILED_STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
 COMPILED_PLANE_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
+COMPILED_DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
+COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
 NATIVE_COMPILED_DIRECT_APPLICATION_ABI = (
     "pyamplicol-native-compiled-direct-application-v1"
 )
 SYMJIT_APPLICATION_ABI = "symjit-application-storage-v3"
 SYMJIT_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
+COMPILED_STAGE_PLAN_KIND = "compiled-stage-plan"
+COMPILED_STAGE_PLAN_SCHEMA_VERSION = 2
 RESULT_KIND = "pyamplicol-compiled-all-jit-direct-arena-gate"
 SCHEMA_VERSION = 1
 HASH_CHUNK_BYTES = 1024 * 1024
@@ -754,6 +759,10 @@ def _source_evaluator_leaves(
     label: str,
 ) -> list[Mapping[str, Any]]:
     kind = evaluator.get("kind")
+    if kind == "compiled-stage-empty-residual":
+        if evaluator.get("input_len") != 0 or evaluator.get("output_len") != 0:
+            raise GateError(f"{label} empty residual evaluator is malformed")
+        return []
     if kind == "symjit-application-evaluator":
         return [evaluator]
     if kind != "chunked-symbolica-evaluator":
@@ -775,7 +784,7 @@ def _source_evaluator_leaves(
 
 def _assert_model_parameter_not_direct(value: object, *, label: str) -> None:
     if isinstance(value, Mapping):
-        if value.get("kind") == "compiled-plane-arena-stage":
+        if value.get("kind") == COMPILED_STAGE_PLAN_KIND:
             raise GateError(
                 f"{label} illegally uses a compiled plane DirectApplication"
             )
@@ -793,6 +802,12 @@ def _assert_model_parameter_not_direct(value: object, *, label: str) -> None:
             _assert_model_parameter_not_direct(child, label=f"{label}[{index}]")
 
 
+def _nonnegative_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise GateError(f"{label} must be a nonnegative integer")
+    return value
+
+
 def _audit_direct_descriptor(
     descriptor: Mapping[str, Any],
     *,
@@ -800,18 +815,17 @@ def _audit_direct_descriptor(
     optimization_level: int,
     label: str,
 ) -> dict[str, int]:
-    if descriptor.get("kind") != "compiled-plane-arena-stage":
+    if descriptor.get("kind") != COMPILED_STAGE_PLAN_KIND:
         raise GateError(f"{label}.compiled_plane_arena has the wrong kind")
-    if descriptor.get("schema_version") != 1:
+    if descriptor.get("schema_version") != COMPILED_STAGE_PLAN_SCHEMA_VERSION:
         raise GateError(f"{label}.compiled_plane_arena has the wrong schema")
     expected_scalars = {
-        "application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-        "source_application_abi": SYMJIT_APPLICATION_ABI,
+        "plan_abi": COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+        "table_source_application_abi": SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": COMPILED_DIRECT_TABLE_BINDING_ABI,
         "element_layout": "split-complex-component-major",
-        "input_output_aliasing": "forbidden",
-        "output_output_aliasing": "forbidden",
-        "output_operation": "overwrite",
-        "output_factor": "identity",
     }
     for name, expected in expected_scalars.items():
         if descriptor.get(name) != expected:
@@ -825,7 +839,9 @@ def _audit_direct_descriptor(
         _mapping(item, label=f"{label}.input_bindings[{index}]").get("parameter_index")
         for index, item in enumerate(inputs)
     ] != list(range(len(inputs))):
-        raise GateError(f"{label} Direct-Arena input bindings are not contiguous")
+        raise GateError(f"{label} stage-plan input bindings are not contiguous")
+    if stage.get("parameter_count") != len(inputs):
+        raise GateError(f"{label} stage-plan input binding count changed")
 
     outputs = _sequence(
         descriptor.get("output_bindings"),
@@ -835,62 +851,88 @@ def _audit_direct_descriptor(
         _mapping(item, label=f"{label}.output_bindings[{index}]").get("output_index")
         for index, item in enumerate(outputs)
     ] != list(range(len(outputs))):
-        raise GateError(f"{label} Direct-Arena output bindings are not contiguous")
-
-    evaluator = _mapping(stage.get("evaluator"), label=f"{label}.evaluator")
-    source_leaves = _source_evaluator_leaves(evaluator, label=f"{label}.evaluator")
-    direct_leaves = _sequence(
-        descriptor.get("leaves"),
-        label=f"{label}.compiled_plane_arena.leaves",
+        raise GateError(f"{label} residual output bindings are not contiguous")
+    original_outputs = [
+        _nonnegative_int(
+            _mapping(item, label=f"{label}.output_bindings[{index}]").get(
+                "original_output_index"
+            ),
+            label=f"{label}.output_bindings[{index}].original_output_index",
+        )
+        for index, item in enumerate(outputs)
+    ]
+    output_length = _nonnegative_int(
+        stage.get("output_length"),
+        label=f"{label}.output_length",
     )
-    if len(direct_leaves) != len(source_leaves) or not direct_leaves:
-        raise GateError(f"{label} Direct-Arena/source leaf counts disagree")
+    if len(original_outputs) != len(set(original_outputs)) or any(
+        index >= output_length for index in original_outputs
+    ):
+        raise GateError(f"{label} residual output ownership is invalid")
+
+    residual_evaluator = _mapping(
+        descriptor.get("residual_evaluator"),
+        label=f"{label}.compiled_plane_arena.residual_evaluator",
+    )
+    source_leaves = _source_evaluator_leaves(
+        residual_evaluator,
+        label=f"{label}.compiled_plane_arena.residual_evaluator",
+    )
+    residual_leaves = _sequence(
+        descriptor.get("residual_leaves"),
+        label=f"{label}.compiled_plane_arena.residual_leaves",
+    )
+    if len(residual_leaves) != len(source_leaves):
+        raise GateError(f"{label} residual/source leaf counts disagree")
 
     output_cursor = 0
-    for index, (direct_raw, source) in enumerate(
-        zip(direct_leaves, source_leaves, strict=True)
+    for index, (residual_raw, source) in enumerate(
+        zip(residual_leaves, source_leaves, strict=True)
     ):
-        direct = _mapping(direct_raw, label=f"{label}.leaves[{index}]")
+        residual = _mapping(
+            residual_raw,
+            label=f"{label}.residual_leaves[{index}]",
+        )
         source_path = _safe_relative_path(
             source.get("application_path"),
             label=f"{label}.source_leaves[{index}].application_path",
         )
         if (
-            direct.get("application_path") != source_path
-            or direct.get("source_application_abi") != SYMJIT_APPLICATION_ABI
+            residual.get("residual_leaf_index") != index
+            or residual.get("application_path") != source_path
+            or residual.get("source_application_abi") != SYMJIT_APPLICATION_ABI
             or source.get("application_abi") != SYMJIT_APPLICATION_ABI
             or source.get("runtime_capability") != SYMJIT_RUNTIME_CAPABILITY
         ):
-            raise GateError(f"{label} Direct-Arena leaf identity is inconsistent")
+            raise GateError(f"{label} residual leaf identity is inconsistent")
         if (
-            direct.get("optimization_level") != optimization_level
+            residual.get("optimization_level") != optimization_level
             or source.get("optimization_level") != optimization_level
         ):
             raise GateError(
-                f"{label} Direct-Arena/source leaf does not retain JIT "
+                f"{label} residual/source leaf does not retain JIT "
                 f"O{optimization_level}"
             )
-        if direct.get("direct_codegen_optimization_level") != 3:
+        if residual.get("direct_codegen_optimization_level") != 3:
             raise GateError(
-                f"{label} Direct-Arena leaf does not authenticate fixed O3 "
-                "direct code generation"
+                f"{label} residual leaf does not retain fixed O3 direct code generation"
             )
         indices = _sequence(
-            direct.get("input_indices"),
-            label=f"{label}.leaves[{index}].input_indices",
+            residual.get("input_indices"),
+            label=f"{label}.residual_leaves[{index}].input_indices",
         )
         if (
             any(
                 isinstance(value, bool) or not isinstance(value, int) or value < 0
                 for value in indices
             )
-            or len(indices) != direct.get("input_len")
+            or len(indices) != residual.get("input_len")
             or len(indices) != source.get("input_len")
         ):
-            raise GateError(f"{label} Direct-Arena leaf inputs are invalid")
-        output_start = direct.get("output_start")
-        output_stop = direct.get("output_stop")
-        output_len = direct.get("output_len")
+            raise GateError(f"{label} residual leaf inputs are invalid")
+        output_start = residual.get("output_start")
+        output_stop = residual.get("output_stop")
+        output_len = residual.get("output_len")
         if (
             output_start != output_cursor
             or isinstance(output_stop, bool)
@@ -900,12 +942,96 @@ def _audit_direct_descriptor(
             or output_stop - output_start != output_len
             or output_len != source.get("output_len")
         ):
-            raise GateError(f"{label} Direct-Arena leaf outputs are invalid")
+            raise GateError(f"{label} residual leaf outputs are invalid")
+        _nonnegative_int(
+            residual.get("original_chunk_index"),
+            label=f"{label}.residual_leaves[{index}].original_chunk_index",
+        )
         output_cursor = output_stop
-    if output_cursor != len(outputs) or output_cursor != stage.get("output_length"):
-        raise GateError(f"{label} Direct-Arena leaves do not cover stage outputs")
+    if output_cursor != len(outputs):
+        raise GateError(f"{label} residual leaves do not cover residual outputs")
+
+    kernels = _sequence(
+        descriptor.get("table_kernels"),
+        label=f"{label}.compiled_plane_arena.table_kernels",
+    )
+    if len(kernels) > 8:
+        raise GateError(f"{label} exceeds eight DirectTable kernels")
+    kernel_roles: list[str] = []
+    for index, raw_kernel in enumerate(kernels):
+        kernel = _mapping(raw_kernel, label=f"{label}.table_kernels[{index}]")
+        role = kernel.get("role")
+        input_count = _nonnegative_int(
+            kernel.get("input_complex_count"),
+            label=f"{label}.table_kernels[{index}].input_complex_count",
+        )
+        output_count = _nonnegative_int(
+            kernel.get("output_complex_count"),
+            label=f"{label}.table_kernels[{index}].output_complex_count",
+        )
+        if (
+            kernel.get("table_kernel_id") != index
+            or role not in {"contribution", "finalizer"}
+            or kernel.get("source_application_abi") != SYMJIT_APPLICATION_ABI
+            or kernel.get("descriptor_abi") != COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI
+            or kernel.get("binding_abi") != COMPILED_DIRECT_TABLE_BINDING_ABI
+            or kernel.get("optimization_level") != 3
+            or kernel.get("scalar_input_count") != 0
+            or not 1 <= input_count <= 16
+            or output_count not in {2, 4}
+        ):
+            raise GateError(f"{label} DirectTable kernel contract is incompatible")
+        kernel_roles.append(str(role))
+
+    table_calls = _sequence(
+        descriptor.get("table_calls"),
+        label=f"{label}.compiled_plane_arena.table_calls",
+    )
+    finalizer_calls = _sequence(
+        descriptor.get("finalizer_calls"),
+        label=f"{label}.compiled_plane_arena.finalizer_calls",
+    )
+    for role, calls in (("contribution", table_calls), ("finalizer", finalizer_calls)):
+        for index, raw_call in enumerate(calls):
+            call = _mapping(raw_call, label=f"{label}.{role}_calls[{index}]")
+            kernel_id = _nonnegative_int(
+                call.get("table_kernel_id"),
+                label=f"{label}.{role}_calls[{index}].table_kernel_id",
+            )
+            owners = _sequence(
+                call.get("owned_current_ids"),
+                label=f"{label}.{role}_calls[{index}].owned_current_ids",
+            )
+            partitions = _sequence(
+                call.get("selector_partition_ids"),
+                label=f"{label}.{role}_calls[{index}].selector_partition_ids",
+            )
+            if (
+                kernel_id >= len(kernel_roles)
+                or kernel_roles[kernel_id] != role
+                or not owners
+                or len(partitions) != 1
+            ):
+                raise GateError(f"{label} DirectTable call contract is incompatible")
+
+    execution_order = _sequence(
+        descriptor.get("execution_order"),
+        label=f"{label}.compiled_plane_arena.execution_order",
+    )
+    executable_unit_count = (
+        len(residual_leaves) + len(table_calls) + len(finalizer_calls)
+    )
+    if len(execution_order) != executable_unit_count:
+        raise GateError(f"{label} execution order is incomplete")
+    if executable_unit_count and not _sequence(
+        descriptor.get("selector_partitions"),
+        label=f"{label}.compiled_plane_arena.selector_partitions",
+    ):
+        raise GateError(f"{label} execution order has no selector partitions")
     return {
-        "leaf_count": len(direct_leaves),
+        "leaf_count": len(residual_leaves),
+        "kernel_count": len(kernels),
+        "executable_unit_count": executable_unit_count,
         "input_binding_count": len(inputs),
         "output_binding_count": len(outputs),
     }
@@ -920,6 +1046,8 @@ def _audit_execution_payload(
     stage_count = 0
     descriptor_count = 0
     leaf_count = 0
+    kernel_count = 0
+    executable_unit_count = 0
     model_parameter_slot_count = 0
     model_parameter_evaluator_count = 0
     audited_stage_sets: list[dict[str, object]] = []
@@ -952,7 +1080,9 @@ def _audit_execution_payload(
             label=f"{label}.required_runtime_capabilities",
         )
         if COMPILED_PLANE_ARENA_CAPABILITY not in required:
-            raise GateError(f"{label} does not require compiled-plane-arena-v1")
+            raise GateError(
+                f"{label} does not require {COMPILED_PLANE_ARENA_CAPABILITY}"
+            )
         stages = list(_sequence(record.get("stages"), label=f"{label}.stages"))
         amplitude = _mapping(
             record.get("amplitude_stage"),
@@ -977,6 +1107,8 @@ def _audit_execution_payload(
             stage_count += 1
             descriptor_count += 1
             leaf_count += counts["leaf_count"]
+            kernel_count += counts["kernel_count"]
+            executable_unit_count += counts["executable_unit_count"]
             set_leaf_count += counts["leaf_count"]
         audited_stage_sets.append(
             {
@@ -987,9 +1119,11 @@ def _audit_execution_payload(
             }
         )
     if capability_declarations < 1:
-        raise GateError("execution payload does not declare compiled-plane-arena-v1")
-    if stage_set_count < 1 or descriptor_count < 1 or leaf_count < 1:
-        raise GateError("execution payload has no complete Direct-Arena stage set")
+        raise GateError(
+            f"execution payload does not declare {COMPILED_PLANE_ARENA_CAPABILITY}"
+        )
+    if stage_set_count < 1 or descriptor_count < 1 or executable_unit_count < 1:
+        raise GateError("execution payload has no complete v2 stage-plan set")
     if model_parameter_slot_count < 1:
         raise GateError("execution payload has no model-parameter evaluator slot")
     return {
@@ -1000,6 +1134,8 @@ def _audit_execution_payload(
         "stage_count": stage_count,
         "descriptor_count": descriptor_count,
         "leaf_count": leaf_count,
+        "kernel_count": kernel_count,
+        "executable_unit_count": executable_unit_count,
         "model_parameter_slot_count": model_parameter_slot_count,
         "model_parameter_evaluator_count": model_parameter_evaluator_count,
         "model_parameter_direct_application_count": 0,
@@ -1038,7 +1174,8 @@ def _artifact_identity_and_audit(
     )
     if COMPILED_PLANE_ARENA_CAPABILITY not in capabilities:
         raise GateError(
-            f"JIT O{optimization_level} artifact lacks compiled-plane-arena-v1"
+            f"JIT O{optimization_level} artifact lacks "
+            f"{COMPILED_PLANE_ARENA_CAPABILITY}"
         )
     process_id = process.get("id")
     if not isinstance(process_id, str) or not process_id:

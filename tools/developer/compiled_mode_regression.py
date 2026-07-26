@@ -102,7 +102,7 @@ DEPENDENCY_DISTRIBUTIONS = (
     ("ufo-model-loader", "ufo_model_loader"),
 )
 EAGER_DIRECT_ARENA_CAPABILITY = "eager-direct-arena-v1"
-COMPILED_DIRECT_ARENA_CAPABILITY = "compiled-plane-arena-v1"
+COMPILED_DIRECT_ARENA_CAPABILITY = "rusticol.compiled.plane-arena.v2"
 
 
 class RegressionError(RuntimeError):
@@ -624,7 +624,7 @@ def _artifact_execution_mode(record: Mapping[str, Any]) -> str | None:
     ):
         return "eager"
     if any(
-        capability == "compiled-plane-arena-v1"
+        capability == COMPILED_DIRECT_ARENA_CAPABILITY
         or capability == "symjit.application.complex-f64.v1"
         for capability in normalized
     ):

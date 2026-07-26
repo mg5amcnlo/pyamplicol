@@ -1304,7 +1304,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Vec<String>>(json).unwrap(),
             vec![
-                "compiled-plane-arena-v1".to_string(),
                 "eager-direct-arena-v1".to_string(),
                 "rusticol.compiled.color-contraction-walsh-c2k.v1".to_string(),
                 "rusticol.compiled.color-contraction-walsh.v1".to_string(),
@@ -1312,6 +1311,7 @@ mod tests {
                 "rusticol.compiled.helicity-dual-lane.v1".to_string(),
                 "rusticol.compiled.helicity-primary-recurrence.v1".to_string(),
                 "rusticol.compiled.helicity-selector-union.v1".to_string(),
+                "rusticol.compiled.plane-arena.v2".to_string(),
                 "rusticol.compiled.runtime-selectors.v1".to_string(),
                 "rusticol.eager-runtime-layout.complex-f64.v1".to_string(),
                 "rusticol.recurrence-color.contracted.v1".to_string(),
