@@ -167,7 +167,8 @@ POINT_SEEDS = (443_041, 443_099, 443_137)
 SQRT_S = 2_000.0
 RELATIVE_TOLERANCE = 1.0e-12
 ABSOLUTE_TOLERANCE = 1.0e-300
-COMPILED_PLANE_ARENA_CAPABILITY = "compiled-plane-arena-v2"
+COMPILED_PLANE_ARENA_CAPABILITY = "rusticol.compiled.plane-arena.v2"
+COMPILED_STAGE_PLAN_ABI = "pyamplicol-compiled-stage-plan-v2"
 COMPILED_PLANE_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
 COMPILED_DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
 COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
@@ -178,9 +179,8 @@ SYMJIT_APPLICATION_ABI = "symjit-application-storage-v3"
 SYMJIT_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
 RESULT_KIND = "pyamplicol-four-quark-compiled-direct-arena-gate"
 SCHEMA_VERSION = 1
-COMPILED_STAGE_PLAN_KIND = "compiled-plane-arena-stage-v2"
+COMPILED_STAGE_PLAN_KIND = "compiled-stage-plan"
 COMPILED_STAGE_PLAN_SCHEMA_VERSION = 2
-COMPILED_RESIDUAL_LEAF_KIND = "compiled-plane-arena-residual-direct-application-v2"
 HASH_CHUNK_BYTES = 1024 * 1024
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -811,6 +811,14 @@ def _source_evaluator_leaves(
     label: str,
 ) -> list[Mapping[str, Any]]:
     kind = evaluator.get("kind")
+    if kind == "compiled-stage-empty-residual":
+        if (
+            evaluator.get("input_len") != 0
+            or evaluator.get("output_len") != 0
+            or evaluator.get("required_runtime_capabilities") != []
+        ):
+            raise GateError(f"{label} empty residual evaluator is malformed")
+        return []
     if kind == "symjit-application-evaluator":
         return [evaluator]
     if kind != "chunked-symbolica-evaluator":
@@ -842,558 +850,356 @@ def _int_list(value: object, *, label: str) -> list[int]:
     ]
 
 
-def _authenticated_certificate(
-    value: object,
-    *,
-    label: str,
-) -> Mapping[str, Any]:
-    certificate = _mapping(value, label=label)
-    digest = certificate.get("digest")
-    if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
-        raise GateError(f"{label}.digest is not a SHA-256")
-    subject = {name: item for name, item in certificate.items() if name != "digest"}
-    if _canonical_sha256(subject) != digest:
-        raise GateError(f"{label}.digest does not authenticate the certificate")
-    return certificate
-
-
-def _audit_stage_order_certificate(
-    descriptor: Mapping[str, Any],
-    *,
-    stage: Mapping[str, Any],
-    label: str,
-) -> dict[str, object]:
-    certificate = _authenticated_certificate(
-        descriptor.get("order_certificate"),
-        label=f"{label}.compiled_plane_arena.order_certificate",
-    )
-    if certificate.get("kind") != "whole-current-canonical-order-v1":
-        raise GateError(f"{label} has an incompatible order certificate")
-    output_length = _nonnegative_int(
-        stage.get("output_length"),
-        label=f"{label}.output_length",
-    )
-    slots = [
-        _mapping(item, label=f"{label}.output_slots[{index}]")
-        for index, item in enumerate(
-            _sequence(stage.get("output_slots"), label=f"{label}.output_slots")
-        )
-    ]
-    destinations = [
-        _mapping(item, label=f"{label}.destinations[{index}]")
-        for index, item in enumerate(
-            _sequence(
-                certificate.get("destinations"),
-                label=f"{label}.order_certificate.destinations",
-            )
-        )
-    ]
-    if len(destinations) != len(slots):
-        raise GateError(f"{label} order certificate does not cover output slots")
-    is_amplitude = str(stage.get("stage_kind", "")).startswith("amplitude")
-    output_cursor = 0
-    current_ids: list[int] = []
-    residual_ranges: list[tuple[int, int]] = []
-    table_owners: dict[int, tuple[int, int]] = {}
-    ordered_interactions: list[int] = []
-    ordered_groups: list[int] = []
-    for index, (destination, slot) in enumerate(zip(destinations, slots, strict=True)):
-        destination_label = f"{label}.order_certificate.destinations[{index}]"
-        output_start = _nonnegative_int(
-            destination.get("output_start"),
-            label=f"{destination_label}.output_start",
-        )
-        output_stop = _nonnegative_int(
-            destination.get("output_stop"),
-            label=f"{destination_label}.output_stop",
-        )
-        slot_start = _nonnegative_int(
-            slot.get("output_start"),
-            label=f"{label}.output_slots[{index}].output_start",
-        )
-        slot_stop = _nonnegative_int(
-            slot.get("output_stop"),
-            label=f"{label}.output_slots[{index}].output_stop",
-        )
-        expected_owner_kind = "amplitude" if is_amplitude else "current"
-        owner_id = _nonnegative_int(
-            destination.get("owner_id"),
-            label=f"{destination_label}.owner_id",
-        )
-        if (
-            destination.get("destination_id") != index
-            or destination.get("owner_kind") != expected_owner_kind
-            or output_start != output_cursor
-            or output_start >= output_stop
-            or output_stop > output_length
-            or (output_start, output_stop) != (slot_start, slot_stop)
-        ):
-            raise GateError(f"{destination_label} is not canonical")
-        if is_amplitude:
-            if slot.get("current_id") != -1:
-                raise GateError(f"{destination_label} misidentifies an amplitude")
-        else:
-            current_id = _nonnegative_int(
-                slot.get("current_id"),
-                label=f"{label}.output_slots[{index}].current_id",
-            )
-            if owner_id != current_id or current_id in current_ids:
-                raise GateError(f"{destination_label} repeats a current")
-            current_ids.append(current_id)
-        interactions = _int_list(
-            destination.get("interaction_ids"),
-            label=f"{destination_label}.interaction_ids",
-        )
-        groups = _int_list(
-            destination.get("evaluation_group_ids"),
-            label=f"{destination_label}.evaluation_group_ids",
-        )
-        ordered_interactions.extend(interactions)
-        ordered_groups.extend(groups)
-        ownership = _mapping(
-            destination.get("ownership"),
-            label=f"{destination_label}.ownership",
-        )
-        ownership_kind = ownership.get("kind")
-        if ownership_kind == "residual":
-            if set(ownership) != {"kind"}:
-                raise GateError(f"{destination_label} residual ownership is malformed")
-            residual_ranges.append((output_start, output_stop))
-        elif ownership_kind == "table" and not is_amplitude:
-            if set(ownership) != {"kind", "island_id", "row_index"}:
-                raise GateError(f"{destination_label} table ownership is malformed")
-            island_id = _nonnegative_int(
-                ownership.get("island_id"),
-                label=f"{destination_label}.ownership.island_id",
-            )
-            row_index = _nonnegative_int(
-                ownership.get("row_index"),
-                label=f"{destination_label}.ownership.row_index",
-            )
-            table_owners[owner_id] = (island_id, row_index)
-        else:
-            raise GateError(f"{destination_label} has invalid ownership")
-        output_cursor = output_stop
-    if output_cursor != output_length:
-        raise GateError(f"{label} order certificate does not cover stage outputs")
-    if (
-        _int_list(
-            certificate.get("current_ids"),
-            label=f"{label}.order_certificate.current_ids",
-        )
-        != current_ids
-    ):
-        raise GateError(f"{label} order certificate current order is inconsistent")
-    source_interactions = _int_list(
-        certificate.get("source_stage_interaction_ids"),
-        label=f"{label}.order_certificate.source_stage_interaction_ids",
-    )
-    stage_interactions = _int_list(
-        stage.get("interaction_ids"),
-        label=f"{label}.interaction_ids",
-    )
-    execution_interactions = _int_list(
-        certificate.get("interaction_ids"),
-        label=f"{label}.order_certificate.interaction_ids",
-    )
-    execution_groups = _int_list(
-        certificate.get("evaluation_group_ids"),
-        label=f"{label}.order_certificate.evaluation_group_ids",
-    )
-    if (
-        source_interactions != stage_interactions
-        or execution_interactions != ordered_interactions
-        or execution_groups != ordered_groups
-        or len(execution_interactions) != len(set(execution_interactions))
-        or set(execution_interactions) != set(source_interactions)
-    ):
-        raise GateError(f"{label} order certificate changes contribution order")
-    return {
-        "destinations": destinations,
-        "residual_ranges": residual_ranges,
-        "table_owners": table_owners,
-    }
-
-
 def _audit_direct_descriptor(
     descriptor: Mapping[str, Any],
     *,
     stage: Mapping[str, Any],
     label: str,
 ) -> dict[str, int]:
+    """Verify the production v2 identity before the numerical four-line gate."""
+
     if descriptor.get("kind") != COMPILED_STAGE_PLAN_KIND:
         raise GateError(f"{label}.compiled_plane_arena has the wrong kind")
     if descriptor.get("schema_version") != COMPILED_STAGE_PLAN_SCHEMA_VERSION:
         raise GateError(f"{label}.compiled_plane_arena has the wrong schema")
-    expected_scalars = {
-        "application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-        "source_application_abi": SYMJIT_APPLICATION_ABI,
+    expected = {
+        "plan_abi": COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+        "table_source_application_abi": SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": COMPILED_DIRECT_TABLE_BINDING_ABI,
         "element_layout": "split-complex-component-major",
-        "input_output_aliasing": "forbidden",
-        "output_output_aliasing": "forbidden",
-        "output_operation": "overwrite",
-        "output_factor": "identity",
     }
-    for name, expected in expected_scalars.items():
-        if descriptor.get(name) != expected:
-            raise GateError(f"{label}.compiled_plane_arena.{name} is not {expected!r}")
-    inputs = _sequence(
-        descriptor.get("input_bindings"),
-        label=f"{label}.compiled_plane_arena.input_bindings",
-    )
-    input_indices = [
-        _mapping(item, label=f"{label}.input_bindings[{index}]").get("parameter_index")
-        for index, item in enumerate(inputs)
-    ]
-    if input_indices != list(range(len(inputs))):
-        raise GateError(f"{label} Direct-Arena input bindings are not contiguous")
-    outputs = _sequence(
-        descriptor.get("output_bindings"),
-        label=f"{label}.compiled_plane_arena.output_bindings",
-    )
-    output_indices = [
-        _mapping(item, label=f"{label}.output_bindings[{index}]").get("output_index")
-        for index, item in enumerate(outputs)
-    ]
-    if output_indices != list(range(len(outputs))):
-        raise GateError(f"{label} Direct-Arena output bindings are not contiguous")
-    if len(outputs) != stage.get("output_length"):
-        raise GateError(f"{label} Direct-Arena outputs do not cover the stage")
-    order = _audit_stage_order_certificate(
-        descriptor,
-        stage=stage,
-        label=label,
-    )
-    residual_ranges = list(order["residual_ranges"])
-    table_owners = dict(order["table_owners"])
+    for name, value in expected.items():
+        if descriptor.get(name) != value:
+            raise GateError(f"{label}.compiled_plane_arena.{name} is incompatible")
 
-    evaluator_raw = stage.get("evaluator")
-    source_leaves = (
-        []
-        if evaluator_raw is None
-        else _source_evaluator_leaves(
-            _mapping(evaluator_raw, label=f"{label}.evaluator"),
-            label=f"{label}.evaluator",
+    inputs = list(
+        _sequence(
+            descriptor.get("input_bindings"),
+            label=f"{label}.compiled_plane_arena.input_bindings",
         )
     )
-    direct_leaves = list(
+    if [
+        _mapping(item, label=f"{label}.input_bindings[{index}]").get("parameter_index")
+        for index, item in enumerate(inputs)
+    ] != list(range(len(inputs))):
+        raise GateError(f"{label} stage-plan input bindings are not contiguous")
+    parameter_count = stage.get("parameter_count")
+    if parameter_count is not None and parameter_count != len(inputs):
+        raise GateError(f"{label} stage-plan input binding count changed")
+
+    residual_evaluator = _mapping(
+        descriptor.get("residual_evaluator"),
+        label=f"{label}.compiled_plane_arena.residual_evaluator",
+    )
+    source_leaves = _source_evaluator_leaves(
+        residual_evaluator,
+        label=f"{label}.compiled_plane_arena.residual_evaluator",
+    )
+    residual_leaves = list(
         _sequence(
             descriptor.get("residual_leaves"),
             label=f"{label}.compiled_plane_arena.residual_leaves",
         )
     )
-    if len(direct_leaves) != len(source_leaves):
+    if len(source_leaves) != len(residual_leaves):
         raise GateError(f"{label} residual/source leaf counts disagree")
-    residual_outputs: list[int] = []
-    owned_residual_ranges: list[tuple[int, int]] = []
-    for index, (direct_raw, source) in enumerate(
-        zip(direct_leaves, source_leaves, strict=True)
+    for index, (source, raw_leaf) in enumerate(
+        zip(source_leaves, residual_leaves, strict=True)
     ):
-        direct = _mapping(direct_raw, label=f"{label}.residual_leaves[{index}]")
-        if (
-            direct.get("kind") != COMPILED_RESIDUAL_LEAF_KIND
-            or direct.get("leaf_id") != index
-        ):
-            raise GateError(f"{label} residual leaf identity is incompatible")
+        leaf = _mapping(raw_leaf, label=f"{label}.residual_leaves[{index}]")
         source_path = _safe_relative_path(
             source.get("application_path"),
             label=f"{label}.source_leaves[{index}].application_path",
         )
         if (
-            direct.get("application_path") != source_path
-            or direct.get("source_application_abi") != SYMJIT_APPLICATION_ABI
+            leaf.get("residual_leaf_index") != index
+            or leaf.get("application_path") != source_path
+            or leaf.get("source_application_abi") != SYMJIT_APPLICATION_ABI
             or source.get("application_abi") != SYMJIT_APPLICATION_ABI
             or source.get("runtime_capability") != SYMJIT_RUNTIME_CAPABILITY
-        ):
-            raise GateError(f"{label} Direct-Arena leaf identity is inconsistent")
-        if (
-            direct.get("optimization_level") != 3
+            or leaf.get("optimization_level") != 3
             or source.get("optimization_level") != 3
+            or leaf.get("direct_codegen_optimization_level") != 3
+            or leaf.get("input_len") != source.get("input_len")
+            or leaf.get("output_len") != source.get("output_len")
         ):
-            raise GateError(f"{label} Direct-Arena leaf is not JIT O3")
-        if direct.get("direct_codegen_optimization_level") != 3:
-            raise GateError(
-                f"{label} Direct-Arena leaf does not authenticate fixed O3 "
-                "direct code generation"
-            )
-        indices = _sequence(
-            direct.get("input_indices"),
-            label=f"{label}.leaves[{index}].input_indices",
+            raise GateError(f"{label} residual leaf identity is inconsistent or not O3")
+        _nonnegative_int(
+            leaf.get("original_chunk_index"),
+            label=f"{label}.residual_leaves[{index}].original_chunk_index",
         )
-        if (
-            any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in indices
-            )
-            or len(indices) != direct.get("input_len")
-            or len(indices) != source.get("input_len")
-        ):
-            raise GateError(f"{label} Direct-Arena leaf inputs are invalid")
-        output_len = _nonnegative_int(
-            direct.get("output_len"),
-            label=f"{label}.residual_leaves[{index}].output_len",
-        )
-        direct_output_indices = _int_list(
-            direct.get("output_indices"),
-            label=f"{label}.residual_leaves[{index}].output_indices",
-        )
-        if (
-            output_len != source.get("output_len")
-            or len(direct_output_indices) != output_len
-            or len(direct_output_indices) != len(set(direct_output_indices))
-        ):
-            raise GateError(f"{label} Direct-Arena leaf outputs are invalid")
-        leaf_ranges = []
-        for range_index, raw_range in enumerate(
-            _sequence(
-                direct.get("output_ranges"),
-                label=f"{label}.residual_leaves[{index}].output_ranges",
-            )
-        ):
-            output_range = _mapping(
-                raw_range,
-                label=(
-                    f"{label}.residual_leaves[{index}].output_ranges[{range_index}]"
-                ),
-            )
-            start = _nonnegative_int(
-                output_range.get("output_start"),
-                label=f"{label}.residual_range.output_start",
-            )
-            stop = _nonnegative_int(
-                output_range.get("output_stop"),
-                label=f"{label}.residual_range.output_stop",
-            )
-            if start >= stop:
-                raise GateError(f"{label} residual range is empty")
-            leaf_ranges.append((start, stop))
-        expanded = [
-            output for start, stop in leaf_ranges for output in range(start, stop)
-        ]
-        if expanded != direct_output_indices:
-            raise GateError(f"{label} residual leaf splits or reorders destinations")
-        residual_outputs.extend(direct_output_indices)
-        owned_residual_ranges.extend(leaf_ranges)
 
-    declared_residual_ranges = [
-        (
-            _nonnegative_int(
-                _mapping(item, label=f"{label}.residual_output_ranges[{index}]").get(
-                    "output_start"
-                ),
-                label=f"{label}.residual_output_ranges[{index}].output_start",
-            ),
-            _nonnegative_int(
-                _mapping(item, label=f"{label}.residual_output_ranges[{index}]").get(
-                    "output_stop"
-                ),
-                label=f"{label}.residual_output_ranges[{index}].output_stop",
-            ),
-        )
+    outputs = [
+        _mapping(item, label=f"{label}.output_bindings[{index}]")
         for index, item in enumerate(
             _sequence(
-                descriptor.get("residual_output_ranges"),
-                label=f"{label}.compiled_plane_arena.residual_output_ranges",
+                descriptor.get("output_bindings"),
+                label=f"{label}.compiled_plane_arena.output_bindings",
             )
         )
     ]
+    expected_residual_outputs = sum(
+        _nonnegative_int(
+            leaf.get("output_len"),
+            label=f"{label}.residual_leaves.output_len",
+        )
+        for leaf in residual_leaves
+    )
+    original_outputs = [
+        _nonnegative_int(
+            output.get("original_output_index"),
+            label=f"{label}.output_bindings[{index}].original_output_index",
+        )
+        for index, output in enumerate(outputs)
+    ]
+    output_length = _nonnegative_int(
+        stage.get("output_length"),
+        label=f"{label}.output_length",
+    )
     if (
-        declared_residual_ranges != residual_ranges
-        or owned_residual_ranges != residual_ranges
-        or residual_outputs
-        != [output for start, stop in residual_ranges for output in range(start, stop)]
+        len(outputs) != expected_residual_outputs
+        or [output.get("output_index") for output in outputs]
+        != list(range(len(outputs)))
+        or len(original_outputs) != len(set(original_outputs))
+        or any(index >= output_length for index in original_outputs)
     ):
-        raise GateError(f"{label} residual ownership is not exact")
+        raise GateError(f"{label} residual output ownership is invalid")
 
     kernels = [
-        _mapping(item, label=f"{label}.kernels[{index}]")
+        _mapping(item, label=f"{label}.table_kernels[{index}]")
         for index, item in enumerate(
             _sequence(
-                descriptor.get("kernels"),
-                label=f"{label}.compiled_plane_arena.kernels",
+                descriptor.get("table_kernels"),
+                label=f"{label}.compiled_plane_arena.table_kernels",
             )
         )
     ]
     if len(kernels) > 8:
         raise GateError(f"{label} exceeds eight DirectTable kernels")
+    kernel_shapes: list[tuple[str, int, int]] = []
     for index, kernel in enumerate(kernels):
-        if (
-            kernel.get("kernel_id") != index
-            or kernel.get("source_application_abi") != SYMJIT_APPLICATION_ABI
-            or kernel.get("application_abi") != COMPILED_PLANE_DIRECT_APPLICATION_ABI
-            or kernel.get("binding_abi") != COMPILED_DIRECT_TABLE_BINDING_ABI
-            or kernel.get("descriptor_abi") != COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI
-            or kernel.get("optimization_level") != 3
-        ):
-            raise GateError(f"{label} DirectTable kernel contract is incompatible")
-        for field in (
-            "motif_digest",
-            "exact_source_digest",
-            "application_sha256",
-            "descriptor_sha256",
-        ):
-            value = kernel.get(field)
-            if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
-                raise GateError(f"{label}.kernels[{index}].{field} is invalid")
-        _safe_relative_path(
-            kernel.get("application_path"),
-            label=f"{label}.kernels[{index}].application_path",
-        )
-        _safe_relative_path(
-            kernel.get("descriptor_path"),
-            label=f"{label}.kernels[{index}].descriptor_path",
-        )
-        source_size = _nonnegative_int(
-            kernel.get("application_size_bytes"),
-            label=f"{label}.kernels[{index}].application_size_bytes",
-        )
         input_count = _nonnegative_int(
             kernel.get("input_complex_count"),
-            label=f"{label}.kernels[{index}].input_complex_count",
+            label=f"{label}.table_kernels[{index}].input_complex_count",
         )
         output_count = _nonnegative_int(
             kernel.get("output_complex_count"),
-            label=f"{label}.kernels[{index}].output_complex_count",
+            label=f"{label}.table_kernels[{index}].output_complex_count",
         )
+        role = kernel.get("role")
         if (
-            source_size == 0
-            or source_size > 64 * 1024
+            kernel.get("table_kernel_id") != index
+            or role not in {"contribution", "finalizer"}
+            or kernel.get("source_application_abi") != SYMJIT_APPLICATION_ABI
+            or kernel.get("descriptor_abi") != COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI
+            or kernel.get("binding_abi") != COMPILED_DIRECT_TABLE_BINDING_ABI
+            or kernel.get("optimization_level") != 3
+            or kernel.get("scalar_input_count") != 0
             or not 1 <= input_count <= 16
-            or not 1 <= output_count <= 2
-        ):
-            raise GateError(f"{label} DirectTable kernel exceeds slice bounds")
-
-    islands = [
-        _mapping(item, label=f"{label}.islands[{index}]")
-        for index, item in enumerate(
-            _sequence(
-                descriptor.get("islands"),
-                label=f"{label}.compiled_plane_arena.islands",
+            or output_count not in {2, 4}
+            or len(
+                _sequence(
+                    kernel.get("input_contracts"),
+                    label=f"{label}.table_kernels[{index}].input_contracts",
+                )
             )
+            != input_count
+            or len(
+                _sequence(
+                    kernel.get("output_layout"),
+                    label=f"{label}.table_kernels[{index}].output_layout",
+                )
+            )
+            != output_count
+        ):
+            raise GateError(f"{label} DirectTable kernel contract is incompatible")
+        for payload_name in ("source_application", "descriptor"):
+            payload = _mapping(
+                kernel.get(payload_name),
+                label=f"{label}.table_kernels[{index}].{payload_name}",
+            )
+            _safe_relative_path(
+                payload.get("path"),
+                label=f"{label}.table_kernels[{index}].{payload_name}.path",
+            )
+            if (
+                _nonnegative_int(
+                    payload.get("size_bytes"),
+                    label=f"{label}.table_kernels[{index}].{payload_name}.size_bytes",
+                )
+                < 1
+            ):
+                raise GateError(f"{label} DirectTable payload is empty")
+        kernel_shapes.append((str(role), input_count, output_count))
+
+    table_calls = list(
+        _sequence(
+            descriptor.get("table_calls"),
+            label=f"{label}.compiled_plane_arena.table_calls",
         )
-    ]
-    island_currents: dict[int, tuple[int, int]] = {}
+    )
+    finalizer_calls = list(
+        _sequence(
+            descriptor.get("finalizer_calls"),
+            label=f"{label}.compiled_plane_arena.finalizer_calls",
+        )
+    )
     invocation_count = 0
     attachment_count = 0
-    for index, island in enumerate(islands):
-        kernel_id = _nonnegative_int(
-            island.get("kernel_id"),
-            label=f"{label}.islands[{index}].kernel_id",
-        )
-        if island.get("island_id") != index or kernel_id >= len(kernels):
-            raise GateError(f"{label} DirectTable island identity is invalid")
-        current_ids = _int_list(
-            island.get("current_ids"),
-            label=f"{label}.islands[{index}].current_ids",
-        )
-        if not current_ids or len(current_ids) != len(set(current_ids)):
-            raise GateError(f"{label} DirectTable island destinations are invalid")
-        invocations = [
-            _mapping(item, label=f"{label}.islands[{index}].invocations[{row}]")
-            for row, item in enumerate(
-                _sequence(
-                    island.get("invocation_rows"),
-                    label=f"{label}.islands[{index}].invocation_rows",
-                )
-            )
-        ]
-        attachments = [
-            _mapping(item, label=f"{label}.islands[{index}].attachments[{row}]")
-            for row, item in enumerate(
-                _sequence(
-                    island.get("attachment_rows"),
-                    label=f"{label}.islands[{index}].attachment_rows",
-                )
-            )
-        ]
-        if len(invocations) != len(current_ids) or len(attachments) != len(current_ids):
-            raise GateError(f"{label} DirectTable rows do not match destinations")
-        for row_index, invocation in enumerate(invocations):
-            if (
-                invocation.get("attachment_start") != row_index
-                or invocation.get("attachment_count") != 1
-            ):
-                raise GateError(f"{label} DirectTable attachment ranges are invalid")
-            owner = table_owners.get(current_ids[row_index])
-            if owner != (index, row_index):
-                raise GateError(f"{label} table ownership certificate is inconsistent")
-            island_currents[current_ids[row_index]] = (index, row_index)
-        for attachment in attachments:
-            if attachment.get("operation") not in {"overwrite", "accumulate"}:
-                raise GateError(f"{label} DirectTable write operation is invalid")
-        dependency = _authenticated_certificate(
-            island.get("dependency_certificate"),
-            label=f"{label}.islands[{index}].dependency_certificate",
-        )
-        if (
-            dependency.get("kind") != "independent-whole-current-group-v1"
-            or _int_list(
-                dependency.get("current_ids"),
-                label=f"{label}.islands[{index}].dependency.current_ids",
-            )
-            != current_ids
-        ):
-            raise GateError(f"{label} dependency certificate is incompatible")
-        rows = [
-            _mapping(item, label=f"{label}.islands[{index}].dependency.rows[{row}]")
-            for row, item in enumerate(
-                _sequence(
-                    dependency.get("rows"),
-                    label=f"{label}.islands[{index}].dependency.rows",
-                )
-            )
-        ]
-        if len(rows) != len(current_ids):
-            raise GateError(f"{label} dependency certificate is incomplete")
-        grouped = set(current_ids)
-        for row_index, row in enumerate(rows):
-            predecessors = set(
-                _int_list(
-                    row.get("predecessor_current_ids"),
-                    label=f"{label}.islands[{index}].predecessors[{row_index}]",
-                )
-            )
-            if row.get("current_id") != current_ids[row_index] or (
-                predecessors & grouped
-            ) - {current_ids[row_index]}:
-                raise GateError(f"{label} groups dependent current destinations")
-        invocation_count += len(invocations)
-        attachment_count += len(attachments)
-    if island_currents != table_owners:
-        raise GateError(f"{label} table ownership is not exhaustive")
-    if stage.get("stage_kind", "").startswith("amplitude") and islands:
-        raise GateError(f"{label} amplitude stage illegally contains table islands")
-    if evaluator_raw is None and (direct_leaves or not islands):
-        raise GateError(f"{label} evaluator omission is not a table-only stage")
-
-    census = _mapping(
-        descriptor.get("census"),
-        label=f"{label}.compiled_plane_arena.census",
-    )
-    expected_census = {
-        "stage_kernel_count": len(kernels),
-        "stage_island_count": len(islands),
-        "stage_invocation_count": invocation_count,
-        "stage_attachment_count": attachment_count,
-        "stage_residual_leaf_count": len(direct_leaves),
-        "stage_table_destination_count": len(table_owners),
-        "stage_residual_destination_count": len(residual_ranges),
+    semantic_row_bytes = 0
+    call_owners: dict[str, set[int]] = {
+        "contribution": set(),
+        "finalizer": set(),
     }
-    if census.get("schema_version") != 1:
-        raise GateError(f"{label} compiled-stage census has the wrong schema")
-    for field, expected in expected_census.items():
-        if census.get(field) != expected:
-            raise GateError(f"{label} compiled-stage census {field} is inconsistent")
+    for role, calls in (
+        ("contribution", table_calls),
+        ("finalizer", finalizer_calls),
+    ):
+        for call_index, raw_call in enumerate(calls):
+            call = _mapping(raw_call, label=f"{label}.{role}_calls[{call_index}]")
+            kernel_id = _nonnegative_int(
+                call.get("table_kernel_id"),
+                label=f"{label}.{role}_calls[{call_index}].table_kernel_id",
+            )
+            if kernel_id >= len(kernel_shapes) or kernel_shapes[kernel_id][0] != role:
+                raise GateError(f"{label} table call references the wrong kernel role")
+            owners = _int_list(
+                call.get("owned_current_ids"),
+                label=f"{label}.{role}_calls[{call_index}].owned_current_ids",
+            )
+            partitions = _int_list(
+                call.get("selector_partition_ids"),
+                label=f"{label}.{role}_calls[{call_index}].selector_partition_ids",
+            )
+            if not owners or owners != sorted(set(owners)) or len(partitions) != 1:
+                raise GateError(f"{label} table call ownership or selector is invalid")
+            call_owners[role].update(owners)
+            input_count, output_count = kernel_shapes[kernel_id][1:]
+            for row_name, expected_width in (
+                ("invocation_rows", (2 * input_count + 2) * 4),
+                ("attachment_rows", (2 * output_count + 2) * 4),
+            ):
+                rows = _mapping(
+                    call.get(row_name),
+                    label=f"{label}.{role}_calls[{call_index}].{row_name}",
+                )
+                _safe_relative_path(
+                    rows.get("path"),
+                    label=f"{label}.{role}_calls[{call_index}].{row_name}.path",
+                )
+                count = _nonnegative_int(
+                    rows.get("count"),
+                    label=f"{label}.{role}_calls[{call_index}].{row_name}.count",
+                )
+                row_size = _nonnegative_int(
+                    rows.get("row_size"),
+                    label=f"{label}.{role}_calls[{call_index}].{row_name}.row_size",
+                )
+                size = _nonnegative_int(
+                    rows.get("size_bytes"),
+                    label=f"{label}.{role}_calls[{call_index}].{row_name}.size_bytes",
+                )
+                if count < 1 or row_size != expected_width or size != count * row_size:
+                    raise GateError(f"{label} DirectTable row shape is invalid")
+                if row_name == "invocation_rows":
+                    invocation_count += count
+                else:
+                    attachment_count += count
+                semantic_row_bytes += size
+    if call_owners["contribution"] != call_owners["finalizer"]:
+        raise GateError(f"{label} contribution/finalizer ownership differs")
+    if (
+        str(stage.get("stage_kind", "")).startswith("amplitude")
+        and call_owners["contribution"]
+    ):
+        raise GateError(f"{label} amplitude stage illegally contains table calls")
+
+    execution_order = list(
+        _sequence(
+            descriptor.get("execution_order"),
+            label=f"{label}.compiled_plane_arena.execution_order",
+        )
+    )
+    expected_units = len(residual_leaves) + len(table_calls) + len(finalizer_calls)
+    if len(execution_order) != expected_units:
+        raise GateError(f"{label} execution order is incomplete")
+    units: set[tuple[str, int]] = set()
+    previous_chunk = -1
+    limits = {
+        "residual-leaf": len(residual_leaves),
+        "table-call": len(table_calls),
+        "finalizer-call": len(finalizer_calls),
+    }
+    for index, raw_unit in enumerate(execution_order):
+        unit = _mapping(raw_unit, label=f"{label}.execution_order[{index}]")
+        kind = unit.get("kind")
+        unit_index = _nonnegative_int(
+            unit.get("index"),
+            label=f"{label}.execution_order[{index}].index",
+        )
+        chunk = _nonnegative_int(
+            unit.get("original_chunk_index"),
+            label=f"{label}.execution_order[{index}].original_chunk_index",
+        )
+        identity = (str(kind), unit_index)
+        if (
+            kind not in limits
+            or unit_index >= limits[str(kind)]
+            or identity in units
+            or chunk < previous_chunk
+        ):
+            raise GateError(f"{label} execution order is invalid")
+        units.add(identity)
+        previous_chunk = chunk
+
+    partitions = list(
+        _sequence(
+            descriptor.get("selector_partitions"),
+            label=f"{label}.compiled_plane_arena.selector_partitions",
+        )
+    )
+    if execution_order and not partitions:
+        raise GateError(f"{label} execution order has no selector partitions")
+    for index, raw_partition in enumerate(partitions):
+        partition = _mapping(
+            raw_partition,
+            label=f"{label}.selector_partitions[{index}]",
+        )
+        if partition.get("partition_id") != index or not _int_list(
+            partition.get("original_chunk_indices"),
+            label=f"{label}.selector_partitions[{index}].original_chunk_indices",
+        ):
+            raise GateError(f"{label} selector partition is invalid")
+
+    diagnostics = _mapping(
+        descriptor.get("diagnostics"),
+        label=f"{label}.compiled_plane_arena.diagnostics",
+    )
+    expected_diagnostics = {
+        "island_count": len(call_owners["contribution"]),
+        "kernel_count": len(kernels),
+        "invocation_count": invocation_count,
+        "attachment_count": attachment_count,
+        "semantic_row_bytes": semantic_row_bytes,
+        "scratch_current_component_count": descriptor.get(
+            "scratch_current_component_count"
+        ),
+    }
+    for name, value in expected_diagnostics.items():
+        if diagnostics.get(name) != value:
+            raise GateError(f"{label} stage-plan diagnostic {name} is inconsistent")
     return {
-        "leaf_count": len(direct_leaves),
+        "leaf_count": len(residual_leaves),
         "input_binding_count": len(inputs),
         "output_binding_count": len(outputs),
         "kernel_count": len(kernels),
-        "island_count": len(islands),
+        "island_count": len(call_owners["contribution"]),
         "invocation_count": invocation_count,
         "attachment_count": attachment_count,
-        "residual_destination_count": len(residual_ranges),
-        "table_destination_count": len(table_owners),
+        "residual_destination_count": len(outputs),
+        "table_destination_count": len(call_owners["contribution"]),
     }
 
 
@@ -1401,6 +1207,7 @@ def _assert_model_parameter_not_direct(value: object, *, label: str) -> None:
     if isinstance(value, Mapping):
         if value.get("kind") in {
             "compiled-plane-arena-stage",
+            "compiled-plane-arena-stage-v2",
             COMPILED_STAGE_PLAN_KIND,
         }:
             raise GateError(
@@ -1511,7 +1318,7 @@ def _audit_execution_payload(payload: Mapping[str, Any]) -> dict[str, object]:
         raise GateError(
             f"execution payload does not declare {COMPILED_PLANE_ARENA_CAPABILITY}"
         )
-    if stage_set_count < 1 or descriptor_count < 1 or leaf_count < 1:
+    if stage_set_count < 1 or descriptor_count < 1:
         raise GateError("execution payload has no complete Direct-Arena stage set")
     if model_parameter_slot_count < 1:
         raise GateError("execution payload has no model-parameter evaluator slot")

@@ -40,38 +40,63 @@ def _source_leaf(
     }
 
 
-def _certificate(payload: dict[str, object]) -> dict[str, object]:
-    return {**payload, "digest": gate._canonical_sha256(payload)}
-
-
-def _direct_policies() -> dict[str, object]:
+def _input_binding() -> dict[str, object]:
     return {
-        "kind": gate.COMPILED_STAGE_PLAN_KIND,
-        "schema_version": gate.COMPILED_STAGE_PLAN_SCHEMA_VERSION,
-        "application_abi": gate.COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-        "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
-        "element_layout": "split-complex-component-major",
-        "input_output_aliasing": "forbidden",
-        "output_output_aliasing": "forbidden",
-        "output_operation": "overwrite",
-        "output_factor": "identity",
-        "input_bindings": [
-            {
-                "kind": "value",
-                "parameter_index": 0,
-                "source_id": 0,
-                "component": 0,
-                "global_component": 0,
-                "real_valued": False,
-            }
-        ],
+        "kind": "value",
+        "parameter_index": 0,
+        "source_id": 0,
+        "component": 0,
+        "global_component": 0,
+        "real_valued": False,
     }
 
 
-def _stage() -> dict[str, object]:
+def _base_plan() -> dict[str, object]:
+    return {
+        "kind": gate.COMPILED_STAGE_PLAN_KIND,
+        "schema_version": gate.COMPILED_STAGE_PLAN_SCHEMA_VERSION,
+        "plan_abi": gate.COMPILED_STAGE_PLAN_ABI,
+        "residual_application_abi": gate.COMPILED_PLANE_DIRECT_APPLICATION_ABI,
+        "table_source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+        "direct_table_descriptor_abi": gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "direct_table_binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
+        "element_layout": "split-complex-component-major",
+        "input_bindings": [_input_binding()],
+    }
+
+
+def _selector_partition() -> list[dict[str, object]]:
+    return [
+        {
+            "partition_id": 0,
+            "helicity_selector_domain_ids": [],
+            "color_selector_domain_ids": [],
+            "original_chunk_indices": [0],
+        }
+    ]
+
+
+def _residual_leaf(path: str) -> dict[str, object]:
+    return {
+        "residual_leaf_index": 0,
+        "original_chunk_index": 0,
+        "application_path": path,
+        "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+        "optimization_level": 3,
+        "direct_codegen_optimization_level": 3,
+        "input_indices": [0],
+        "input_len": 1,
+        "output_len": 1,
+        "output_start": 0,
+        "output_stop": 1,
+    }
+
+
+def _amplitude_stage() -> dict[str, object]:
     stage: dict[str, object] = {
         "stage_index": 1,
         "stage_kind": "amplitude-roots",
+        "parameter_count": 1,
         "interaction_ids": [],
         "output_length": 1,
         "output_slots": [
@@ -85,212 +110,192 @@ def _stage() -> dict[str, object]:
         ],
         "evaluator": _source_leaf(),
     }
-    order = {
-        "kind": "whole-current-canonical-order-v1",
-        "current_ids": [],
-        "source_stage_interaction_ids": [],
-        "interaction_ids": [],
-        "evaluation_group_ids": [],
-        "destinations": [
-            {
-                "destination_id": 0,
-                "owner_kind": "amplitude",
-                "owner_id": 0,
-                "output_start": 0,
-                "output_stop": 1,
-                "interaction_ids": [],
-                "evaluation_group_ids": [],
-                "ownership": {"kind": "residual"},
-            }
-        ],
-    }
     stage["compiled_plane_arena"] = {
-        **_direct_policies(),
-        "output_bindings": [{"arena": "amplitude", "component": 0, "output_index": 0}],
-        "residual_leaves": [
+        **_base_plan(),
+        "residual_evaluator": _source_leaf(),
+        "output_bindings": [
             {
-                "kind": gate.COMPILED_RESIDUAL_LEAF_KIND,
-                "leaf_id": 0,
-                "application_path": "evaluators/stage.symjit",
-                "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
-                "optimization_level": 3,
-                "direct_codegen_optimization_level": 3,
-                "input_indices": [0],
-                "input_len": 1,
-                "output_len": 1,
-                "output_indices": [0],
-                "output_ranges": [{"output_start": 0, "output_stop": 1}],
-                "selector_domain_ids": [],
-                "color_selector_domain_ids": [],
+                "arena": "amplitude",
+                "component": 0,
+                "output_index": 0,
+                "original_output_index": 0,
             }
         ],
-        "residual_output_ranges": [{"output_start": 0, "output_stop": 1}],
-        "kernels": [],
-        "islands": [],
-        "order_certificate": _certificate(order),
-        "census": {
-            "schema_version": 1,
-            "stage_kernel_count": 0,
-            "stage_island_count": 0,
-            "stage_invocation_count": 0,
-            "stage_attachment_count": 0,
-            "stage_residual_leaf_count": 1,
-            "stage_table_destination_count": 0,
-            "stage_residual_destination_count": 1,
+        "residual_leaves": [_residual_leaf("evaluators/stage.symjit")],
+        "scratch_current_component_count": 0,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [],
+        "table_calls": [],
+        "finalizer_calls": [],
+        "execution_order": [
+            {"kind": "residual-leaf", "index": 0, "original_chunk_index": 0}
+        ],
+        "selector_partitions": _selector_partition(),
+        "diagnostics": {
+            "island_count": 0,
+            "kernel_count": 0,
+            "invocation_count": 0,
+            "attachment_count": 0,
+            "table_source_bytes": 0,
+            "descriptor_bytes": 0,
+            "residual_source_bytes": 1,
+            "semantic_row_bytes": 0,
+            "scratch_current_component_count": 0,
         },
     }
     return stage
 
 
-def _mixed_current_stage() -> dict[str, object]:
+def _kernel(
+    *,
+    kernel_id: int,
+    role: str,
+    source: str,
+) -> dict[str, object]:
+    return {
+        "table_kernel_id": kernel_id,
+        "prepared_kernel_id": 7 if role == "contribution" else None,
+        "role": role,
+        "canonical_signature": str(kernel_id + 1) * 64,
+        "source_application": {
+            "path": f"evaluators/{source}.symjit",
+            "size_bytes": 128,
+            "sha256": "a" * 64,
+        },
+        "descriptor": {
+            "path": f"evaluators/{source}.table",
+            "size_bytes": 64,
+            "sha256": "b" * 64,
+        },
+        "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
+        "descriptor_abi": gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
+        "binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
+        "input_complex_count": 1,
+        "output_complex_count": 2,
+        "scalar_input_count": 0,
+        "optimization_level": 3,
+        "input_contracts": [{"role": "current"}],
+        "output_layout": ["current:0", "current:1"],
+    }
+
+
+def _rows(path: str, row_size: int) -> dict[str, object]:
+    return {
+        "path": f"compiled-microkernels/{path}.bin",
+        "size_bytes": row_size,
+        "sha256": "c" * 64,
+        "count": 1,
+        "row_size": row_size,
+    }
+
+
+def _call(kernel_id: int) -> dict[str, object]:
+    return {
+        "table_kernel_id": kernel_id,
+        "invocation_rows": _rows(f"invocations-{kernel_id}", 16),
+        "attachment_rows": _rows(f"attachments-{kernel_id}", 24),
+        "owned_current_ids": [11],
+        "dependency_current_ids": [1],
+        "dependency_current_components": [0],
+        "selector_partition_ids": [0],
+    }
+
+
+def _mixed_current_stage(*, table_only: bool = False) -> dict[str, object]:
+    output_offset = 0 if table_only else 1
     stage: dict[str, object] = {
         "stage_index": 0,
         "stage_kind": "current-stage",
-        "interaction_ids": [],
-        "output_length": 2,
-        "output_slots": [
-            {
-                "current_id": 10,
-                "component_start": 4,
-                "component_stop": 5,
-                "output_start": 0,
-                "output_stop": 1,
-            },
+        "parameter_count": 1,
+        "interaction_ids": [100],
+        "output_length": 2 if table_only else 3,
+        "output_slots": (
+            []
+            if table_only
+            else [
+                {
+                    "current_id": 10,
+                    "component_start": 4,
+                    "component_stop": 5,
+                    "output_start": 0,
+                    "output_stop": 1,
+                }
+            ]
+        )
+        + [
             {
                 "current_id": 11,
                 "component_start": 5,
-                "component_stop": 6,
-                "output_start": 1,
-                "output_stop": 2,
-            },
-        ],
-        "evaluator": _source_leaf(path="evaluators/residual.symjit"),
-    }
-    dependency = {
-        "kind": "independent-whole-current-group-v1",
-        "current_ids": [11],
-        "rows": [
-            {
-                "row_index": 0,
-                "current_id": 11,
-                "predecessor_current_ids": [1, 2],
-                "interaction_ids": [],
-                "evaluation_group_ids": [],
+                "component_stop": 7,
+                "output_start": output_offset,
+                "output_stop": output_offset + 2,
             }
         ],
+        "evaluator": _source_leaf(
+            path="evaluators/current-full.symjit",
+            output_len=2 if table_only else 3,
+        ),
     }
-    order = {
-        "kind": "whole-current-canonical-order-v1",
-        "current_ids": [10, 11],
-        "source_stage_interaction_ids": [],
-        "interaction_ids": [],
-        "evaluation_group_ids": [],
-        "destinations": [
+    residual_evaluator = (
+        {
+            "kind": "compiled-stage-empty-residual",
+            "input_len": 0,
+            "output_len": 0,
+            "required_runtime_capabilities": [],
+        }
+        if table_only
+        else _source_leaf(path="evaluators/residual.symjit")
+    )
+    residual_leaves = (
+        [] if table_only else [_residual_leaf("evaluators/residual.symjit")]
+    )
+    output_bindings = (
+        []
+        if table_only
+        else [
             {
-                "destination_id": 0,
-                "owner_kind": "current",
-                "owner_id": 10,
-                "output_start": 0,
-                "output_stop": 1,
-                "interaction_ids": [],
-                "evaluation_group_ids": [],
-                "ownership": {"kind": "residual"},
-            },
-            {
-                "destination_id": 1,
-                "owner_kind": "current",
-                "owner_id": 11,
-                "output_start": 1,
-                "output_stop": 2,
-                "interaction_ids": [],
-                "evaluation_group_ids": [],
-                "ownership": {"kind": "table", "island_id": 0, "row_index": 0},
-            },
-        ],
-    }
+                "arena": "current",
+                "component": 4,
+                "output_index": 0,
+                "original_output_index": 0,
+            }
+        ]
+    )
+    execution_order = (
+        []
+        if table_only
+        else [{"kind": "residual-leaf", "index": 0, "original_chunk_index": 0}]
+    ) + [
+        {"kind": "table-call", "index": 0, "original_chunk_index": 0},
+        {"kind": "finalizer-call", "index": 0, "original_chunk_index": 0},
+    ]
     stage["compiled_plane_arena"] = {
-        **_direct_policies(),
-        "output_bindings": [
-            {"arena": "current", "component": 4, "output_index": 0},
-            {"arena": "current", "component": 5, "output_index": 1},
+        **_base_plan(),
+        "residual_evaluator": residual_evaluator,
+        "output_bindings": output_bindings,
+        "residual_leaves": residual_leaves,
+        "scratch_current_component_count": 2,
+        "plane_catalog": [],
+        "factor_catalog": [],
+        "table_kernels": [
+            _kernel(kernel_id=0, role="contribution", source="contribution"),
+            _kernel(kernel_id=1, role="finalizer", source="finalizer"),
         ],
-        "residual_leaves": [
-            {
-                "kind": gate.COMPILED_RESIDUAL_LEAF_KIND,
-                "leaf_id": 0,
-                "application_path": "evaluators/residual.symjit",
-                "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
-                "optimization_level": 3,
-                "direct_codegen_optimization_level": 3,
-                "input_indices": [0],
-                "input_len": 1,
-                "output_len": 1,
-                "output_indices": [0],
-                "output_ranges": [{"output_start": 0, "output_stop": 1}],
-                "selector_domain_ids": [],
-                "color_selector_domain_ids": [],
-            }
-        ],
-        "residual_output_ranges": [{"output_start": 0, "output_stop": 1}],
-        "kernels": [
-            {
-                "kernel_id": 0,
-                "motif_digest": "1" * 64,
-                "exact_source_digest": "2" * 64,
-                "source_application_abi": gate.SYMJIT_APPLICATION_ABI,
-                "application_abi": gate.COMPILED_PLANE_DIRECT_APPLICATION_ABI,
-                "descriptor_abi": gate.COMPILED_DIRECT_TABLE_DESCRIPTOR_ABI,
-                "binding_abi": gate.COMPILED_DIRECT_TABLE_BINDING_ABI,
-                "application_path": "evaluators/kernel.symjit",
-                "application_sha256": "3" * 64,
-                "application_size_bytes": 4096,
-                "descriptor_path": "evaluators/kernel.table",
-                "descriptor_sha256": "4" * 64,
-                "descriptor_size_bytes": 256,
-                "optimization_level": 3,
-                "input_complex_count": 1,
-                "output_complex_count": 1,
-                "input_plane_count": 2,
-                "scalar_input_count": 0,
-                "parameter_bindings": [],
-            }
-        ],
-        "islands": [
-            {
-                "island_id": 0,
-                "kernel_id": 0,
-                "current_ids": [11],
-                "selector_domain_ids": [],
-                "invocation_rows": [
-                    {
-                        "plane_ids": [0, 1],
-                        "attachment_start": 0,
-                        "attachment_count": 1,
-                    }
-                ],
-                "attachment_rows": [
-                    {
-                        "destination_plane_ids": [2, 3],
-                        "factor_id": 0,
-                        "operation": "overwrite",
-                    }
-                ],
-                "factors": [[1.0, 0.0]],
-                "plane_bindings": [],
-                "scalar_bindings": [],
-                "dependency_certificate": _certificate(dependency),
-            }
-        ],
-        "order_certificate": _certificate(order),
-        "census": {
-            "schema_version": 1,
-            "stage_kernel_count": 1,
-            "stage_island_count": 1,
-            "stage_invocation_count": 1,
-            "stage_attachment_count": 1,
-            "stage_residual_leaf_count": 1,
-            "stage_table_destination_count": 1,
-            "stage_residual_destination_count": 1,
+        "table_calls": [_call(0)],
+        "finalizer_calls": [_call(1)],
+        "execution_order": execution_order,
+        "selector_partitions": _selector_partition(),
+        "diagnostics": {
+            "island_count": 1,
+            "kernel_count": 2,
+            "invocation_count": 2,
+            "attachment_count": 2,
+            "table_source_bytes": 256,
+            "descriptor_bytes": 128,
+            "residual_source_bytes": 0 if table_only else 1,
+            "semantic_row_bytes": 80,
+            "scratch_current_component_count": 2,
         },
     }
     return stage
@@ -316,7 +321,7 @@ def _execution_payload() -> dict[str, object]:
                 ],
                 "stage_count": 2,
                 "stages": [_mixed_current_stage()],
-                "amplitude_stage": _stage(),
+                "amplitude_stage": _amplitude_stage(),
             },
         },
     }
@@ -348,10 +353,10 @@ def test_recursive_direct_arena_audit_accepts_complete_o3_stage() -> None:
         "stage_count": 2,
         "descriptor_count": 2,
         "leaf_count": 2,
-        "kernel_count": 1,
+        "kernel_count": 2,
         "island_count": 1,
-        "invocation_count": 1,
-        "attachment_count": 1,
+        "invocation_count": 2,
+        "attachment_count": 2,
         "residual_destination_count": 2,
         "table_destination_count": 1,
         "model_parameter_slot_count": 1,
@@ -371,64 +376,14 @@ def test_recursive_audit_rejects_v1_and_split_ownership() -> None:
     payload = _execution_payload()
     current = payload["compiled"]["stage_evaluators"]["stages"][0]
     descriptor = current["compiled_plane_arena"]
-    order = descriptor["order_certificate"]
-    order["destinations"][0]["ownership"] = {
-        "kind": "table",
-        "island_id": 0,
-        "row_index": 0,
-    }
-    order["digest"] = gate._canonical_sha256(
-        {name: value for name, value in order.items() if name != "digest"}
-    )
+    descriptor["output_bindings"][0]["original_output_index"] = 3
     with pytest.raises(gate.GateError, match="ownership"):
         gate._audit_execution_payload(payload)
 
 
-def test_table_only_stage_may_omit_the_residual_evaluator() -> None:
-    stage = _mixed_current_stage()
-    stage["evaluator"] = None
-    stage["output_length"] = 1
-    stage["output_slots"] = [
-        {
-            "current_id": 11,
-            "component_start": 5,
-            "component_stop": 6,
-            "output_start": 0,
-            "output_stop": 1,
-        }
-    ]
+def test_table_only_stage_uses_an_explicit_empty_residual() -> None:
+    stage = _mixed_current_stage(table_only=True)
     descriptor = stage["compiled_plane_arena"]
-    descriptor["output_bindings"] = [
-        {"arena": "current", "component": 5, "output_index": 0}
-    ]
-    descriptor["residual_leaves"] = []
-    descriptor["residual_output_ranges"] = []
-    order_subject = {
-        "kind": "whole-current-canonical-order-v1",
-        "current_ids": [11],
-        "source_stage_interaction_ids": [],
-        "interaction_ids": [],
-        "evaluation_group_ids": [],
-        "destinations": [
-            {
-                "destination_id": 0,
-                "owner_kind": "current",
-                "owner_id": 11,
-                "output_start": 0,
-                "output_stop": 1,
-                "interaction_ids": [],
-                "evaluation_group_ids": [],
-                "ownership": {"kind": "table", "island_id": 0, "row_index": 0},
-            }
-        ],
-    }
-    descriptor["order_certificate"] = _certificate(order_subject)
-    descriptor["census"].update(
-        {
-            "stage_residual_leaf_count": 0,
-            "stage_residual_destination_count": 0,
-        }
-    )
 
     result = gate._audit_direct_descriptor(
         descriptor,
@@ -453,19 +408,19 @@ def test_table_only_stage_may_omit_the_residual_evaluator() -> None:
             lambda payload: payload["compiled"]["stage_evaluators"]["amplitude_stage"][
                 "compiled_plane_arena"
             ]["residual_leaves"][0].update({"optimization_level": 2}),
-            "not JIT O3",
+            "residual leaf identity",
         ),
         (
             lambda payload: payload["compiled"]["stage_evaluators"]["amplitude_stage"][
                 "compiled_plane_arena"
             ]["residual_leaves"][0].update({"direct_codegen_optimization_level": 2}),
-            "fixed O3",
+            "residual leaf identity",
         ),
         (
             lambda payload: payload["compiled"]["stage_evaluators"]["amplitude_stage"][
                 "compiled_plane_arena"
-            ]["residual_leaves"][0]["output_ranges"][0].update({"output_stop": 2}),
-            "residual",
+            ]["residual_leaves"][0].update({"output_len": 2}),
+            "residual leaf identity",
         ),
         (
             lambda payload: payload["compiled"]["model_parameter_evaluator"].update(
