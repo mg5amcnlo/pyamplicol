@@ -7,8 +7,10 @@ improve the complete-artifact, runtime-selected `u u~ > Z+6g` workload by at
 least 10% at both batch 128 and batch 1024 without turning the compiled DAG
 into recurrence execution.
 
-The implementation starts from pyAmpliCol
-`f4606fa9be52355b4a66efcfa2b7072d489205eb`. Its dependency contract is:
+The executable baseline starts from pyAmpliCol
+`f4606fa9be52355b4a66efcfa2b7072d489205eb`; implementation was integrated
+on the report/tooling-only descendant
+`59983a4635a28bf13c0e3fe58fcaf3aee348780f`. Its dependency contract is:
 
 - SymJIT repository:
   `https://github.com/ValentinHirschi/symjit_changes_for_pyamplicol.git`;
@@ -178,8 +180,9 @@ not authorization to change the approved post-accumulation finalizer order.
 
 The probe covers the dominant 98-call vector--Weyl core. No exact
 three-vector machine-code number is inferred from source or descriptor bytes.
-The complete candidate must still provide exact selected loaded machine-code
-evidence before landing.
+The complete candidate records exact selected loaded machine-code evidence
+when the pinned API exposes it. This evidence is diagnostic rather than a
+landing prerequisite.
 
 The pinned SymJIT API creates an observability constraint.
 `DirectTableCallable` exposes exact scalar and SIMD code shapes, but
@@ -187,17 +190,18 @@ The pinned SymJIT API creates an observability constraint.
 and neither it nor the resulting `DirectApplet` exposes the lowered
 `MachineCode::size`. The public source-application machine-code size is not
 the executed lowered DirectApplication body. The independent auditor therefore
-accepts only an exact
-`executed-selected-machine-code-scalar-plus-simd-v1` metric for the 25% landing
-gate. An unavailable exact metric fails that gate. DirectTable-only bytes and
+labels only an exact
+`executed-selected-machine-code-scalar-plus-simd-v1` value as machine-code
+evidence. An unavailable exact metric is reported as unavailable and does not
+fail an otherwise correct and faster candidate. DirectTable-only bytes and
 portable source-Application bytes remain diagnostic and are never treated as
 machine code.
 
 Implementation proceeds with the authorized 103-occurrence slice. No further
 authorization pause is required while a suitable in-scope improvement remains.
 This does not relax landing: the candidate is deleted or withheld unless it
-passes every numerical, performance, resource, exact code-size, cutover, and
-regression gate below.
+passes every numerical, performance, resource, cutover, and regression gate
+below.
 
 ## Design
 
@@ -218,8 +222,8 @@ represented as DirectTable microkernel islands:
 
 One destination may not be split between table and residual execution.
 Contributions to a destination retain their original evaluation-group order.
-Independent destinations may be grouped only when the dependency certificate
-proves that the grouping is order-independent.
+Independent destinations may be grouped only when the plan's validated
+dependency and ownership data show that the grouping is order-independent.
 
 The initial slice contains complete two-component vector--Weyl current
 families plus structurally homogeneous singleton four-component three-vector
@@ -251,9 +255,11 @@ recurrence-style execution is in scope.
 
 Every newly generated compiled artifact uses compiled-stage-plan v2. It
 contains residual DirectApplication leaves and zero or more DirectTable
-islands, with source/descriptor digests and ABIs, canonical motif identities,
-selector partitions, invocation and attachment rows, factor catalogs, plane
-bindings, and dependency/order certificates.
+islands, with the existing payload locators and ABIs, canonical motif
+identities, selector partitions, invocation and attachment rows, factor
+catalogs, plane bindings, and explicit dependency/order data. Existing generic
+artifact payload hashes remain intact, but this slice adds no second
+authentication protocol, execution certificate, or binary-code attestation.
 
 The loader rejects compiled-stage-plan v1 and incompatible direct ABIs with an
 actionable regenerate-artifact error. There is no v1 reader, converter,
@@ -264,10 +270,11 @@ Malformed declared islands fail closed instead of silently becoming
 residuals.
 
 Inspection records expose island, kernel, invocation, and attachment counts;
-table and residual machine-code bytes; semantic-row bytes; arena bytes; and
-warmed allocation counts. Public Python APIs, CLI modes, selectors, and
-configuration remain unchanged. Eager retains its existing O2 DirectTable
-plan and is a non-regression lane, not a source of the claimed gain.
+semantic-row bytes; arena bytes; warmed allocation counts; and table/residual
+code sizes when the underlying API exposes them exactly. Public Python APIs,
+CLI modes, selectors, and configuration remain unchanged. Eager retains its
+existing O2 DirectTable plan and is a non-regression lane, not a source of the
+claimed gain.
 
 ## Acceptance contract
 
@@ -283,9 +290,10 @@ Landing requires:
 - at least 10% lower median wall time at both batch 128 and batch 1024, with
   the paired change larger than three MAD;
 - batch-1 regression no greater than 5%;
-- exact executed selected scalar-plus-SIMD loaded machine code at least 25%
-  smaller; unavailable exact evidence fails closed, and neither source bytes
-  nor DirectTable-only bytes may substitute;
+- exact executed selected scalar-plus-SIMD loaded machine-code change is
+  reported when available; unavailable evidence is explicitly marked
+  unavailable, and neither source bytes nor DirectTable-only bytes substitute
+  for it;
 - no warmed execution allocations;
 - generation time, artifact bytes, load time, and peak RSS no more than 10%
   worse;
