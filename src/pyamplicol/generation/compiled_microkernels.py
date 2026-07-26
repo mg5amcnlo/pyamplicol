@@ -2088,63 +2088,23 @@ def _output_chunk_ranges(
     if stage.output_length < 1:
         raise ValueError("compiled stage cannot have zero original outputs")
     partitions = stage.selector_output_partitions or ((0, stage.output_length),)
-    slots = tuple(
-        sorted(
-            stage.output_slots,
-            key=lambda slot: (slot.output_start, slot.output_stop),
-        )
-    )
-    slot_index = 0
     ranges: list[tuple[int, int]] = []
     expected = 0
     for start, stop in partitions:
         if start != expected or stop <= start or stop > stage.output_length:
             raise ValueError("compiled stage selector partitions are malformed")
         expected = stop
-
-        partition_slots: list[GenericStageOutputSlot] = []
-        cursor = start
-        while slot_index < len(slots) and slots[slot_index].output_start < stop:
-            slot = slots[slot_index]
-            if slot.output_start != cursor or slot.output_stop <= slot.output_start:
-                raise ValueError(
-                    "compiled output slots must be contiguous and non-overlapping"
-                )
-            if slot.output_stop > stop:
-                raise ValueError("compiled output slot crosses a selector partition")
-            partition_slots.append(slot)
-            cursor = slot.output_stop
-            slot_index += 1
-        if cursor != stop:
-            raise ValueError(
-                "compiled output slots must cover every selector partition"
-            )
-
         if chunk_size is None:
             ranges.append((start, stop))
-            continue
-        if chunk_size < 1:
-            raise ValueError("compiled stage chunk size must be positive")
-
-        # A residual evaluator leaf must map back to complete value slots.
-        # Fixed-width boundaries can bisect a multi-component current, so grow
-        # each chunk greedily over whole slots instead.  An individual slot
-        # wider than the target remains one oversized, indivisible chunk.
-        chunk_start = start
-        chunk_stop = start
-        for slot in partition_slots:
-            if (
-                chunk_stop > chunk_start
-                and slot.output_stop - chunk_start > chunk_size
-            ):
-                ranges.append((chunk_start, chunk_stop))
-                chunk_start = slot.output_start
-            chunk_stop = slot.output_stop
-        ranges.append((chunk_start, chunk_stop))
+        else:
+            if chunk_size < 1:
+                raise ValueError("compiled stage chunk size must be positive")
+            ranges.extend(
+                (chunk_start, min(chunk_start + chunk_size, stop))
+                for chunk_start in range(start, stop, chunk_size)
+            )
     if expected != stage.output_length:
         raise ValueError("compiled stage selector partitions are incomplete")
-    if slot_index != len(slots):
-        raise ValueError("compiled output slots escape selector partitions")
     return tuple(ranges)
 
 
@@ -2167,46 +2127,90 @@ def _residual_stage(
     owned_current_ids: set[int],
     original_chunk_ranges: Sequence[tuple[int, int]],
 ) -> tuple[GenericCompiledStageBlueprint, tuple[int, ...], tuple[int, ...]]:
-    slots_by_start = {slot.output_start: slot for slot in stage.output_slots}
+    slots = tuple(
+        sorted(
+            stage.output_slots,
+            key=lambda slot: (slot.output_start, slot.output_stop),
+        )
+    )
+    expected_output = 0
+    for slot in slots:
+        if (
+            slot.output_start != expected_output
+            or slot.output_stop <= slot.output_start
+            or slot.output_stop > stage.output_length
+            or slot.component_stop - slot.component_start
+            != slot.output_stop - slot.output_start
+        ):
+            raise ValueError(
+                "compiled output slots must cover stage outputs exactly once"
+            )
+        expected_output = slot.output_stop
+    if expected_output != stage.output_length:
+        raise ValueError("compiled output slots do not cover every stage output")
+
     residual_outputs: list[object] = []
     residual_slots: list[GenericStageOutputSlot] = []
     original_output_indices: list[int] = []
     residual_chunks: list[int] = []
     partitions: list[tuple[int, int]] = []
+    expected_chunk_start = 0
     for chunk_index, (chunk_start, chunk_stop) in enumerate(original_chunk_ranges):
+        if (
+            chunk_start != expected_chunk_start
+            or chunk_stop <= chunk_start
+            or chunk_stop > stage.output_length
+        ):
+            raise ValueError("compiled output chunks do not cover stage outputs")
+        expected_chunk_start = chunk_stop
         partition_start = len(residual_outputs)
-        cursor = chunk_start
-        while cursor < chunk_stop:
-            slot = slots_by_start.get(cursor)
-            if slot is None or slot.output_stop > chunk_stop:
-                raise ValueError(
-                    "compiled output chunk splits or omits an output slot"
-                )
-            if slot.current_id not in owned_current_ids:
-                start = len(residual_outputs)
-                residual_outputs.extend(
-                    stage.output_expressions[slot.output_start : slot.output_stop]
-                )
-                original_output_indices.extend(
-                    range(slot.output_start, slot.output_stop)
-                )
-                residual_slots.append(
-                    replace(
-                        slot,
-                        output_start=start,
-                        output_stop=len(residual_outputs),
+        for slot in slots:
+            source_start = max(chunk_start, slot.output_start)
+            source_stop = min(chunk_stop, slot.output_stop)
+            if source_start >= source_stop:
+                continue
+            if slot.current_id in owned_current_ids:
+                if (
+                    source_start != slot.output_start
+                    or source_stop != slot.output_stop
+                ):
+                    raise ValueError(
+                        "compiled table-owned output slot crosses an original chunk"
                     )
+                continue
+            start = len(residual_outputs)
+            residual_outputs.extend(
+                stage.output_expressions[source_start:source_stop]
+            )
+            original_output_indices.extend(range(source_start, source_stop))
+            component_offset = source_start - slot.output_start
+            residual_slots.append(
+                replace(
+                    slot,
+                    component_start=slot.component_start + component_offset,
+                    component_stop=(
+                        slot.component_start
+                        + component_offset
+                        + source_stop
+                        - source_start
+                    ),
+                    output_start=start,
+                    output_stop=len(residual_outputs),
                 )
-            cursor = slot.output_stop
+            )
         if len(residual_outputs) > partition_start:
             residual_chunks.append(chunk_index)
             partitions.append((partition_start, len(residual_outputs)))
+    if expected_chunk_start != stage.output_length:
+        raise ValueError("compiled output chunks do not cover every stage output")
     residual_interactions = tuple(
         interaction_id
         for interaction_id in stage.interaction_ids
         if dag.interactions[interaction_id].result_id not in owned_current_ids
     )
-    output_slot_ids = tuple(slot.value_slot_id for slot in residual_slots)
+    output_slot_ids = tuple(
+        dict.fromkeys(slot.value_slot_id for slot in residual_slots)
+    )
     return (
         replace(
             stage,

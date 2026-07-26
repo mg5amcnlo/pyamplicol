@@ -559,49 +559,50 @@ def _chunk_test_stage(
     )
 
 
-def test_output_chunk_ranges_are_greedy_slot_aligned() -> None:
+def test_output_chunk_ranges_preserve_fixed_scalar_boundaries() -> None:
     stage = _chunk_test_stage(
         (4, 6, 4, 3, 7),
         selector_partitions=((0, 14), (14, 24)),
     )
 
     assert _output_chunk_ranges(stage, chunk_size=8) == (
-        (0, 4),
-        (4, 10),
-        (10, 14),
-        (14, 17),
-        (17, 24),
+        (0, 8),
+        (8, 14),
+        (14, 22),
+        (22, 24),
     )
 
 
-def test_output_chunk_range_keeps_oversized_slot_indivisible() -> None:
+def test_residual_stage_clips_split_slots_and_maps_original_outputs() -> None:
     stage = _chunk_test_stage(
-        (10, 4),
-        selector_partitions=((0, 14),),
-    )
-
-    assert _output_chunk_ranges(stage, chunk_size=8) == ((0, 10), (10, 14))
-
-
-def test_residual_stage_maps_slot_aligned_chunks_to_original_outputs() -> None:
-    stage = _chunk_test_stage(
-        (2, 4, 2, 6),
-        selector_partitions=((0, 14),),
+        (2, 4, 4),
+        selector_partitions=((0, 10),),
     )
     ranges = _output_chunk_ranges(stage, chunk_size=8)
 
     residual, residual_chunks, original_outputs = _residual_stage(
         stage,
         dag=SimpleNamespace(interactions=()),
-        owned_current_ids={2, 4},
+        owned_current_ids={2},
         original_chunk_ranges=ranges,
     )
 
-    assert ranges == ((0, 8), (8, 14))
-    assert residual_chunks == (0,)
-    assert original_outputs == (0, 1, 6, 7)
-    assert residual.selector_output_partitions == ((0, 4),)
+    assert ranges == ((0, 8), (8, 10))
+    assert residual_chunks == (0, 1)
+    assert original_outputs == (0, 1, 6, 7, 8, 9)
+    assert residual.selector_output_partitions == ((0, 4), (4, 6))
+    assert residual.output_value_slot_ids == (1, 3)
     assert [
-        (slot.current_id, slot.output_start, slot.output_stop)
+        (
+            slot.current_id,
+            slot.component_start,
+            slot.component_stop,
+            slot.output_start,
+            slot.output_stop,
+        )
         for slot in residual.output_slots
-    ] == [(1, 0, 2), (3, 2, 4)]
+    ] == [
+        (1, 0, 2, 0, 2),
+        (3, 0, 2, 2, 4),
+        (3, 2, 4, 4, 6),
+    ]
