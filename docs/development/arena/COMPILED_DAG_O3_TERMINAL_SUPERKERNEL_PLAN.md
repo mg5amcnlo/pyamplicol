@@ -10,9 +10,9 @@ targets non-union-flow compiled JIT O3 execution and must improve
 `flow:2,4,5,6,7,8,9,1`, by at least 10% at both batch 128 and batch 1024.
 
 Implementation started from exact executable pyAmpliCol source
-`a4082a6c93c30ee34019b8fa0f29acfe2fd2fc4f` and is synchronized with its
-report-only `main` descendant
-`6cef2aae333f57bbb6b9abbe538e94f2a4830f6e` on branch
+`a4082a6c93c30ee34019b8fa0f29acfe2fd2fc4f` and is synchronized with latest
+`main` report-only descendant
+`fb233054502aaee5e39b1c9287efddd9c56a3913` on branch
 `codex/dag_hit_compiled_terminal_superkernel`. The dependency closure remains
 candidate fingerprint `c2b7cc28699b`, pinned SymJIT fork revision `89efdb8`,
 and configured SymJIT tree
