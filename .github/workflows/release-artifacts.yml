@@ -39,6 +39,7 @@ jobs:
         run: |
           python tools/ci/memory_watchdog.py --limit-gib 30 -- \
             cargo install just --version 1.46.0 --locked
+          python -m pip install "maturin==1.14.1"
           python tools/ci/memory_watchdog.py --limit-gib 30 -- \
             python -m pip install ".[test]"
       - name: Run complete release source gate
@@ -60,6 +61,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y gfortran make
+          python -m pip install "jsonschema>=4.22,<5"
       - name: Rebuild and verify pinned Fortran evidence
         shell: bash
         run: |

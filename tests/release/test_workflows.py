@@ -480,6 +480,14 @@ def test_candidate_and_release_heavy_commands_use_memory_watchdog() -> None:
 
 def test_release_workflow_uses_one_retained_sdist_and_all_targets() -> None:
     workflow = (WORKFLOWS / "release-artifacts.yml").read_text(encoding="utf-8")
+    full_source_job = workflow.split(
+        "  full-source-validation:\n",
+        maxsplit=1,
+    )[1].split("\n  independent-physics-oracle:\n", maxsplit=1)[0]
+    oracle_job = workflow.split(
+        "  independent-physics-oracle:\n",
+        maxsplit=1,
+    )[1].split("\n  retained-sdist:\n", maxsplit=1)[0]
     assert "workflow_dispatch:" in workflow
     assert "signed_tag" not in workflow
     assert "Verify signed" not in workflow
@@ -514,6 +522,10 @@ def test_release_workflow_uses_one_retained_sdist_and_all_targets() -> None:
     )
     assert 'PYAMPLICOL_REQUIRE_NATIVE_TESTS: "1"' in workflow
     assert "python tools/release/check_dependencies.py" in workflow
+    assert full_source_job.index(
+        'python -m pip install "maturin==1.14.1"'
+    ) < full_source_job.index('python -m pip install ".[test]"')
+    assert 'python -m pip install "jsonschema>=4.22,<5"' in oracle_job
     assert "just source-gate" in workflow
     assert "g++ gfortran make" in workflow
     assert "brew install gcc" in workflow
