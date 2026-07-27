@@ -195,3 +195,57 @@ Generation/composition, runtime/certificate validation, and independent
 correctness/performance review use isolated subagent ownership. No command may
 request escalation. Table-filling support remains in its dedicated parallel
 task and does not own or block optimization source work.
+
+## Measured outcome and rejection
+
+The disposable probe completed at feature source
+`f08bcae7b7074d99734f7e3576765a1b54306123`. It compiled both ordinary O3
+DirectApplication candidates without expanding their stored source:
+
+| Candidate | Stored source | Replaced leaf source | Schedule calls |
+|---|---:|---:|---:|
+| stage-6/stage-7 pair | 378,790 bytes | 406,247 bytes | 13 to 10 |
+| stage-6/stage-7/amplitude full tail | 368,039 bytes | 418,491 bytes | 13 to 9 |
+
+The pair candidate failed the fixed numerical gate before timing. Its largest
+observed mismatch was at batch 128, point 18, current-real component 3,956:
+absolute difference `3.2521728365875191e-15` against an allowed
+`3.1025267121466914e-15` under `rtol=1e-12`, `atol=1e-15`. The pair was not
+benchmarked and is ineligible.
+
+The full-tail candidate passed the same strict numerical check over both
+required batches. Its maximum absolute and relative differences were
+`8.526512829121202e-14` and `1.4514044187143634e-12`; every point satisfied
+the combined absolute-plus-relative bound. Warmed execution allocated zero
+bytes. It reduced input-plane exposures from 20,124 to 13,644, output-plane
+stores from 8,616 to 5,800, and logical input exposures from 10,077 to 6,834.
+
+Nine alternating one-second samples nevertheless showed only:
+
+| Batch | Baseline median us/point | Full-tail median us/point | Gain |
+|---:|---:|---:|---:|
+| 128 | 40.21984 | 40.02965 | 0.47% |
+| 1024 | 40.12149 | 40.03810 | 0.21% |
+
+The authenticated diagnostic request digest is
+`0ee819979b51a3f0e199a6ee8477809ae5dad9d26b58c60746258875193c795e`.
+The diagnostic result file has SHA-256
+`fce5e97e48201dd145209f0767b631328f099b85ddc14361ba4ba333f9102c93`
+and embedded content digest
+`7e943101ece8a8e3985ad0a2a06aaaa560d2e1ff3d905d5460240dc41baaff7a`.
+The result contract was explicitly diagnostic-only and cannot be consumed as
+acceptance evidence.
+
+The probe also exposed an AArch64 callee-saved SIMD-register bug in the pinned
+SymJIT DirectApplication lowering for high-pressure complex MIR. A reversible
+local dependency change allowed the diagnostic to proceed, but it was removed
+byte-for-byte after measurement. Because the superkernel misses the 10%
+runtime gate by a wide margin, that dependency change is neither packaged nor
+proposed for landing in this slice.
+
+The result rejects the central hypothesis: removing four calls and two tail
+materializations does not materially reduce the selected-flow hot loop.
+Production artifact/runtime integration was therefore not started, and none
+of this feature branch may be merged into `main`. Further work must target
+the large-app code-generation/front-end locality owner rather than additional
+coarse schedule fusion.
