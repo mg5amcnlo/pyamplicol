@@ -36,6 +36,19 @@ checksummed SymJIT source archive listed in `contributor-lock.toml`.
 That archive is generated from the same fork revision used by release mode, so
 the active contributor patch list is empty. Candidate mode exists for
 development and physics validation only.
+
+When a pull changes one of those immutable inputs, refresh all managed
+contributor state with:
+
+```shell
+just dev-install --reset
+```
+
+The reset is recoverable: the previous virtual environment, dependency
+checkouts, wheelhouse, candidate lock/configuration, and candidate artifacts
+are moved under `.trash/dependency-reset-<timestamp>` before replacements are
+created.
+
 It installs the verified published `ufo-model-loader==0.1.7` wheel directly
 from the hash-locked runtime closure. Artifacts produced in this mode record
 the candidate revisions and resulting source-tree identity and are not

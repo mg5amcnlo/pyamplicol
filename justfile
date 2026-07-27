@@ -116,8 +116,8 @@ install-wheel PYTHON_ARG="":
     if [[ -z "$selected" ]]; then selected="{{python}}"; fi; \
     {{python}} tools/release/install_wheel.py --python "$selected"
 
-dev-install: _source-checkout
-    {{python}} dependencies/install_dependencies.py
+dev-install *INSTALL_ARGS: _source-checkout
+    {{python}} dependencies/install_dependencies.py {{INSTALL_ARGS}}
     PYAMPLICOL_BUILD_MODE=candidate {{python}} tools/developer/prepare_source_runtime.py --candidate --wheel-directory .artifacts/candidate
 
 # Report/campaign prerequisite. pyAmpliCol is not released yet, so this keeps
