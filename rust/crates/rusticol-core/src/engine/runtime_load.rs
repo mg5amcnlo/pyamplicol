@@ -354,6 +354,12 @@ fn validate_compiled_stage_plan_v2(
         }
     }
 
+    if plan.scratch_current_component_count != 0 || !plan.finalizer_calls.is_empty() {
+        return Err(RusticolError::compatibility(
+            "compiled stage-plan retains the removed scratch/finalizer table route; \
+             regenerate the artifact",
+        ));
+    }
     validate_compiled_plane_catalog(
         plan,
         value_component_count,
@@ -370,26 +376,19 @@ fn validate_compiled_stage_plan_v2(
         .iter()
         .map(|slot| slot.current_id)
         .collect::<BTreeSet<_>>();
+    let known_interaction_ids = stage
+        .interaction_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let (table_invocations, table_attachments, table_owned) = validate_compiled_table_call_groups(
         plan,
         &plan.table_calls,
         "contribution",
         &known_current_ids,
+        &known_interaction_ids,
         value_component_count,
     )?;
-    let (finalizer_invocations, finalizer_attachments, finalizer_owned) =
-        validate_compiled_table_call_groups(
-            plan,
-            &plan.finalizer_calls,
-            "finalizer",
-            &known_current_ids,
-            value_component_count,
-        )?;
-    if table_owned != finalizer_owned {
-        return Err(RusticolError::integrity(
-            "compiled table contribution and finalizer ownership differ",
-        ));
-    }
     if table_owned
         .iter()
         .any(|current_id| residual_current_ids.contains(current_id))
@@ -398,7 +397,7 @@ fn validate_compiled_stage_plan_v2(
             "compiled stage mixes table and residual contributions to one current",
         ));
     }
-    if is_amplitude && (!table_owned.is_empty() || plan.scratch_current_component_count != 0) {
+    if is_amplitude && !table_owned.is_empty() {
         return Err(RusticolError::compatibility(
             "compiled stage-plan v2 does not tableize the amplitude stage",
         ));
@@ -410,8 +409,8 @@ fn validate_compiled_stage_plan_v2(
         plan,
         table_invocations,
         table_attachments,
-        finalizer_invocations,
-        finalizer_attachments,
+        0,
+        0,
         table_owned.len(),
     )
 }
@@ -495,11 +494,6 @@ fn validate_compiled_plane_catalog(
                             && plane.component < slot.component_stop
                     })
             }
-            "scratch-current" => {
-                !plane.proven_real
-                    && current_slot.is_some()
-                    && plane.component < plan.scratch_current_component_count
-            }
             "momentum" => {
                 plane.current_id.is_none()
                     && plane.proven_real
@@ -529,7 +523,7 @@ fn validate_compiled_plane_catalog(
 
 fn validate_compiled_factor_catalog(
     plan: &CompiledPlaneArenaStageManifest,
-    model_parameter_count: usize,
+    _model_parameter_count: usize,
 ) -> RusticolResult<()> {
     let has_tables = !plan.table_calls.is_empty() || !plan.finalizer_calls.is_empty();
     if has_tables == plan.factor_catalog.is_empty() {
@@ -537,44 +531,41 @@ fn validate_compiled_factor_catalog(
             "compiled DirectTable factor catalog presence disagrees with table calls",
         ));
     }
-    for (expected, factor) in plan.factor_catalog.iter().enumerate() {
-        if factor.factor_id as usize != expected
-            || factor.base.iter().any(|value| !value.is_finite())
-        {
-            return Err(RusticolError::integrity(
-                "compiled DirectTable factor catalog is not dense or finite",
-            ));
-        }
-        match (
-            factor.model_parameter_index,
-            factor.parameter_component.as_str(),
-        ) {
-            (None, "none") => {}
-            (Some(index), "real" | "imag") if index < model_parameter_count => {}
-            _ => {
-                return Err(RusticolError::integrity(
-                    "compiled DirectTable factor has an invalid model-parameter source",
-                ));
-            }
-        }
+    if !has_tables {
+        return Ok(());
+    }
+    let [factor] = plan.factor_catalog.as_slice() else {
+        return Err(RusticolError::integrity(
+            "compiled complete-current tables require one identity factor",
+        ));
+    };
+    if factor.factor_id != 0
+        || factor.base != [1.0, 0.0]
+        || factor.model_parameter_index.is_some()
+        || factor.parameter_component != "none"
+    {
+        return Err(RusticolError::integrity(
+            "compiled complete-current table factor is not exact identity",
+        ));
     }
     Ok(())
 }
 
 fn validate_compiled_table_kernels(plan: &CompiledPlaneArenaStageManifest) -> RusticolResult<()> {
-    if plan.table_kernels.len() > 8 {
+    if plan.table_kernels.len() > 64 {
         return Err(RusticolError::compatibility(
-            "compiled stage-plan exceeds the eight-kernel slice cap",
+            "compiled stage-plan exceeds the DirectTable kernel catalog cap",
         ));
     }
     let mut signatures = BTreeSet::new();
     for (expected, kernel) in plan.table_kernels.iter().enumerate() {
         if kernel.table_kernel_id as usize != expected
-            || !matches!(kernel.role.as_str(), "contribution" | "finalizer")
+            || kernel.prepared_kernel_id.is_some()
+            || kernel.role != "contribution"
             || kernel.canonical_signature.is_empty()
             || !signatures.insert((kernel.role.as_str(), kernel.canonical_signature.as_str()))
             || kernel.input_complex_count == 0
-            || kernel.input_complex_count > 16
+            || kernel.input_complex_count > 64
             || kernel.output_complex_count == 0
             || kernel.output_complex_count > 4
             || kernel.source_application_abi != plan.table_source_application_abi
@@ -584,7 +575,6 @@ fn validate_compiled_table_kernels(plan: &CompiledPlaneArenaStageManifest) -> Ru
             || kernel.optimization_level != 3
             || kernel.input_contracts.len() != kernel.input_complex_count as usize
             || kernel.output_layout.len() != kernel.output_complex_count as usize
-            || (kernel.role == "contribution" && kernel.prepared_kernel_id.is_none())
         {
             return Err(RusticolError::integrity(
                 "compiled DirectTable kernel identity or bounded shape is invalid",
@@ -608,11 +598,13 @@ fn validate_compiled_table_call_groups(
     calls: &[CompiledTableCallGroupManifest],
     expected_role: &str,
     known_current_ids: &BTreeSet<usize>,
+    known_interaction_ids: &BTreeSet<usize>,
     value_component_count: usize,
 ) -> RusticolResult<(u32, u32, BTreeSet<usize>)> {
     let mut invocation_count = 0_u32;
     let mut attachment_count = 0_u32;
     let mut owned = BTreeSet::new();
+    let mut covered_interactions = BTreeSet::new();
     for call in calls {
         let kernel = plan
             .table_kernels
@@ -650,9 +642,31 @@ fn validate_compiled_table_call_groups(
                 .chain(&call.dependency_current_ids)
                 .any(|current_id| !known_current_ids.contains(current_id))
             || call
+                .owned_current_ids
+                .iter()
+                .any(|current_id| owned.contains(current_id))
+            || call.owned_current_ids.iter().any(|current_id| {
+                call.dependency_current_ids
+                    .binary_search(current_id)
+                    .is_ok()
+            })
+            || usize::try_from(call.invocation_rows.count).ok()
+                != Some(call.owned_current_ids.len())
+            || usize::try_from(call.attachment_rows.count).ok()
+                != Some(call.owned_current_ids.len())
+            || call
                 .dependency_current_components
                 .iter()
                 .any(|component| *component >= value_component_count)
+            || call.interaction_ids.is_empty()
+            || call
+                .interaction_ids
+                .iter()
+                .any(|interaction_id| !known_interaction_ids.contains(interaction_id))
+            || call
+                .interaction_ids
+                .iter()
+                .any(|interaction_id| !covered_interactions.insert(*interaction_id))
         {
             return Err(RusticolError::integrity(
                 "compiled table call role, ownership, dependency, or selector order is invalid",
@@ -4654,6 +4668,29 @@ mod compiled_plane_arena_contract_tests {
         assert!(
             supported_runtime_capabilities().contains(&COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY)
         );
+    }
+
+    #[test]
+    fn complete_current_cutover_rejects_obsolete_scratch_plans() {
+        let mut manifest = arena_manifest();
+        let plan = manifest
+            .compiled
+            .stage_evaluators
+            .as_mut()
+            .unwrap()
+            .amplitude_stage
+            .compiled_plane_arena
+            .as_mut()
+            .unwrap();
+        plan.scratch_current_component_count = 1;
+        plan.diagnostics.scratch_current_component_count = 1;
+
+        let error = validate_compiled_plane_arena_contract(&manifest)
+            .expect_err("obsolete scratch/finalizer plans must fail closed");
+
+        assert_eq!(error.kind(), crate::RusticolErrorKind::Compatibility);
+        assert!(error.to_string().contains("removed scratch/finalizer"));
+        assert!(error.to_string().contains("regenerate"));
     }
 
     #[test]

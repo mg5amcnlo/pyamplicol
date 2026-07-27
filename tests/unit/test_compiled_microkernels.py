@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import symbolica as symbolica_module
 
 import pyamplicol.generation.service as service_module
@@ -17,7 +18,6 @@ from pyamplicol.config import GenerationConfig
 from pyamplicol.evaluators.symbolica_settings import SymbolicaEvaluatorSettings
 from pyamplicol.generation.compiled_microkernels import (
     CompiledMicrokernelSession,
-    _FactorCatalog,
     _KernelSource,
     _output_chunk_ranges,
     _PlaneCatalog,
@@ -26,8 +26,8 @@ from pyamplicol.generation.compiled_microkernels import (
     _selector_partitions,
 )
 from pyamplicol.generation.eager_tables import (
-    EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
-    EagerCouplingRow,
+    EAGER_OUTPUT_FACTOR_NONE,
+    MISSING_U32,
 )
 from pyamplicol.generation.progress import PhaseHandle
 from pyamplicol.generation.service import _ProcessSelection
@@ -95,15 +95,11 @@ def _evaluator_process(
 def _fake_kernel_source(
     session: CompiledMicrokernelSession,
     table_kernel_id: int,
-    key: tuple[str, int],
-    *,
-    role: str,
+    signature: str,
 ) -> _KernelSource:
-    spec = session._kernel_spec(key)
+    spec = session._composite_kernel_spec(signature)
     return _KernelSource(
         table_kernel_id=table_kernel_id,
-        prepared_kernel_id=key[1] if key[0] == "prepared" else None,
-        role=role,  # type: ignore[arg-type]
         canonical_signature=spec.canonical_signature,
         source_application_path=f"kernel-{table_kernel_id}.symjit",
         source_application_size_bytes=100,
@@ -178,17 +174,15 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
     lowerings = _lower_all_stages(session, evaluator, settings)
 
     assert session.profitability_diagnostics == {
-        "contract": (
-            "materialized-active-repeated-prepared-kernel-occurrences-v1"
-        ),
-        "active_occurrence_count": 203,
-        "eligible_occurrence_count": 103,
-        "coverage_basis_points": 5073,
-        "unique_projected_source_bytes": 26233,
-        "replaced_projected_source_bytes": 391469,
-        "projected_source_basis_points": 670,
-        "kernel_identity_count": 7,
-        "admitted_current_count": 31,
+        "contract": ("materialized-active-repeated-prepared-kernel-occurrences-v1"),
+        "active_occurrence_count": 98,
+        "eligible_occurrence_count": 98,
+        "coverage_basis_points": 10000,
+        "unique_projected_source_bytes": 5916,
+        "replaced_projected_source_bytes": 289884,
+        "projected_source_basis_points": 204,
+        "kernel_identity_count": 4,
+        "admitted_current_count": 26,
         "admitted": True,
     }
     current_stages = lowerings[:-1]
@@ -196,39 +190,121 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         [int(call["invocation_rows"]["count"]) for call in item.table_calls]
         for item in current_stages
     ] == [
-        [2, 2, 5],
-        [4, 4],
-        [6, 6],
-        [8, 8],
-        [10, 10],
-        [12, 12],
-        [7, 7],
-    ]
-    assert [
-        [int(call["invocation_rows"]["count"]) for call in item.finalizer_calls]
-        for item in current_stages
-    ] == [
-        [2, 2, 5],
-        [2, 2],
-        [2, 2],
-        [2, 2],
-        [2, 2],
-        [2, 2],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
         [1, 1],
     ]
+    assert sum(len(item.table_calls) for item in current_stages) == 26
+    assert sum(len(item.owned_current_ids) for item in current_stages) == 26
     assert (
         sum(
-            len(item.table_calls) + len(item.finalizer_calls)
+            int(call["invocation_rows"]["count"])
             for item in current_stages
+            for call in item.table_calls
         )
-        == 30
+        == 26
     )
-    assert sum(len(item.owned_current_ids) for item in current_stages) == 31
-    assert sum(
+    assert all(
         int(call["invocation_rows"]["count"])
+        == len(call["owned_current_ids"])
+        == int(call["attachment_rows"]["count"])
         for item in current_stages
         for call in item.table_calls
-    ) == 103
+    )
+    assert len(session._kernel_sources) == 26
+    assert (
+        max(source.input_complex_count for source in session._kernel_sources.values())
+        == 43
+    )
+    assert {
+        source.output_complex_count for source in session._kernel_sources.values()
+    } == {2}
+    assert all(
+        item.factor_catalog
+        == (
+            {
+                "factor_id": 0,
+                "base": [1.0, 0.0],
+                "model_parameter_index": None,
+                "parameter_component": "none",
+            },
+        )
+        for item in current_stages
+    )
+    composite_specs = tuple(session._composite_specs.values())
+    assert (
+        sum(
+            any(
+                prepared_input.role in {"coupling-real", "coupling-imag"}
+                for prepared_input in spec.inputs
+            )
+            for spec in composite_specs
+        )
+        == 14
+    )
+    assert (
+        sorted(
+            prepared_input.role
+            for spec in composite_specs
+            for prepared_input in spec.inputs
+            if prepared_input.role in {"coupling-real", "coupling-imag"}
+        )
+        == ["coupling-imag"] * 7 + ["coupling-real"] * 7
+    )
+    assert all(
+        ("contribution_0_factor" in "\n".join(spec.exact_expressions))
+        == any(
+            prepared_input.role in {"coupling-real", "coupling-imag"}
+            for prepared_input in spec.inputs
+        )
+        for spec in composite_specs
+    )
+    assert all(
+        {
+            symbol.to_canonical_string()
+            for expression in spec.exact_expressions
+            for symbol in symbolica_module.Expression.parse(expression).get_all_symbols(
+                False
+            )
+        }
+        == {
+            symbolica_module.Expression.parse(
+                prepared_input.symbol
+            ).to_canonical_string()
+            for prepared_input in spec.inputs
+        }
+        for spec in composite_specs
+    )
+    for lowering in current_stages:
+        for call in lowering.table_calls:
+            [current_id] = call["owned_current_ids"]
+            expected_order = [
+                interaction_id
+                for interaction_id in lowering.original_stage.interaction_ids
+                if evaluator.compiled.dag.interactions[interaction_id].result_id
+                == current_id
+            ]
+            assert call["interaction_ids"] == expected_order
+        if lowering.table_calls:
+            plan = session.build_stage_plan(
+                lowering,
+                residual_evaluator={},
+                residual_leaves=tuple(
+                    {} for _ in lowering.residual_original_chunk_indices
+                ),
+                residual_output_bindings=tuple(
+                    {} for _ in lowering.residual_original_output_indices
+                ),
+            )
+            assert [call["interaction_ids"] for call in plan["table_calls"]] == [
+                call["interaction_ids"] for call in lowering.table_calls
+            ]
+            assert plan["finalizer_calls"] == []
+            assert plan["scratch_current_component_count"] == 0
     assert [
         (
             item.original_stage.parameter_count,
@@ -236,7 +312,7 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         )
         for item in lowerings
     ] == [
-        (94, 24),
+        (94, 68),
         (176, 134),
         (244, 186),
         (292, 194),
@@ -259,9 +335,7 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         for component in subset_three_residual.input_components
         if component.kind == "value"
     }.isdisjoint(range(36, 44))
-    assert set(subset_three_residual.input_value_slot_ids).isdisjoint(
-        {11, 12, 13, 14}
-    )
+    assert set(subset_three_residual.input_value_slot_ids).isdisjoint({11, 12, 13, 14})
     assert not lowerings[-1].has_islands
 
 
@@ -281,7 +355,7 @@ def test_small_ddbar_z3g_is_residual_only(tmp_path: Path) -> None:
         symbolica_settings=settings,
     )
 
-    assert session.profitability_diagnostics["eligible_occurrence_count"] == 34
+    assert session.profitability_diagnostics["eligible_occurrence_count"] == 32
     assert session.profitability_diagnostics["admitted"] is False
     assert not session._admitted_current_ids
     assert all(
@@ -290,7 +364,7 @@ def test_small_ddbar_z3g_is_residual_only(tmp_path: Path) -> None:
     )
 
 
-def test_complex_parameter_projection_and_nonzero_imaginary_factor() -> None:
+def test_complex_parameter_projection() -> None:
     session = object.__new__(CompiledMicrokernelSession)
     complex_records = {
         "real": {
@@ -369,32 +443,78 @@ def test_complex_parameter_projection_and_nonzero_imaginary_factor() -> None:
     }
     assert session._real_kernel_parameter_indices(spec) == (1,)
 
-    session.eager_tables = SimpleNamespace(
-        couplings=(
-            EagerCouplingRow(
-                real_parameter_id=5,
-                imag_parameter_id=9,
-                constant_real=0.0,
-                constant_imag=0.0,
-            ),
-        )
+
+def test_nonzero_imaginary_composite_factor_has_no_free_unit_symbol() -> None:
+    contribution = PreparedKernelSpec(
+        kernel_id=3,
+        contract_kind="vertex",
+        canonical_signature="e" * 64,
+        exact_expressions=("1", "2"),
+        inputs=(),
+        output_layout=("current:0", "current:1"),
     )
+    session = object.__new__(CompiledMicrokernelSession)
+    session._specs = {3: contribution}
+    session._composite_specs = {}
+    session._value_slots = {
+        7: {
+            "value_slot_id": 7,
+            "current_id": 9,
+            "component_start": 4,
+            "component_stop": 6,
+        }
+    }
+    item = SimpleNamespace(
+        current_id=9,
+        dimension=2,
+        vertex_kernel_ids=(3,),
+        finalizer_kernel_id=None,
+        original_chunk_index=0,
+        helicity_selector_domain_ids=(),
+        color_selector_domain_ids=(),
+    )
+    interaction = SimpleNamespace(id=11, left_id=1, right_id=2)
     invocation = SimpleNamespace(
-        output_factor_source=EAGER_OUTPUT_FACTOR_COUPLING_IMAG,
-        coupling_slot_id=0,
+        kernel_id=3,
+        output_factor_source=EAGER_OUTPUT_FACTOR_NONE,
+        left_value_slot_id=0,
+        right_value_slot_id=0,
+        left_momentum_slot_id=0,
+        right_momentum_slot_id=0,
     )
-    factors = _FactorCatalog()
-    factor_id = session._factor_for_attachment(
-        2.0 - 0.5j,
-        invocation,
-        factors,
+    attachment = SimpleNamespace(factor_real=2.0, factor_imag=-0.5)
+    finalization = SimpleNamespace(
+        unpropagated_value_slot_id=7,
+        propagated_value_slot_id=MISSING_U32,
     )
-    factor = factors.entries[factor_id]
-    assert factor["model_parameter_index"] == 9
-    assert factor["parameter_component"] == "imag"
-    nonzero_imaginary_mutation = 0.375
-    assert complex(*factor["base"]) * nonzero_imaginary_mutation == (
-        0.75 - 0.1875j
+
+    mismatched_item = SimpleNamespace(**{**vars(item), "vertex_kernel_ids": (4,)})
+    with pytest.raises(ValueError, match="prepared-kernel witness changed"):
+        session._composite_current_record(
+            mismatched_item,
+            (interaction,),
+            ((invocation, attachment),),
+            finalization,
+            planes=_PlaneCatalog(),
+        )
+    record = session._composite_current_record(
+        item,
+        (interaction,),
+        ((invocation, attachment),),
+        finalization,
+        planes=_PlaneCatalog(),
+    )
+
+    assert record is not None
+    [spec] = session._composite_specs.values()
+    factor = symbolica_module.Expression.parse("(2.0)+sqrt(-1)*(-0.5)")
+    assert spec.exact_expressions == tuple(
+        (symbolica_module.Expression.parse(expression) * factor).to_canonical_string()
+        for expression in contribution.exact_expressions
+    )
+    assert all(
+        not symbolica_module.Expression.parse(expression).get_all_symbols(False)
+        for expression in spec.exact_expressions
     )
 
 
@@ -521,7 +641,8 @@ def test_kernel_source_is_published_once_and_discards_unused_state(
         output_layout=("current:0",),
     )
     session = object.__new__(CompiledMicrokernelSession)
-    session._specs = {7: spec}
+    session._specs = {}
+    session._composite_specs = {spec.canonical_signature: spec}
     session.settings = SymbolicaEvaluatorSettings()
     session.artifact_dir = tmp_path
     session._total_source_bytes = 0
@@ -529,10 +650,14 @@ def test_kernel_source_is_published_once_and_discards_unused_state(
     descriptor_root = tmp_path / "compiled-microkernels" / "kernels"
     assert not descriptor_root.exists()
 
+    with pytest.raises(ValueError, match="must be a composite current"):
+        session._compile_kernel_source(  # type: ignore[arg-type]
+            0,
+            ("prepared", 7),
+        )
     source = session._compile_kernel_source(
         0,
-        ("prepared", 7),
-        role="contribution",
+        spec.canonical_signature,
     )
     assert source.source_application_path == "evaluators/kernel.symjit"
     assert (tmp_path / source.source_application_path).is_file()
@@ -566,9 +691,7 @@ def _chunk_test_stage(
             )
         )
         outputs.extend(
-            SimpleNamespace(
-                to_canonical_string=lambda index=index: f"output_{index}"
-            )
+            SimpleNamespace(to_canonical_string=lambda index=index: f"output_{index}")
             for index in range(start, cursor)
         )
     return GenericCompiledStageBlueprint(
@@ -720,9 +843,7 @@ def test_empty_residual_input_projection_has_an_empty_abi() -> None:
     stage = replace(
         _chunk_test_stage((1,), selector_partitions=((0, 1),)),
         input_value_slot_ids=(10,),
-        input_components=(
-            GenericStageInputComponent("value", 10, 0, 4, 0),
-        ),
+        input_components=(GenericStageInputComponent("value", 10, 0, 4, 0),),
         parameter_count=1,
         value_parameter_count=1,
         momentum_parameter_count=0,

@@ -2453,6 +2453,14 @@ fn load_stage(
                     RusticolError::integrity("compiled table execution index is out of bounds")
                 })?;
                 chunk_inputs[chunk].extend(call.dependency_current_components.iter().copied());
+                for current_id in &call.owned_current_ids {
+                    let components = current_components_by_id.get(current_id).ok_or_else(|| {
+                        RusticolError::integrity(
+                            "compiled complete-current table call owns a current absent from stage outputs",
+                        )
+                    })?;
+                    chunk_current_outputs[chunk].extend(components.iter().copied());
+                }
                 CompiledStageOperation::TableCall(unit.index as usize)
             }
             #[cfg(feature = "f64-symjit")]
@@ -2536,6 +2544,13 @@ fn load_stage(
                         })?;
                     let invocation_bytes = read_compiled_payload(&call.invocation_rows, payloads)?;
                     let attachment_bytes = read_compiled_payload(&call.attachment_rows, payloads)?;
+                    validate_complete_current_table_rows(
+                        kernel,
+                        call,
+                        &direct.plane_catalog,
+                        &invocation_bytes,
+                        &attachment_bytes,
+                    )?;
                     let rows = application.load_rows(invocation_bytes, attachment_bytes)?;
                     if rows.invocation_count() != call.invocation_rows.count
                         || rows.attachment_count() != call.attachment_rows.count
@@ -2601,7 +2616,7 @@ fn stage_output_current_components(
     if is_amplitude {
         return Ok(BTreeMap::new());
     }
-    let mut result = BTreeMap::new();
+    let mut result: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for slot in &stage.output_slots {
         let current_id = usize::try_from(slot.current_id).map_err(|_| {
             RusticolError::integrity("compiled current stage output has a negative current id")
@@ -2613,14 +2628,165 @@ fn stage_output_current_components(
                 "compiled current stage output component range is invalid",
             ));
         }
-        let components = (slot.component_start..slot.component_stop).collect::<Vec<_>>();
-        if result.insert(current_id, components).is_some() {
+        let components = result.entry(current_id).or_default();
+        for component in slot.component_start..slot.component_stop {
+            if !components.insert(component) {
+                return Err(RusticolError::integrity(
+                    "compiled current stage output slots overlap",
+                ));
+            }
+        }
+    }
+    Ok(result
+        .into_iter()
+        .map(|(current_id, components)| (current_id, components.into_iter().collect()))
+        .collect())
+}
+
+#[cfg(feature = "f64-symjit")]
+fn validate_complete_current_table_rows(
+    kernel: &CompiledTableKernelManifest,
+    call: &CompiledTableCallGroupManifest,
+    plane_catalog: &[CompiledPlaneCatalogEntryManifest],
+    invocation_bytes: &[u8],
+    attachment_bytes: &[u8],
+) -> RusticolResult<()> {
+    fn word(bytes: &[u8], index: usize, label: &str) -> RusticolResult<u32> {
+        let start = index
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| RusticolError::integrity(format!("{label} index overflows")))?;
+        let value = bytes
+            .get(start..start + std::mem::size_of::<u32>())
+            .ok_or_else(|| RusticolError::integrity(format!("{label} payload is truncated")))?;
+        Ok(u32::from_le_bytes(
+            value
+                .try_into()
+                .expect("validated four-byte compiled table word"),
+        ))
+    }
+
+    let invocation_plane_count = usize::try_from(kernel.input_complex_count)
+        .ok()
+        .and_then(|count| count.checked_mul(2))
+        .ok_or_else(|| RusticolError::integrity("compiled invocation width overflows"))?;
+    let attachment_plane_count = usize::try_from(kernel.output_complex_count)
+        .ok()
+        .and_then(|count| count.checked_mul(2))
+        .ok_or_else(|| RusticolError::integrity("compiled attachment width overflows"))?;
+    let invocation_width = invocation_plane_count
+        .checked_add(2)
+        .ok_or_else(|| RusticolError::integrity("compiled invocation row width overflows"))?;
+    let attachment_width = attachment_plane_count
+        .checked_add(2)
+        .ok_or_else(|| RusticolError::integrity("compiled attachment row width overflows"))?;
+    let row_count = call.owned_current_ids.len();
+    if invocation_bytes.len()
+        != row_count
+            .checked_mul(invocation_width)
+            .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
+            .ok_or_else(|| RusticolError::integrity("compiled invocation table size overflows"))?
+        || attachment_bytes.len()
+            != row_count
+                .checked_mul(attachment_width)
+                .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
+                .ok_or_else(|| {
+                    RusticolError::integrity("compiled attachment table size overflows")
+                })?
+    {
+        return Err(RusticolError::integrity(
+            "compiled complete-current row payload shape is inconsistent",
+        ));
+    }
+
+    for row in 0..row_count {
+        let invocation_start = row * invocation_width;
+        for column in 0..invocation_plane_count {
+            let plane_id = word(
+                invocation_bytes,
+                invocation_start + column,
+                "compiled invocation plane",
+            )? as usize;
+            let plane = plane_catalog.get(plane_id).ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled complete-current invocation references an absent plane",
+                )
+            })?;
+            if plane.storage == "current" {
+                let current_id = plane.current_id.ok_or_else(|| {
+                    RusticolError::integrity(
+                        "compiled complete-current input plane has no current owner",
+                    )
+                })? as usize;
+                if call
+                    .dependency_current_ids
+                    .binary_search(&current_id)
+                    .is_err()
+                    || call
+                        .dependency_current_components
+                        .binary_search(&plane.component)
+                        .is_err()
+                {
+                    return Err(RusticolError::integrity(
+                        "compiled complete-current input row escapes its declared dependencies",
+                    ));
+                }
+            }
+        }
+        if word(
+            invocation_bytes,
+            invocation_start + invocation_plane_count,
+            "compiled invocation attachment start",
+        )? as usize
+            != row
+            || word(
+                invocation_bytes,
+                invocation_start + invocation_plane_count + 1,
+                "compiled invocation attachment count",
+            )? != 1
+        {
             return Err(RusticolError::integrity(
-                "compiled current stage repeats a current id",
+                "compiled complete-current invocation is not one-to-one",
+            ));
+        }
+
+        let attachment_start = row * attachment_width;
+        let expected_current_id = call.owned_current_ids[row];
+        for column in 0..attachment_plane_count {
+            let plane_id = word(
+                attachment_bytes,
+                attachment_start + column,
+                "compiled attachment plane",
+            )? as usize;
+            let plane = plane_catalog.get(plane_id).ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled complete-current attachment references an absent plane",
+                )
+            })?;
+            if plane.storage != "current"
+                || plane.current_id.map(|value| value as usize) != Some(expected_current_id)
+            {
+                return Err(RusticolError::integrity(
+                    "compiled complete-current attachment escapes its declared owner",
+                ));
+            }
+        }
+        if word(
+            attachment_bytes,
+            attachment_start + attachment_plane_count,
+            "compiled attachment factor",
+        )? != 0
+            || word(
+                attachment_bytes,
+                attachment_start + attachment_plane_count + 1,
+                "compiled attachment operation",
+            )? != 0
+        {
+            return Err(RusticolError::integrity(
+                "compiled complete-current attachment is not identity overwrite",
             ));
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 #[cfg(feature = "f64-symjit")]
@@ -3562,7 +3728,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
     }
 
     #[test]
-    fn tableized_stage_plan_executes_contribution_and_finalizer_without_residual_leaves() {
+    fn complete_current_table_stage_executes_without_scratch_or_finalizer() {
         let payload_root = test_payload_directory();
         fs::create_dir_all(&payload_root).unwrap();
         let x = Expr::var("x");
@@ -3580,25 +3746,15 @@ extern "C" int native_direct_leaf_direct_application_v1(
             write_compiled_payload(&payload_root, "table/identity.symjit", &identity_bytes);
         let descriptor_payload =
             write_compiled_payload(&payload_root, "table/identity.direct-table", &descriptor);
-        let contribution_invocations = write_compiled_rows(
+        let complete_current_invocations = write_compiled_rows(
             &payload_root,
-            "table/contribution-invocations.bin",
+            "table/complete-current-invocations.bin",
             &[0, 1, 0, 1],
         );
-        let contribution_attachments = write_compiled_rows(
+        let complete_current_attachments = write_compiled_rows(
             &payload_root,
-            "table/contribution-attachments.bin",
+            "table/complete-current-attachments.bin",
             &[2, 3, 0, 0],
-        );
-        let finalizer_invocations = write_compiled_rows(
-            &payload_root,
-            "table/finalizer-invocations.bin",
-            &[2, 3, 0, 1],
-        );
-        let finalizer_attachments = write_compiled_rows(
-            &payload_root,
-            "table/finalizer-attachments.bin",
-            &[4, 5, 0, 0],
         );
 
         let mut stage = stage_manifest(
@@ -3608,6 +3764,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
             evaluator("identity.symjit", 1, 1),
             false,
         );
+        stage.interaction_ids = vec![0];
         let plan = stage.compiled_plane_arena.as_mut().unwrap();
         plan.residual_evaluator = Box::new(EvaluatorManifest::CompiledStageEmptyResidual {
             input_len: 0,
@@ -3617,7 +3774,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
         plan.input_bindings.clear();
         plan.output_bindings.clear();
         plan.residual_leaves.clear();
-        plan.scratch_current_component_count = 1;
+        plan.scratch_current_component_count = 0;
         plan.plane_catalog = vec![
             CompiledPlaneCatalogEntryManifest {
                 plane_id: 0,
@@ -3637,22 +3794,6 @@ extern "C" int native_direct_leaf_direct_application_v1(
             },
             CompiledPlaneCatalogEntryManifest {
                 plane_id: 2,
-                storage: "scratch-current".to_string(),
-                component: 0,
-                part: "real".to_string(),
-                current_id: Some(1),
-                proven_real: false,
-            },
-            CompiledPlaneCatalogEntryManifest {
-                plane_id: 3,
-                storage: "scratch-current".to_string(),
-                component: 0,
-                part: "imag".to_string(),
-                current_id: Some(1),
-                proven_real: false,
-            },
-            CompiledPlaneCatalogEntryManifest {
-                plane_id: 4,
                 storage: "current".to_string(),
                 component: 1,
                 part: "real".to_string(),
@@ -3660,7 +3801,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
                 proven_real: false,
             },
             CompiledPlaneCatalogEntryManifest {
-                plane_id: 5,
+                plane_id: 3,
                 storage: "current".to_string(),
                 component: 1,
                 part: "imag".to_string(),
@@ -3692,10 +3833,7 @@ extern "C" int native_direct_leaf_direct_application_v1(
                 input_contracts: vec![serde_json::json!({"kind": "complex"})],
                 output_layout: vec!["complex".to_string()],
             };
-        plan.table_kernels = vec![
-            kernel(0, "contribution", Some(0)),
-            kernel(1, "finalizer", None),
-        ];
+        plan.table_kernels = vec![kernel(0, "contribution", None)];
         let call =
             |table_kernel_id,
              invocation_rows,
@@ -3708,44 +3846,80 @@ extern "C" int native_direct_leaf_direct_application_v1(
                 owned_current_ids: vec![1],
                 dependency_current_ids,
                 dependency_current_components,
+                interaction_ids: vec![0],
                 selector_partition_ids: vec![0],
             };
         plan.table_calls = vec![call(
             0,
-            contribution_invocations,
-            contribution_attachments,
+            complete_current_invocations,
+            complete_current_attachments,
             vec![0],
             vec![0],
         )];
-        plan.finalizer_calls = vec![call(
-            1,
-            finalizer_invocations,
-            finalizer_attachments,
-            Vec::new(),
-            Vec::new(),
-        )];
-        plan.execution_order = vec![
-            CompiledStageExecutionUnitManifest {
-                kind: "table-call".to_string(),
-                index: 0,
-                original_chunk_index: 0,
-            },
-            CompiledStageExecutionUnitManifest {
-                kind: "finalizer-call".to_string(),
-                index: 0,
-                original_chunk_index: 0,
-            },
-        ];
+        plan.finalizer_calls.clear();
+        plan.execution_order = vec![CompiledStageExecutionUnitManifest {
+            kind: "table-call".to_string(),
+            index: 0,
+            original_chunk_index: 0,
+        }];
         plan.diagnostics = CompiledStagePlanDiagnosticsManifest {
             island_count: 1,
-            kernel_count: 2,
-            invocation_count: 2,
-            attachment_count: 2,
-            table_source_bytes: source_payload.size_bytes * 2,
-            descriptor_bytes: descriptor_payload.size_bytes * 2,
-            semantic_row_bytes: 64,
-            scratch_current_component_count: 1,
+            kernel_count: 1,
+            invocation_count: 1,
+            attachment_count: 1,
+            table_source_bytes: source_payload.size_bytes,
+            descriptor_bytes: descriptor_payload.size_bytes,
+            semantic_row_bytes: 32,
+            scratch_current_component_count: 0,
         };
+        let row_bytes = |fields: &[u32]| {
+            fields
+                .iter()
+                .flat_map(|field| field.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let invocation_bytes = row_bytes(&[0, 1, 0, 1]);
+        let attachment_bytes = row_bytes(&[2, 3, 0, 0]);
+        validate_complete_current_table_rows(
+            &plan.table_kernels[0],
+            &plan.table_calls[0],
+            &plan.plane_catalog,
+            &invocation_bytes,
+            &attachment_bytes,
+        )
+        .unwrap();
+        for (bad_invocations, bad_attachments, expected) in [
+            (
+                row_bytes(&[2, 3, 0, 1]),
+                attachment_bytes.clone(),
+                "declared dependencies",
+            ),
+            (
+                invocation_bytes.clone(),
+                row_bytes(&[0, 1, 0, 0]),
+                "declared owner",
+            ),
+            (
+                invocation_bytes.clone(),
+                row_bytes(&[2, 3, 1, 0]),
+                "identity overwrite",
+            ),
+            (
+                invocation_bytes.clone(),
+                row_bytes(&[2, 3, 0, 1]),
+                "identity overwrite",
+            ),
+        ] {
+            let error = validate_complete_current_table_rows(
+                &plan.table_kernels[0],
+                &plan.table_calls[0],
+                &plan.plane_catalog,
+                &bad_invocations,
+                &bad_attachments,
+            )
+            .expect_err("malformed complete-current rows must fail closed");
+            assert!(error.to_string().contains(expected));
+        }
 
         let amplitude = stage_manifest(
             "amplitude-stage",

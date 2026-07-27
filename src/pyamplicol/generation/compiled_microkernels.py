@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -47,8 +48,8 @@ from .eager_tables import (
 )
 from .stage_types import GenericCompiledStageBlueprint, GenericStageOutputSlot
 
-COMPILED_MICROKERNEL_MAX_IDENTITIES = 8
-COMPILED_MICROKERNEL_MAX_INPUTS = 16
+COMPILED_MICROKERNEL_MAX_IDENTITIES = 64
+COMPILED_MICROKERNEL_MAX_INPUTS = 64
 COMPILED_MICROKERNEL_MAX_OUTPUTS = 4
 COMPILED_MICROKERNEL_MAX_SOURCE_BYTES = 64 * 1024
 COMPILED_MICROKERNEL_MAX_TABLE_BYTES = 4 * 1024 * 1024
@@ -59,12 +60,10 @@ COMPILED_MICROKERNEL_MAX_PROJECTED_SOURCE_BASIS_POINTS = 2_500
 
 _U32 = struct.Struct("<I")
 _OVERWRITE = 0
-_ACCUMULATE = 1
 
 DescriptorBuilder = Callable[[bytes, int, int], bytes]
 PlaneStorage = Literal[
     "current",
-    "scratch-current",
     "momentum",
     "model-parameter",
     "zero",
@@ -87,6 +86,14 @@ def _canonical_json(value: object) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _complex_binary64_expression(value: complex) -> str:
+    """Return a deterministic exact-IR spelling of one finite binary64 pair."""
+
+    real = repr(float(value.real))
+    imag = repr(float(value.imag))
+    return f"({real})+sqrt(-1)*({imag})"
 
 
 def _checked_u32(value: int, context: str) -> int:
@@ -139,8 +146,6 @@ class _BinaryTable:
 @dataclass(frozen=True, slots=True)
 class _KernelSource:
     table_kernel_id: int
-    prepared_kernel_id: int | None
-    role: Literal["contribution", "finalizer"]
     canonical_signature: str
     source_application_path: str
     source_application_size_bytes: int
@@ -156,8 +161,8 @@ class _KernelSource:
     def to_dict(self) -> dict[str, object]:
         return {
             "table_kernel_id": self.table_kernel_id,
-            "prepared_kernel_id": self.prepared_kernel_id,
-            "role": self.role,
+            "prepared_kernel_id": None,
+            "role": "contribution",
             "canonical_signature": self.canonical_signature,
             "source_application": {
                 "path": self.source_application_path,
@@ -192,12 +197,10 @@ class CompiledMicrokernelStageLowering:
     residual_original_output_indices: tuple[int, ...]
     owned_current_ids: tuple[int, ...]
     table_calls: tuple[dict[str, object], ...]
-    finalizer_calls: tuple[dict[str, object], ...]
     execution_order: tuple[dict[str, object], ...]
     selector_partitions: tuple[dict[str, object], ...]
     plane_catalog: tuple[dict[str, object], ...]
     factor_catalog: tuple[dict[str, object], ...]
-    scratch_current_component_count: int
     semantic_row_bytes: int
 
     @property
@@ -229,12 +232,12 @@ class _PlaneCatalog:
         component = _checked_u32(component, "plane component")
         if current_id is not None:
             current_id = _checked_u32(current_id, "plane current id")
-        owns_current = storage in {"current", "scratch-current"}
+        owns_current = storage == "current"
         if owns_current != (current_id is not None):
             raise ValueError(
                 f"compiled {storage} plane current ownership is inconsistent"
             )
-        if proven_real and storage in {"current", "scratch-current", "amplitude"}:
+        if proven_real and storage in {"current", "amplitude"}:
             raise ValueError(
                 f"compiled complex {storage} plane cannot be marked proven real"
             )
@@ -363,6 +366,26 @@ class _EligibleCurrent:
     color_selector_domain_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _CompositeFactor:
+    base: complex
+    model_parameter_index: int | None
+    parameter_component: Literal["none", "real", "imag"]
+
+
+@dataclass(frozen=True, slots=True)
+class _CompositeCurrentRecord:
+    current_id: int
+    kernel_signature: str
+    input_planes: tuple[int, ...]
+    output_planes: tuple[int, ...]
+    original_chunk_index: int
+    helicity_selector_domain_ids: tuple[int, ...]
+    color_selector_domain_ids: tuple[int, ...]
+    dependency_current_ids: tuple[int, ...]
+    interaction_ids: tuple[int, ...]
+
+
 class CompiledMicrokernelSession:
     """State shared while streaming every stage of one compiled execution lane."""
 
@@ -422,8 +445,7 @@ class CompiledMicrokernelSession:
             )
         }
         self._model_parameters_by_name = {
-            str(record["name"]): record
-            for record in self._model_parameters.values()
+            str(record["name"]): record for record in self._model_parameters.values()
         }
         logical_model_parameters: dict[
             str,
@@ -433,9 +455,9 @@ class CompiledMicrokernelSession:
             runtime_name = record.get("runtime_name")
             component = record.get("complex_component")
             if isinstance(runtime_name, str) and component in {"real", "imag"}:
-                logical_model_parameters.setdefault(runtime_name, {})[
-                    component
-                ] = record
+                logical_model_parameters.setdefault(runtime_name, {})[component] = (
+                    record
+                )
         self._logical_model_parameters = logical_model_parameters
         self._stage_tables = {
             stage.stage_index: stage for stage in self.eager_tables.stages
@@ -444,7 +466,8 @@ class CompiledMicrokernelSession:
         self._vertex_bindings = {
             binding.key: binding for binding in self.catalog.vertex_bindings
         }
-        self._table_kernel_ids: dict[tuple[str, int], int] = {}
+        self._table_kernel_ids: dict[str, int] = {}
+        self._composite_specs: dict[str, PreparedKernelSpec] = {}
         self._kernel_sources: dict[int, _KernelSource] = {}
         self._total_source_bytes = 0
         self._total_semantic_row_bytes = 0
@@ -472,39 +495,11 @@ class CompiledMicrokernelSession:
         eligible = self._eligible_currents(stage, eager_stage, original_ranges)
         if not eligible:
             return self._residual_only(stage, original_ranges)
-        owned = {item.current_id for item in eligible}
-        residual, residual_chunks, original_outputs = _residual_stage(
-            stage,
-            dag=self.dag,
-            owned_current_ids=owned,
-            original_chunk_ranges=original_ranges,
-        )
         plane_catalog = _PlaneCatalog()
         factors = _FactorCatalog()
-        scratch_bases: dict[int, int] = {}
-        scratch_cursor = 0
-        for item in eligible:
-            scratch_bases[item.current_id] = scratch_cursor
-            scratch_cursor += item.dimension
-
         interaction_groups = _stage_interaction_groups(self.dag, stage)
         if len(interaction_groups) != len(eager_stage.invocations):
             raise ValueError("prepared invocation witness changed group cardinality")
-        eligible_by_id = {item.current_id: item for item in eligible}
-        contribution_records: list[
-            tuple[
-                int,
-                tuple[int, ...],
-                tuple[int, ...],
-                tuple[int, ...],
-                tuple[int, ...],
-                int,
-                tuple[int, ...],
-            ]
-        ] = []
-        contribution_position: dict[int, int] = defaultdict(int)
-        dependencies_by_record: list[tuple[int, ...]] = []
-        interaction_ids_by_record: list[tuple[int, ...]] = []
         invocation_witnesses: dict[int, tuple[object, object]] = {}
         for invocation, interactions in zip(
             eager_stage.invocations,
@@ -525,101 +520,66 @@ class CompiledMicrokernelSession:
                     raise ValueError("prepared invocation witnesses overlap")
                 invocation_witnesses[interaction.id] = (invocation, attachment)
 
-        # Walk the compiler's original interaction sequence rather than the
-        # evaluation-group insertion order.  This retains every destination's
-        # floating-point contribution order even when a shared group first
-        # appears under another destination.
+        interactions_by_current: dict[int, list[InteractionNode]] = defaultdict(list)
         for interaction_id in stage.interaction_ids:
             interaction = self.dag.interactions[interaction_id]
-            if interaction.result_id not in owned:
-                continue
-            try:
-                invocation, attachment = invocation_witnesses[interaction_id]
-            except KeyError as error:
+            interactions_by_current[interaction.result_id].append(interaction)
+        finalizations = {int(row.current_id): row for row in eager_stage.finalizations}
+        records: list[_CompositeCurrentRecord] = []
+        for item in eligible:
+            interactions = tuple(interactions_by_current[item.current_id])
+            if len(interactions) != len(item.vertex_kernel_ids):
                 raise ValueError(
-                    f"interaction {interaction_id} lacks a prepared invocation witness"
-                ) from error
-            current_id = int(attachment.result_current_id)  # type: ignore[attr-defined]
-            if current_id != interaction.result_id:
-                raise ValueError("prepared attachment changed its result current")
-            current = eligible_by_id[current_id]
-            spec = self._specs[int(invocation.kernel_id)]  # type: ignore[attr-defined]
-            input_planes = self._contribution_input_planes(
-                spec,
-                invocation,
-                plane_catalog,
-            )
-            destination = tuple(
-                plane
-                for component in range(spec.output_dimension)
-                for plane in plane_catalog.complex_pair(
-                    "scratch-current",
-                    scratch_bases[current_id] + component,
-                    current_id=current_id,
+                    "compiled complete-current interaction witness changed"
                 )
+            witnesses: list[tuple[object, object]] = []
+            for interaction in interactions:
+                try:
+                    witness = invocation_witnesses[interaction.id]
+                except KeyError as error:
+                    raise ValueError(
+                        f"interaction {interaction.id} lacks a prepared "
+                        "invocation witness"
+                    ) from error
+                invocation, attachment = witness
+                if (
+                    int(attachment.result_current_id)  # type: ignore[attr-defined]
+                    != item.current_id
+                ):
+                    raise ValueError("prepared attachment changed its result current")
+                witnesses.append((invocation, attachment))
+            record = self._composite_current_record(
+                item,
+                interactions,
+                tuple(witnesses),
+                finalizations[item.current_id],
+                planes=plane_catalog,
             )
-            factor_id = self._factor_for_attachment(
-                complex(
-                    float(attachment.factor_real),  # type: ignore[attr-defined]
-                    float(attachment.factor_imag),  # type: ignore[attr-defined]
-                ),
-                invocation,
-                factors,
-            )
-            operation = (
-                _OVERWRITE
-                if contribution_position[current_id] == 0
-                else _ACCUMULATE
-            )
-            contribution_position[current_id] += 1
-            dependency_ids = tuple(
-                sorted((interaction.left_id, interaction.right_id))
-            )
-            contribution_records.append(
-                (
-                    int(invocation.kernel_id),  # type: ignore[attr-defined]
-                    tuple(input_planes),
-                    (*destination, factor_id, operation),
-                    current.helicity_selector_domain_ids,
-                    current.color_selector_domain_ids,
-                    current.original_chunk_index,
-                    dependency_ids,
-                )
-            )
-            dependencies_by_record.append(dependency_ids)
-            interaction_ids_by_record.append((interaction.id,))
-
-        expected_contributions = {
-            current_id: len(
-                [
-                    interaction
-                    for interaction in self.dag.interactions
-                    if interaction.id in stage.interaction_ids
-                    and interaction.result_id == current_id
-                ]
-            )
-            for current_id in owned
-        }
-        if dict(contribution_position) != expected_contributions:
-            raise ValueError(
-                "compiled table ownership does not cover every current contribution"
-            )
-
-        table_calls, table_row_bytes = self._write_contribution_groups(
+            if record is not None:
+                records.append(record)
+        if not records:
+            return self._residual_only(stage, original_ranges)
+        new_signatures = {record.kernel_signature for record in records}
+        if (
+            len(set(self._table_kernel_ids) | new_signatures)
+            > COMPILED_MICROKERNEL_MAX_IDENTITIES
+        ):
+            return self._residual_only(stage, original_ranges)
+        self._reserve_kernel_signatures(new_signatures)
+        owned = {record.current_id for record in records}
+        residual, residual_chunks, original_outputs = _residual_stage(
             stage,
-            contribution_records,
-            dependencies_by_record=dependencies_by_record,
-            interaction_ids_by_record=interaction_ids_by_record,
+            dag=self.dag,
+            owned_current_ids=owned,
+            original_chunk_ranges=original_ranges,
         )
-        finalizers, finalizer_row_bytes = self._write_finalizer_groups(
+        identity_factor = factors.intern(1 + 0j)
+        table_calls, table_row_bytes = self._write_composite_groups(
             stage,
-            eager_stage,
-            eligible,
-            scratch_bases=scratch_bases,
-            planes=plane_catalog,
-            factors=factors,
+            records,
+            identity_factor_id=identity_factor,
         )
-        semantic_row_bytes = table_row_bytes + finalizer_row_bytes
+        semantic_row_bytes = table_row_bytes
         if (
             self._total_semantic_row_bytes + semantic_row_bytes
             > COMPILED_MICROKERNEL_MAX_TABLE_BYTES
@@ -637,9 +597,6 @@ class CompiledMicrokernelSession:
         table_by_chunk: dict[int, list[int]] = defaultdict(list)
         for index, call in enumerate(table_calls):
             table_by_chunk[int(call["original_chunk_index"])].append(index)
-        finalizer_by_chunk: dict[int, list[int]] = defaultdict(list)
-        for index, call in enumerate(finalizers):
-            finalizer_by_chunk[int(call["original_chunk_index"])].append(index)
         for original_chunk_index in range(len(original_ranges)):
             residual_index = residual_index_by_chunk.get(original_chunk_index)
             if residual_index is not None:
@@ -658,14 +615,6 @@ class CompiledMicrokernelSession:
                 }
                 for index in table_by_chunk.get(original_chunk_index, ())
             )
-            execution_order.extend(
-                {
-                    "kind": "finalizer-call",
-                    "index": index,
-                    "original_chunk_index": original_chunk_index,
-                }
-                for index in finalizer_by_chunk.get(original_chunk_index, ())
-            )
         selector_partitions = _selector_partitions(
             stage,
             original_ranges,
@@ -679,12 +628,10 @@ class CompiledMicrokernelSession:
             residual_original_output_indices=original_outputs,
             owned_current_ids=tuple(sorted(owned)),
             table_calls=table_calls,
-            finalizer_calls=finalizers,
             execution_order=tuple(execution_order),
             selector_partitions=selector_partitions,
             plane_catalog=tuple(plane_catalog.entries),
             factor_catalog=tuple(factors.entries),
-            scratch_current_component_count=scratch_cursor,
             semantic_row_bytes=semantic_row_bytes,
         )
 
@@ -699,10 +646,7 @@ class CompiledMicrokernelSession:
         """Finish the authenticated plan after residual evaluator compilation."""
 
         global_kernel_ids = sorted(
-            {
-                int(call["table_kernel_id"])
-                for call in (*lowering.table_calls, *lowering.finalizer_calls)
-            }
+            {int(call["table_kernel_id"]) for call in lowering.table_calls}
         )
         local_kernel_ids = {
             global_kernel_id: local_kernel_id
@@ -773,13 +717,11 @@ class CompiledMicrokernelSession:
                 "dependency_current_components": (
                     call["dependency_current_components"]
                 ),
+                "interaction_ids": call["interaction_ids"],
                 "selector_partition_ids": [partition_id],
             }
 
         table_calls = [published_call(call) for call in lowering.table_calls]
-        finalizer_calls = [
-            published_call(call) for call in lowering.finalizer_calls
-        ]
         table_source_bytes = sum(
             kernel.source_application_size_bytes for kernel in kernels
         )
@@ -821,11 +763,11 @@ class CompiledMicrokernelSession:
             )
         invocation_count = sum(
             int(_mapping(call["invocation_rows"], "invocation_rows")["count"])
-            for call in (*table_calls, *finalizer_calls)
+            for call in table_calls
         )
         attachment_count = sum(
             int(_mapping(call["attachment_rows"], "attachment_rows")["count"])
-            for call in (*table_calls, *finalizer_calls)
+            for call in table_calls
         )
         return {
             "schema_version": 2,
@@ -840,14 +782,12 @@ class CompiledMicrokernelSession:
             "input_bindings": _residual_input_bindings(lowering.residual_stage),
             "output_bindings": outputs,
             "residual_leaves": residual_records,
-            "scratch_current_component_count": (
-                lowering.scratch_current_component_count
-            ),
+            "scratch_current_component_count": 0,
             "plane_catalog": list(lowering.plane_catalog),
             "factor_catalog": list(lowering.factor_catalog),
             "table_kernels": [kernel.to_dict() for kernel in kernels],
             "table_calls": table_calls,
-            "finalizer_calls": finalizer_calls,
+            "finalizer_calls": [],
             "execution_order": list(lowering.execution_order),
             "selector_partitions": list(lowering.selector_partitions),
             "diagnostics": {
@@ -858,9 +798,7 @@ class CompiledMicrokernelSession:
                 "table_source_bytes": table_source_bytes,
                 "descriptor_bytes": descriptor_bytes,
                 "semantic_row_bytes": lowering.semantic_row_bytes,
-                "scratch_current_component_count": (
-                    lowering.scratch_current_component_count
-                ),
+                "scratch_current_component_count": 0,
             },
         }
 
@@ -877,7 +815,6 @@ class CompiledMicrokernelSession:
             residual_original_output_indices=tuple(range(stage.output_length)),
             owned_current_ids=(),
             table_calls=(),
-            finalizer_calls=(),
             execution_order=tuple(
                 {
                     "kind": "residual-leaf",
@@ -900,7 +837,6 @@ class CompiledMicrokernelSession:
             ),
             plane_catalog=(),
             factor_catalog=(),
-            scratch_current_component_count=0,
             semantic_row_bytes=0,
         )
 
@@ -920,7 +856,6 @@ class CompiledMicrokernelSession:
             slots_by_current[slot.current_id].append(slot)
         finalizers = {row.current_id: row for row in eager_stage.finalizations}
         candidates: list[_EligibleCurrent] = []
-        active_kernel_keys = set(self._table_kernel_ids)
         for current_id in sorted(interactions_by_current):
             if current_id not in self._admitted_current_ids:
                 continue
@@ -928,12 +863,9 @@ class CompiledMicrokernelSession:
             interactions = interactions_by_current[current_id]
             slots = slots_by_current.get(current_id, ())
             finalization = finalizers.get(current_id)
-            if not slots or finalization is None or current.dimension not in {2, 4}:
+            if not slots or finalization is None or current.dimension != 2:
                 continue
-            chunk_ids = {
-                _slot_chunk_index(slot, ranges)
-                for slot in slots
-            }
+            chunk_ids = {_slot_chunk_index(slot, ranges) for slot in slots}
             if None in chunk_ids or len(chunk_ids) != 1:
                 continue
             signatures = {
@@ -954,7 +886,6 @@ class CompiledMicrokernelSession:
                     interaction,
                     spec,
                     binding,
-                    contribution_count=len(interactions),
                 ):
                     structural = False
                     break
@@ -975,28 +906,11 @@ class CompiledMicrokernelSession:
                     or spec.input_arity > COMPILED_MICROKERNEL_MAX_INPUTS
                     or spec.output_dimension > COMPILED_MICROKERNEL_MAX_OUTPUTS
                     or any(
-                        item.role
-                        not in {"current", "momentum", "model-parameter"}
+                        item.role not in {"current", "momentum", "model-parameter"}
                         for item in spec.inputs
                     )
                 ):
                     continue
-            required_keys = {
-                ("prepared", vertex_id) for vertex_id in set(vertex_ids)
-            }
-            if finalizer_id is not None:
-                required_keys.add(("prepared", finalizer_id))
-            if (
-                finalization.unpropagated_value_slot_id != MISSING_U32
-                or finalizer_id is None
-            ):
-                required_keys.add(("identity", current.dimension))
-            if (
-                len(active_kernel_keys | required_keys)
-                > COMPILED_MICROKERNEL_MAX_IDENTITIES
-            ):
-                continue
-            active_kernel_keys.update(required_keys)
             helicity_domains, color_domains = next(iter(signatures))
             candidates.append(
                 _EligibleCurrent(
@@ -1009,7 +923,6 @@ class CompiledMicrokernelSession:
                     color_selector_domain_ids=color_domains,
                 )
             )
-        self._reserve_kernel_keys(active_kernel_keys)
         return tuple(candidates)
 
     def _profitability_preflight(
@@ -1023,7 +936,8 @@ class CompiledMicrokernelSession:
         for interaction in self.dag.interactions:
             binding = self._vertex_binding(interaction)
             binding_by_interaction[interaction.id] = binding
-            active_occurrences[int(binding.kernel_id)] += 1  # type: ignore[attr-defined]
+            if self.dag.currents[interaction.result_id].dimension == 2:
+                active_occurrences[int(binding.kernel_id)] += 1  # type: ignore[attr-defined]
             interactions_by_current[interaction.result_id].append(interaction)
         repeated_kernel_ids = {
             kernel_id for kernel_id, count in active_occurrences.items() if count > 1
@@ -1039,12 +953,12 @@ class CompiledMicrokernelSession:
 
         candidates: dict[
             int,
-            tuple[tuple[int, ...], tuple[tuple[str, int], ...]],
+            tuple[tuple[int, ...], tuple[int, ...]],
         ] = {}
         for current_id, interactions in sorted(interactions_by_current.items()):
             current = self.dag.currents[current_id]
             finalizer = finalizers.get(current_id)
-            if finalizer is None or current.dimension not in {2, 4}:
+            if finalizer is None or current.dimension != 2:
                 continue
             vertex_ids: list[int] = []
             if any(
@@ -1056,7 +970,6 @@ class CompiledMicrokernelSession:
                         )
                     ],
                     binding_by_interaction[interaction.id],
-                    contribution_count=len(interactions),
                 )
                 for interaction in interactions
             ):
@@ -1065,15 +978,12 @@ class CompiledMicrokernelSession:
                 int(binding_by_interaction[item.id].kernel_id)  # type: ignore[attr-defined]
                 for item in interactions
             )
-            if (
-                len(set(vertex_ids)) != 1
-                or any(kernel_id not in repeated_kernel_ids for kernel_id in vertex_ids)
+            if len(set(vertex_ids)) != 1 or any(
+                kernel_id not in repeated_kernel_ids for kernel_id in vertex_ids
             ):
                 continue
             finalizer_id = (
-                None
-                if finalizer.kernel_id == MISSING_U32
-                else int(finalizer.kernel_id)
+                None if finalizer.kernel_id == MISSING_U32 else int(finalizer.kernel_id)
             )
             if finalizer_id is not None:
                 spec = self._specs.get(finalizer_id)
@@ -1084,49 +994,36 @@ class CompiledMicrokernelSession:
                     or spec.input_arity > COMPILED_MICROKERNEL_MAX_INPUTS
                     or spec.output_dimension > COMPILED_MICROKERNEL_MAX_OUTPUTS
                     or any(
-                        item.role
-                        not in {"current", "momentum", "model-parameter"}
+                        item.role not in {"current", "momentum", "model-parameter"}
                         for item in spec.inputs
                     )
                 ):
                     continue
-            finalizer_keys: list[tuple[str, int]] = []
-            if int(finalizer.unpropagated_value_slot_id) != MISSING_U32:
-                finalizer_keys.append(("identity", current.dimension))
-            if int(finalizer.propagated_value_slot_id) != MISSING_U32:
-                finalizer_keys.append(
-                    ("identity", current.dimension)
-                    if finalizer_id is None
-                    else ("prepared", finalizer_id)
-                )
-            if not finalizer_keys:
+            has_unpropagated = int(finalizer.unpropagated_value_slot_id) != MISSING_U32
+            has_propagated = int(finalizer.propagated_value_slot_id) != MISSING_U32
+            if not has_unpropagated and not has_propagated:
                 continue
             candidates[current_id] = (
                 tuple(vertex_ids),
-                tuple(finalizer_keys),
+                (() if finalizer_id is None or not has_propagated else (finalizer_id,)),
             )
 
-        # Every emitted source, including finalizers, must have at least two
-        # semantic uses in the admitted schedule. Remove orphaned identities
-        # to a fixed point rather than relying on a process-name allowlist.
+        # Retain the prepared-spec census as a source-size proxy. Complete
+        # currents compile as composite kernels later; identity finalizers no
+        # longer have an independently emitted source.
         changed = True
         while changed and candidates:
             changed = False
-            table_occurrences: Counter[tuple[str, int]] = Counter()
-            for vertex_ids, finalizer_keys in candidates.values():
-                table_occurrences.update(
-                    ("prepared", kernel_id) for kernel_id in vertex_ids
-                )
-                table_occurrences.update(finalizer_keys)
+            prepared_occurrences: Counter[int] = Counter()
+            for vertex_ids, finalizer_ids in candidates.values():
+                prepared_occurrences.update(vertex_ids)
+                prepared_occurrences.update(finalizer_ids)
             rejected = {
                 current_id
-                for current_id, (vertex_ids, finalizer_keys) in candidates.items()
+                for current_id, (vertex_ids, finalizer_ids) in candidates.items()
                 if any(
-                    table_occurrences[key] < 2
-                    for key in (
-                        *(("prepared", kernel_id) for kernel_id in vertex_ids),
-                        *finalizer_keys,
-                    )
+                    prepared_occurrences[kernel_id] < 2
+                    for kernel_id in (*vertex_ids, *finalizer_ids)
                 )
             }
             if rejected:
@@ -1157,44 +1054,35 @@ class CompiledMicrokernelSession:
             if replaced_source_bytes == 0
             else unique_source_bytes * 10_000 // replaced_source_bytes
         )
-        all_kernel_keys = {
-            ("prepared", kernel_id)
-            for vertex_ids, _ in candidates.values()
-            for kernel_id in vertex_ids
-        } | {
-            key
-            for _, finalizer_keys in candidates.values()
-            for key in finalizer_keys
+        prepared_kernel_ids = {
+            kernel_id
+            for vertex_ids, finalizer_ids in candidates.values()
+            for kernel_id in (*vertex_ids, *finalizer_ids)
         }
-        hard_bounds_pass = (
-            len(all_kernel_keys) <= COMPILED_MICROKERNEL_MAX_IDENTITIES
-            and all(
-                self._kernel_spec(key).input_arity
-                <= COMPILED_MICROKERNEL_MAX_INPUTS
-                and self._kernel_spec(key).output_dimension
-                <= COMPILED_MICROKERNEL_MAX_OUTPUTS
-                for key in all_kernel_keys
-            )
+        hard_bounds_pass = len(
+            prepared_kernel_ids
+        ) <= COMPILED_MICROKERNEL_MAX_IDENTITIES and all(
+            self._specs[kernel_id].input_arity <= COMPILED_MICROKERNEL_MAX_INPUTS
+            and self._specs[kernel_id].output_dimension
+            <= COMPILED_MICROKERNEL_MAX_OUTPUTS
+            for kernel_id in prepared_kernel_ids
         )
         admitted = (
             numerator >= COMPILED_MICROKERNEL_MIN_ELIGIBLE_OCCURRENCES
-            and coverage_basis_points
-            >= COMPILED_MICROKERNEL_MIN_COVERAGE_BASIS_POINTS
+            and coverage_basis_points >= COMPILED_MICROKERNEL_MIN_COVERAGE_BASIS_POINTS
             and projected_source_basis_points
             <= COMPILED_MICROKERNEL_MAX_PROJECTED_SOURCE_BASIS_POINTS
             and hard_bounds_pass
         )
         diagnostics = {
-            "contract": (
-                "materialized-active-repeated-prepared-kernel-occurrences-v1"
-            ),
+            "contract": ("materialized-active-repeated-prepared-kernel-occurrences-v1"),
             "active_occurrence_count": denominator,
             "eligible_occurrence_count": numerator,
             "coverage_basis_points": coverage_basis_points,
             "unique_projected_source_bytes": unique_source_bytes,
             "replaced_projected_source_bytes": replaced_source_bytes,
             "projected_source_basis_points": projected_source_basis_points,
-            "kernel_identity_count": len(all_kernel_keys),
+            "kernel_identity_count": len(prepared_kernel_ids),
             "admitted_current_count": len(candidates) if admitted else 0,
             "admitted": admitted,
         }
@@ -1208,8 +1096,6 @@ class CompiledMicrokernelSession:
         interaction: InteractionNode,
         spec: PreparedKernelSpec,
         binding: object,
-        *,
-        contribution_count: int,
     ) -> bool:
         if (
             spec.contract_kind != "vertex"
@@ -1229,21 +1115,10 @@ class CompiledMicrokernelSession:
         ):
             return False
         result_state = binding.result_state  # type: ignore[attr-defined]
-        left_state = binding.left_state  # type: ignore[attr-defined]
-        right_state = binding.right_state  # type: ignore[attr-defined]
         result = self.dag.currents[interaction.result_id]
         if result_state.dimension != result.dimension:
             return False
-        if result.dimension == 2:
-            return result_state.basis == "weyl-chiral"
-        return (
-            result.dimension == 4
-            and contribution_count == 1
-            and result_state.basis == "lorentz-vector"
-            and left_state.basis == "lorentz-vector"
-            and right_state.basis == "lorentz-vector"
-            and any("three-vector-current" in proof for proof in spec.proof_classes)
-        )
+        return result.dimension == 2 and result_state.basis == "weyl-chiral"
 
     def _vertex_binding(self, interaction: InteractionNode) -> object:
         left = self.dag.currents[interaction.left_id]
@@ -1265,13 +1140,13 @@ class CompiledMicrokernelSession:
                 f"{interaction.id}"
             ) from error
 
-    def _reserve_kernel_keys(self, keys: set[tuple[str, int]]) -> None:
-        for key in sorted(keys):
-            if key in self._table_kernel_ids:
+    def _reserve_kernel_signatures(self, signatures: set[str]) -> None:
+        for signature in sorted(signatures):
+            if signature in self._table_kernel_ids:
                 continue
             if len(self._table_kernel_ids) >= COMPILED_MICROKERNEL_MAX_IDENTITIES:
                 raise ValueError("compiled microkernel identity bound exceeded")
-            self._table_kernel_ids[key] = len(self._table_kernel_ids)
+            self._table_kernel_ids[signature] = len(self._table_kernel_ids)
 
     def _contribution_input_planes(
         self,
@@ -1279,70 +1154,30 @@ class CompiledMicrokernelSession:
         invocation: object,
         planes: _PlaneCatalog,
     ) -> tuple[int, ...]:
-        slots = (
+        current_slots = (
             int(invocation.left_value_slot_id),  # type: ignore[attr-defined]
             int(invocation.right_value_slot_id),  # type: ignore[attr-defined]
         )
-        momenta = (
+        momentum_slots = (
             int(invocation.left_momentum_slot_id),  # type: ignore[attr-defined]
             int(invocation.right_momentum_slot_id),  # type: ignore[attr-defined]
         )
-        return self._input_planes(
-            spec,
-            planes,
-            current_slot_ids=slots,
-            momentum_slot_ids=momenta,
-            scratch_base=None,
-            scratch_current_id=None,
-        )
-
-    def _input_planes(
-        self,
-        spec: PreparedKernelSpec,
-        planes: _PlaneCatalog,
-        *,
-        current_slot_ids: tuple[int, int] | None,
-        momentum_slot_ids: tuple[int, int] | tuple[int] | None,
-        scratch_base: int | None,
-        scratch_current_id: int | None,
-    ) -> tuple[int, ...]:
         result: list[int] = []
         for item in spec.inputs:
             role = item.role
             component = item.component
             pair: tuple[int, int]
             if role in {"left-current", "right-current"}:
-                if current_slot_ids is None:
-                    raise ValueError("vertex kernel has no current-slot bindings")
                 operand = 1 if role == "right-current" else 0
-                slot = self._value_slots[current_slot_ids[operand]]
+                slot = self._value_slots[current_slots[operand]]
                 pair = planes.complex_pair(
                     "current",
                     int(slot["component_start"]) + component,
                     current_id=int(slot["current_id"]),
                 )
-            elif role == "current":
-                if scratch_base is None or scratch_current_id is None:
-                    raise ValueError("finalizer kernel has no scratch binding")
-                pair = planes.complex_pair(
-                    "scratch-current",
-                    scratch_base + component,
-                    current_id=scratch_current_id,
-                )
             elif role in {"left-momentum", "right-momentum"}:
-                if momentum_slot_ids is None or len(momentum_slot_ids) != 2:
-                    raise ValueError("vertex kernel has no momentum-slot bindings")
                 operand = 1 if role == "right-momentum" else 0
-                slot = self._momentum_slots[momentum_slot_ids[operand]]
-                pair = planes.complex_pair(
-                    "momentum",
-                    int(slot["component_start"]) + component,
-                    real_valued=True,
-                )
-            elif role == "momentum":
-                if momentum_slot_ids is None or len(momentum_slot_ids) != 1:
-                    raise ValueError("finalizer kernel has no momentum-slot binding")
-                slot = self._momentum_slots[momentum_slot_ids[0]]
+                slot = self._momentum_slots[momentum_slots[operand]]
                 pair = planes.complex_pair(
                     "momentum",
                     int(slot["component_start"]) + component,
@@ -1354,7 +1189,7 @@ class CompiledMicrokernelSession:
                 )
             else:
                 raise ValueError(
-                    f"prepared kernel input role {role!r} is not a plane input"
+                    f"prepared contribution input role {role!r} is not supported"
                 )
             result.extend(pair)
         return tuple(result)
@@ -1392,16 +1227,12 @@ class CompiledMicrokernelSession:
             return {
                 "real_parameter_index": int(real_record["parameter_index"]),
                 "imag_parameter_index": (
-                    None
-                    if domain == "real"
-                    else int(imag_record["parameter_index"])
+                    None if domain == "real" else int(imag_record["parameter_index"])
                 ),
             }
         record = self._model_parameters_by_name.get(name)
         if record is None:
-            raise ValueError(
-                f"prepared model parameter {name!r} is not runtime-bound"
-            )
+            raise ValueError(f"prepared model parameter {name!r} is not runtime-bound")
         if (
             record.get("runtime_name") is not None
             or record.get("complex_component") is not None
@@ -1438,15 +1269,14 @@ class CompiledMicrokernelSession:
             )
         )
 
-    def _factor_for_attachment(
+    def _attachment_factor_projection(
         self,
         attachment_factor: complex,
         invocation: object,
-        factors: _FactorCatalog,
-    ) -> int:
+    ) -> _CompositeFactor:
         source = int(invocation.output_factor_source)  # type: ignore[attr-defined]
         if source == EAGER_OUTPUT_FACTOR_NONE:
-            return factors.intern(attachment_factor)
+            return _CompositeFactor(attachment_factor, None, "none")
         coupling = self.eager_tables.couplings[
             int(invocation.coupling_slot_id)  # type: ignore[attr-defined]
         ]
@@ -1461,7 +1291,11 @@ class CompiledMicrokernelSession:
         else:
             raise ValueError("prepared invocation has an unsupported factor source")
         if parameter_id == MISSING_U32:
-            return factors.intern(attachment_factor * constant)
+            return _CompositeFactor(
+                attachment_factor * constant,
+                None,
+                "none",
+            )
         record = self._model_parameters.get(parameter_id)
         if record is None:
             raise ValueError("prepared coupling factor is not runtime-bound")
@@ -1479,76 +1313,367 @@ class CompiledMicrokernelSession:
             raise ValueError(
                 "prepared coupling factor changed its runtime scalar projection"
             )
-        return factors.intern(
+        return _CompositeFactor(
             attachment_factor,
-            model_parameter_index=parameter_id,
-            parameter_component=component,
+            parameter_id,
+            component,
         )
 
-    def _write_contribution_groups(
+    def _composite_current_record(
+        self,
+        item: _EligibleCurrent,
+        interactions: Sequence[InteractionNode],
+        witnesses: Sequence[tuple[object, object]],
+        finalization: object,
+        *,
+        planes: _PlaneCatalog,
+    ) -> _CompositeCurrentRecord | None:
+        """Build one complete-current source and its one semantic table row."""
+
+        from symbolica import Expression
+
+        if item.dimension != 2:
+            raise ValueError(
+                "compiled complete-current islands require two-component currents"
+            )
+        if len(interactions) != len(witnesses) or not interactions:
+            raise ValueError("compiled complete-current witnesses are incomplete")
+        witness_kernel_ids = tuple(
+            int(invocation.kernel_id)  # type: ignore[attr-defined]
+            for invocation, _attachment in witnesses
+        )
+        if witness_kernel_ids != item.vertex_kernel_ids:
+            raise ValueError(
+                "compiled complete-current prepared-kernel witness changed"
+            )
+
+        composite_inputs: list[PreparedKernelInput] = []
+        input_planes: list[int] = []
+        ordered_sums: list[Any] = []
+        factor_contracts: list[dict[str, object]] = []
+        for contribution_index, (
+            (invocation, attachment),
+            _interaction,
+        ) in enumerate(zip(witnesses, interactions, strict=True)):
+            prepared_kernel_id = int(invocation.kernel_id)  # type: ignore[attr-defined]
+            spec = self._specs[prepared_kernel_id]
+            if spec.output_dimension != item.dimension:
+                raise ValueError("compiled contribution output dimension changed")
+            expressions = [Expression.parse(value) for value in spec.exact_expressions]
+            for input_index, prepared_input in enumerate(spec.inputs):
+                symbol = (
+                    "pyamplicol_compiled_microkernel::"
+                    f"contribution_{contribution_index}_input_{input_index}"
+                )
+                replacement = Expression.parse(symbol)
+                source = Expression.parse(prepared_input.symbol)
+                expressions = [
+                    expression.replace(source, replacement)
+                    for expression in expressions
+                ]
+                composite_inputs.append(replace(prepared_input, symbol=symbol))
+            input_planes.extend(
+                self._contribution_input_planes(spec, invocation, planes)
+            )
+
+            factor = self._attachment_factor_projection(
+                complex(
+                    float(attachment.factor_real),  # type: ignore[attr-defined]
+                    float(attachment.factor_imag),  # type: ignore[attr-defined]
+                ),
+                invocation,
+            )
+            if not (
+                math.isfinite(factor.base.real) and math.isfinite(factor.base.imag)
+            ):
+                raise ValueError("compiled contribution factor is not finite")
+            factor_expression = Expression.parse(
+                _complex_binary64_expression(factor.base)
+            )
+            if factor.model_parameter_index is not None:
+                factor_symbol = (
+                    "pyamplicol_compiled_microkernel::"
+                    f"contribution_{contribution_index}_factor"
+                )
+                factor_input = PreparedKernelInput(
+                    role=(
+                        "coupling-real"
+                        if factor.parameter_component == "real"
+                        else "coupling-imag"
+                    ),
+                    component=contribution_index,
+                    symbol=factor_symbol,
+                )
+                composite_inputs.append(factor_input)
+                factor_expression *= Expression.parse(factor_symbol)
+                input_planes.extend(
+                    planes.model_parameter_pair(
+                        real_parameter_index=factor.model_parameter_index,
+                        imag_parameter_index=None,
+                    )
+                )
+            factor_contracts.append(
+                {
+                    "base": [factor.base.real, factor.base.imag],
+                    "mutable": factor.model_parameter_index is not None,
+                    "parameter_component": factor.parameter_component,
+                }
+            )
+            scaled = [expression * factor_expression for expression in expressions]
+            if not ordered_sums:
+                ordered_sums = scaled
+            else:
+                ordered_sums = [
+                    accumulated + contribution
+                    for accumulated, contribution in zip(
+                        ordered_sums,
+                        scaled,
+                        strict=True,
+                    )
+                ]
+
+        finalizer_spec = (
+            None
+            if item.finalizer_kernel_id is None
+            else self._specs[item.finalizer_kernel_id]
+        )
+        propagated: list[Any] | None = None
+        if finalizer_spec is not None:
+            propagated = [
+                Expression.parse(value) for value in finalizer_spec.exact_expressions
+            ]
+            for input_index, prepared_input in enumerate(finalizer_spec.inputs):
+                source = Expression.parse(prepared_input.symbol)
+                if prepared_input.role == "current":
+                    try:
+                        replacement = ordered_sums[prepared_input.component]
+                    except IndexError as error:
+                        raise ValueError(
+                            "compiled finalizer current component is out of range"
+                        ) from error
+                else:
+                    symbol = (
+                        "pyamplicol_compiled_microkernel::"
+                        f"finalizer_input_{input_index}"
+                    )
+                    replacement = Expression.parse(symbol)
+                    composite_inputs.append(replace(prepared_input, symbol=symbol))
+                    input_planes.extend(
+                        self._embedded_propagator_input_planes(
+                            prepared_input,
+                            finalization,
+                            planes,
+                        )
+                    )
+                propagated = [
+                    expression.replace(source, replacement) for expression in propagated
+                ]
+
+        exact_outputs: list[Any] = []
+        output_layout: list[str] = []
+        output_planes: list[int] = []
+        unpropagated_slot_id = int(  # type: ignore[attr-defined]
+            finalization.unpropagated_value_slot_id
+        )
+        propagated_slot_id = int(  # type: ignore[attr-defined]
+            finalization.propagated_value_slot_id
+        )
+        if unpropagated_slot_id != MISSING_U32:
+            exact_outputs.extend(ordered_sums)
+            output_layout.extend(
+                f"unpropagated-current:{component}"
+                for component in range(item.dimension)
+            )
+            output_planes.extend(
+                self._current_output_planes(
+                    unpropagated_slot_id,
+                    item.current_id,
+                    item.dimension,
+                    planes,
+                )
+            )
+        if propagated_slot_id != MISSING_U32:
+            exact_outputs.extend(ordered_sums if propagated is None else propagated)
+            output_layout.extend(
+                f"propagated-current:{component}" for component in range(item.dimension)
+            )
+            output_planes.extend(
+                self._current_output_planes(
+                    propagated_slot_id,
+                    item.current_id,
+                    item.dimension,
+                    planes,
+                )
+            )
+        if not exact_outputs:
+            raise ValueError("compiled complete current has no final destination")
+        if (
+            len(composite_inputs) > COMPILED_MICROKERNEL_MAX_INPUTS
+            or len(exact_outputs) > COMPILED_MICROKERNEL_MAX_OUTPUTS
+        ):
+            return None
+
+        payload = {
+            "kind": "compiled-complete-current-direct-table-v1",
+            "dimension": item.dimension,
+            "ordered_vertex_signatures": [
+                self._specs[
+                    int(invocation.kernel_id)  # type: ignore[attr-defined]
+                ].canonical_signature
+                for invocation, _attachment in witnesses
+            ],
+            "ordered_factors": factor_contracts,
+            "finalizer_signature": (
+                None if finalizer_spec is None else finalizer_spec.canonical_signature
+            ),
+            "inputs": [value.to_dict() for value in composite_inputs],
+            "exact_expressions": [
+                str(value.to_canonical_string()) for value in exact_outputs
+            ],
+            "output_layout": output_layout,
+        }
+        signature = _sha256(_canonical_json(payload))
+        spec = PreparedKernelSpec(
+            kernel_id=0,
+            contract_kind="propagator",
+            canonical_signature=signature,
+            exact_expressions=tuple(
+                str(value.to_canonical_string()) for value in exact_outputs
+            ),
+            inputs=tuple(composite_inputs),
+            output_layout=tuple(output_layout),
+            proof_classes=("compiled-complete-current-ordered-contributions-v1",),
+        )
+        existing = self._composite_specs.get(signature)
+        if existing is not None and existing != spec:
+            raise ValueError("compiled complete-current signature collision")
+        self._composite_specs[signature] = spec
+        dependencies = tuple(
+            sorted(
+                {
+                    current_id
+                    for interaction in interactions
+                    for current_id in (interaction.left_id, interaction.right_id)
+                }
+            )
+        )
+        return _CompositeCurrentRecord(
+            current_id=item.current_id,
+            kernel_signature=signature,
+            input_planes=tuple(input_planes),
+            output_planes=tuple(output_planes),
+            original_chunk_index=item.original_chunk_index,
+            helicity_selector_domain_ids=item.helicity_selector_domain_ids,
+            color_selector_domain_ids=item.color_selector_domain_ids,
+            dependency_current_ids=dependencies,
+            interaction_ids=tuple(interaction.id for interaction in interactions),
+        )
+
+    def _embedded_propagator_input_planes(
+        self,
+        item: PreparedKernelInput,
+        finalization: object,
+        planes: _PlaneCatalog,
+    ) -> tuple[int, int]:
+        if item.role == "momentum":
+            slot = self._momentum_slots[
+                int(finalization.momentum_slot_id)  # type: ignore[attr-defined]
+            ]
+            return planes.complex_pair(
+                "momentum",
+                int(slot["component_start"]) + item.component,
+                real_valued=True,
+            )
+        if item.role == "model-parameter":
+            return planes.model_parameter_pair(
+                **self._runtime_model_parameter_projection(item)
+            )
+        raise ValueError(
+            f"compiled complete-current propagator input role "
+            f"{item.role!r} is not supported"
+        )
+
+    def _current_output_planes(
+        self,
+        value_slot_id: int,
+        current_id: int,
+        dimension: int,
+        planes: _PlaneCatalog,
+    ) -> tuple[int, ...]:
+        slot = self._value_slots[value_slot_id]
+        if (
+            int(slot["current_id"]) != current_id
+            or int(slot["component_stop"]) - int(slot["component_start"]) != dimension
+        ):
+            raise ValueError(
+                "compiled complete-current destination changed its current"
+            )
+        return tuple(
+            plane
+            for component in range(dimension)
+            for plane in planes.complex_pair(
+                "current",
+                int(slot["component_start"]) + component,
+                current_id=current_id,
+            )
+        )
+
+    def _write_composite_groups(
         self,
         stage: GenericCompiledStageBlueprint,
-        records: Sequence[
-            tuple[
-                int,
-                tuple[int, ...],
-                tuple[int, ...],
-                tuple[int, ...],
-                tuple[int, ...],
-                int,
-                tuple[int, ...],
-            ]
-        ],
+        records: Sequence[_CompositeCurrentRecord],
         *,
-        dependencies_by_record: Sequence[tuple[int, ...]],
-        interaction_ids_by_record: Sequence[tuple[int, ...]],
+        identity_factor_id: int,
     ) -> tuple[tuple[dict[str, object], ...], int]:
         grouped: dict[
-            tuple[int, tuple[int, ...], tuple[int, ...], int],
-            list[int],
+            tuple[str, tuple[int, ...], tuple[int, ...], int],
+            list[_CompositeCurrentRecord],
         ] = defaultdict(list)
-        for index, record in enumerate(records):
-            kernel_id, _inputs, _attachments, helicity, color, chunk, _deps = record
-            grouped[(kernel_id, helicity, color, chunk)].append(index)
+        for record in records:
+            grouped[
+                (
+                    record.kernel_signature,
+                    record.helicity_selector_domain_ids,
+                    record.color_selector_domain_ids,
+                    record.original_chunk_index,
+                )
+            ].append(record)
+
         calls: list[dict[str, object]] = []
         total_bytes = 0
-        for call_index, (key, indices) in enumerate(grouped.items()):
-            prepared_kernel_id, helicity, color, original_chunk_index = key
-            spec = self._specs[prepared_kernel_id]
-            table_kernel_id = self._table_kernel_id(
-                ("prepared", prepared_kernel_id),
-                role="contribution",
-            )
+        for call_index, (group_key, rows) in enumerate(grouped.items()):
+            kernel_signature, helicity, color, original_chunk_index = group_key
+            spec = self._composite_kernel_spec(kernel_signature)
+            table_kernel_id = self._table_kernel_id(kernel_signature)
             invocation_rows: list[tuple[int, ...]] = []
             attachment_rows: list[tuple[int, ...]] = []
+            current_ids: list[int] = []
             dependency_ids: set[int] = set()
             interaction_ids: list[int] = []
-            for index in indices:
-                _kernel, inputs, flat_attachments, *_rest = records[index]
-                output_width = 2 * spec.output_dimension + 2
-                if len(flat_attachments) % output_width:
-                    raise ValueError("compiled attachment row width changed")
+            for row in rows:
                 attachment_start = len(attachment_rows)
-                for start in range(0, len(flat_attachments), output_width):
-                    attachment_rows.append(
-                        tuple(flat_attachments[start : start + output_width])
-                    )
-                invocation_rows.append(
-                    (*inputs, attachment_start, len(flat_attachments) // output_width)
+                attachment_rows.append(
+                    (*row.output_planes, identity_factor_id, _OVERWRITE)
                 )
-                dependency_ids.update(dependencies_by_record[index])
-                interaction_ids.extend(interaction_ids_by_record[index])
+                invocation_rows.append((*row.input_planes, attachment_start, 1))
+                current_ids.append(row.current_id)
+                dependency_ids.update(row.dependency_current_ids)
+                interaction_ids.extend(row.interaction_ids)
+            if current_ids != sorted(set(current_ids)):
+                raise ValueError(
+                    "compiled complete-current rows are not ordered by unique owner"
+                )
             invocation_width = 2 * spec.input_arity + 2
             attachment_width = 2 * spec.output_dimension + 2
             invocation_payload = _pack_u32_rows(
                 invocation_rows,
                 width=invocation_width,
-                context="compiled table invocation",
+                context="compiled complete-current invocation",
             )
             attachment_payload = _pack_u32_rows(
                 attachment_rows,
                 width=attachment_width,
-                context="compiled table attachment",
+                context="compiled complete-current attachment",
             )
             prefix = (
                 f"compiled-microkernels/stage-{stage.stage_index}/"
@@ -1572,156 +1697,12 @@ class CompiledMicrokernelSession:
                     "original_chunk_index": original_chunk_index,
                     "invocation_rows": invocation_table.to_dict(),
                     "attachment_rows": attachment_table.to_dict(),
-                    "owned_current_ids": sorted(
-                        {
-                            self.dag.interactions[interaction_id].result_id
-                            for interaction_id in interaction_ids
-                        }
-                    ),
+                    "owned_current_ids": sorted(current_ids),
                     "dependency_current_ids": sorted(dependency_ids),
                     "dependency_current_components": (
                         self._current_components(dependency_ids)
                     ),
-                    "helicity_selector_domain_ids": list(helicity),
-                    "color_selector_domain_ids": list(color),
-                }
-            )
-            total_bytes += len(invocation_payload) + len(attachment_payload)
-        return tuple(calls), total_bytes
-
-    def _write_finalizer_groups(
-        self,
-        stage: GenericCompiledStageBlueprint,
-        eager_stage: EagerStageTables,
-        eligible: Sequence[_EligibleCurrent],
-        *,
-        scratch_bases: Mapping[int, int],
-        planes: _PlaneCatalog,
-        factors: _FactorCatalog,
-    ) -> tuple[tuple[dict[str, object], ...], int]:
-        eligible_by_id = {item.current_id: item for item in eligible}
-        grouped: dict[
-            tuple[tuple[str, int], tuple[int, ...], tuple[int, ...], int],
-            list[tuple[int, tuple[int, ...], tuple[int, ...], int]],
-        ] = defaultdict(list)
-        identity_factor = factors.intern(1 + 0j)
-        for row in eager_stage.finalizations:
-            item = eligible_by_id.get(int(row.current_id))
-            if item is None:
-                continue
-            destinations: list[tuple[int, bool]] = []
-            if int(row.unpropagated_value_slot_id) != MISSING_U32:
-                destinations.append((int(row.unpropagated_value_slot_id), True))
-            if int(row.propagated_value_slot_id) != MISSING_U32:
-                destinations.append((int(row.propagated_value_slot_id), False))
-            for value_slot_id, unpropagated in destinations:
-                use_identity = unpropagated or item.finalizer_kernel_id is None
-                key = (
-                    ("identity", item.dimension)
-                    if use_identity
-                    else ("prepared", int(item.finalizer_kernel_id))
-                )
-                spec = self._kernel_spec(key)
-                if use_identity:
-                    input_planes = tuple(
-                        plane
-                        for component in range(item.dimension)
-                        for plane in planes.complex_pair(
-                            "scratch-current",
-                            scratch_bases[item.current_id] + component,
-                            current_id=item.current_id,
-                        )
-                    )
-                else:
-                    input_planes = self._input_planes(
-                        spec,
-                        planes,
-                        current_slot_ids=None,
-                        momentum_slot_ids=(int(row.momentum_slot_id),),
-                        scratch_base=scratch_bases[item.current_id],
-                        scratch_current_id=item.current_id,
-                    )
-                slot = self._value_slots[value_slot_id]
-                output_planes = tuple(
-                    plane
-                    for component in range(item.dimension)
-                    for plane in planes.complex_pair(
-                        "current",
-                        int(slot["component_start"]) + component,
-                        current_id=int(slot["current_id"]),
-                    )
-                )
-                grouped[
-                    (
-                        key,
-                        item.helicity_selector_domain_ids,
-                        item.color_selector_domain_ids,
-                        item.original_chunk_index,
-                    )
-                ].append(
-                    (
-                        item.current_id,
-                        input_planes,
-                        output_planes,
-                        identity_factor,
-                    )
-                )
-        calls: list[dict[str, object]] = []
-        total_bytes = 0
-        for call_index, (group_key, rows) in enumerate(grouped.items()):
-            kernel_key, helicity, color, original_chunk_index = group_key
-            spec = self._kernel_spec(kernel_key)
-            table_kernel_id = self._table_kernel_id(
-                kernel_key,
-                role="finalizer",
-            )
-            invocation_rows: list[tuple[int, ...]] = []
-            attachment_rows: list[tuple[int, ...]] = []
-            current_ids: list[int] = []
-            for current_id, inputs, outputs, factor_id in rows:
-                attachment_start = len(attachment_rows)
-                attachment_rows.append((*outputs, factor_id, _OVERWRITE))
-                invocation_rows.append((*inputs, attachment_start, 1))
-                current_ids.append(current_id)
-            invocation_width = 2 * spec.input_arity + 2
-            attachment_width = 2 * spec.output_dimension + 2
-            invocation_payload = _pack_u32_rows(
-                invocation_rows,
-                width=invocation_width,
-                context="compiled finalizer invocation",
-            )
-            attachment_payload = _pack_u32_rows(
-                attachment_rows,
-                width=attachment_width,
-                context="compiled finalizer attachment",
-            )
-            prefix = (
-                f"compiled-microkernels/stage-{stage.stage_index}/"
-                f"finalizer-call-{call_index}"
-            )
-            invocation_table = self._write_table(
-                f"{prefix}-invocations.bin",
-                invocation_payload,
-                count=len(invocation_rows),
-                row_size=invocation_width * _U32.size,
-            )
-            attachment_table = self._write_table(
-                f"{prefix}-attachments.bin",
-                attachment_payload,
-                count=len(attachment_rows),
-                row_size=attachment_width * _U32.size,
-            )
-            calls.append(
-                {
-                    "table_kernel_id": table_kernel_id,
-                    "original_chunk_index": original_chunk_index,
-                    "invocation_rows": invocation_table.to_dict(),
-                    "attachment_rows": attachment_table.to_dict(),
-                    "owned_current_ids": sorted(current_ids),
-                    "dependency_current_ids": sorted(current_ids),
-                    "dependency_current_components": (
-                        self._current_components(current_ids)
-                    ),
+                    "interaction_ids": interaction_ids,
                     "helicity_selector_domain_ids": list(helicity),
                     "color_selector_domain_ids": list(color),
                 }
@@ -1741,38 +1722,38 @@ class CompiledMicrokernelSession:
 
     def _table_kernel_id(
         self,
-        key: tuple[str, int],
-        *,
-        role: Literal["contribution", "finalizer"],
+        signature: str,
     ) -> int:
         try:
-            table_kernel_id = self._table_kernel_ids[key]
+            table_kernel_id = self._table_kernel_ids[signature]
         except KeyError as error:
-            raise ValueError(f"unreserved compiled table kernel {key!r}") from error
+            raise ValueError(
+                f"unreserved compiled table kernel {signature!r}"
+            ) from error
         if table_kernel_id not in self._kernel_sources:
             self._kernel_sources[table_kernel_id] = self._compile_kernel_source(
                 table_kernel_id,
-                key,
-                role=role,
+                signature,
             )
-        elif self._kernel_sources[table_kernel_id].role != role:
-            raise ValueError("compiled table kernel role changed")
         return table_kernel_id
 
-    def _kernel_spec(self, key: tuple[str, int]) -> PreparedKernelSpec:
-        kind, identity = key
-        if kind == "prepared":
-            return self._specs[identity]
-        if kind != "identity":
-            raise ValueError(f"unsupported compiled table kernel key {key!r}")
-        return _identity_kernel_spec(identity)
+    def _composite_kernel_spec(
+        self,
+        signature: str,
+    ) -> PreparedKernelSpec:
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("compiled table source must be a composite current")
+        try:
+            return self._composite_specs[signature]
+        except KeyError as error:
+            raise ValueError(
+                "composite table kernel source is not registered"
+            ) from error
 
     def _compile_kernel_source(
         self,
         table_kernel_id: int,
-        key: tuple[str, int],
-        *,
-        role: Literal["contribution", "finalizer"],
+        signature: str,
     ) -> _KernelSource:
         from symbolica import Expression
 
@@ -1781,7 +1762,7 @@ class CompiledMicrokernelSession:
             _symbolica_evaluator_artifact_manifest,
         )
 
-        spec = self._kernel_spec(key)
+        spec = self._composite_kernel_spec(signature)
         outputs = tuple(Expression.parse(value) for value in spec.exact_expressions)
         parameters = [Expression.parse(item.symbol) for item in spec.inputs]
         real_parameters = self._real_kernel_parameter_indices(spec)
@@ -1825,9 +1806,7 @@ class CompiledMicrokernelSession:
         raw_source_path = self.artifact_dir / raw_path
         source = raw_source_path.read_bytes()
         if not source:
-            raise ValueError(
-                f"compiled table kernel {table_kernel_id} source is empty"
-            )
+            raise ValueError(f"compiled table kernel {table_kernel_id} source is empty")
         if (
             self._total_source_bytes + len(source)
             > COMPILED_MICROKERNEL_MAX_SOURCE_BYTES
@@ -1865,11 +1844,8 @@ class CompiledMicrokernelSession:
         descriptor_path = self.artifact_dir / descriptor_relative
         descriptor_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor_path.write_bytes(descriptor)
-        prepared_kernel_id = key[1] if key[0] == "prepared" else None
         return _KernelSource(
             table_kernel_id=table_kernel_id,
-            prepared_kernel_id=prepared_kernel_id,
-            role=role,
             canonical_signature=spec.canonical_signature,
             source_application_path=source_relative,
             source_application_size_bytes=len(source),
@@ -2039,33 +2015,6 @@ def residual_only_stage_plan(
     }
 
 
-def _identity_kernel_spec(dimension: int) -> PreparedKernelSpec:
-    if dimension not in {2, 4}:
-        raise ValueError("compiled identity finalizer supports dimensions 2 and 4")
-    inputs = tuple(
-        PreparedKernelInput(
-            role="current",
-            component=component,
-            symbol=f"compiled_microkernel::identity_{dimension}::input_{component}",
-        )
-        for component in range(dimension)
-    )
-    payload = {
-        "kind": "compiled-microkernel-identity-finalizer-v1",
-        "dimension": dimension,
-        "inputs": [item.to_dict() for item in inputs],
-    }
-    return PreparedKernelSpec(
-        kernel_id=0,
-        contract_kind="propagator",
-        canonical_signature=_sha256(_canonical_json(payload)),
-        exact_expressions=tuple(item.symbol for item in inputs),
-        inputs=inputs,
-        output_layout=tuple(f"current:{index}" for index in range(dimension)),
-        proof_classes=("compiled-microkernel-identity-finalizer-v1",),
-    )
-
-
 def _projected_kernel_source_bytes(spec: PreparedKernelSpec) -> int:
     """Deterministic pre-compile source-size proxy for profitability."""
 
@@ -2170,18 +2119,13 @@ def _residual_stage(
             if source_start >= source_stop:
                 continue
             if slot.current_id in owned_current_ids:
-                if (
-                    source_start != slot.output_start
-                    or source_stop != slot.output_stop
-                ):
+                if source_start != slot.output_start or source_stop != slot.output_stop:
                     raise ValueError(
                         "compiled table-owned output slot crosses an original chunk"
                     )
                 continue
             start = len(residual_outputs)
-            residual_outputs.extend(
-                stage.output_expressions[source_start:source_stop]
-            )
+            residual_outputs.extend(stage.output_expressions[source_start:source_stop])
             original_output_indices.extend(range(source_start, source_stop))
             component_offset = source_start - slot.output_start
             residual_slots.append(
@@ -2397,8 +2341,7 @@ def _selector_partitions(
             raise ValueError("compiled output chunk crosses selector partitions")
         signature = next(iter(signatures))
         if any(
-            int(item["original_chunk_index"]) == chunk_index
-            for item in execution_order
+            int(item["original_chunk_index"]) == chunk_index for item in execution_order
         ):
             units_by_signature[signature].append(chunk_index)
     return tuple(

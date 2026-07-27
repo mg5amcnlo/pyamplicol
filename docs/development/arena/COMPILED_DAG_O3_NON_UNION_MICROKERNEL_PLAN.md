@@ -8,9 +8,9 @@ least 10% at both batch 128 and batch 1024 without turning the compiled DAG
 into recurrence execution.
 
 The executable baseline starts from pyAmpliCol
-`f4606fa9be52355b4a66efcfa2b7072d489205eb`; implementation was integrated
-on the report/tooling-only descendant
-`59983a4635a28bf13c0e3fe58fcaf3aee348780f`. Its dependency contract is:
+`f4606fa9be52355b4a66efcfa2b7072d489205eb`; implementation is rebased onto
+the corrected-main descendant
+`2b359bc0f50f724ec45f5ca4e71c458b3ce4f03e`. Its dependency contract is:
 
 - SymJIT repository:
   `https://github.com/ValentinHirschi/symjit_changes_for_pyamplicol.git`;
@@ -21,15 +21,18 @@ on the report/tooling-only descendant
 - source-tree SHA-256:
   `e42d648d995c61881e560aefc50f80a995e86fb24a67ed9b0f0b5a80d6773fcf`;
 - configured candidate-tree SHA-256:
-  `820675246517cd49198495936327768da7a7a1d25f8bf20749c21aad1c2f56da`;
+  `fdf06a56cffe301df93b7e08a85f6d5cf956842959fc9a5a95fa9bc61c43246d`;
+- dependency candidate fingerprint: `c2b7cc28699b`;
 - DirectApplication storage ABI: `symjit-direct-application-storage-v1`;
 - DirectTable binding ABI: `symjit-direct-table-binding-v1`;
 - DirectTable descriptor ABI: `symjit-direct-table-descriptor-v1`.
 
-The contributor build applies no local SymJIT patches. This feature may use
-the pinned DirectApplication and DirectTable APIs but must not add a SymJIT
-patch. If those APIs cannot represent the required kernel without changing
-the fork, the feature stops rather than expanding the dependency delta.
+This optimization adds no local SymJIT patch. Later `main` revisions contain
+small recurrence-support patches owned by the report-support lane; they are
+baseline inputs, not part of this optimization. This feature may use the
+pinned DirectApplication and DirectTable APIs but must not expand that
+dependency delta. If those APIs cannot represent the required kernel, the
+feature stops.
 
 The historical same-host complete-artifact selected-flow reference is
 `54.024 +/- 0.226 us/point` at batch 128 and
@@ -84,6 +87,12 @@ anchors. Landing acceptance uses a new quiet, alternating baseline/candidate
 capture and does not reuse these medians.
 
 ### Mandatory pre-code census outcome
+
+This subsection records the census used by the first, contribution-level
+candidate. That formulation was measured and rejected below. Its
+contribution/finalizer counts and eight-identity/16-input bounds are
+historical evidence, not the contract of the later complete-current
+formulation.
 
 The exact materialized `f4606fa` `u u~ > Z+6g` schedule was censused on
 2026-07-26 before integrating the candidate. An initial audit incorrectly
@@ -206,50 +215,53 @@ below.
 ## Design
 
 The compiled schedule remains the owner of topology, helicity, selector,
-dependency, and arena policy. Repetition within complete eligible currents is
-represented as DirectTable microkernel islands:
+dependency, and arena policy. After the contribution-level implementation was
+rejected, the implementation was cut over to complete-current islands:
 
-1. Generate one small O3 DirectApplication source for each exact canonical
-   motif signature.
-2. Bind current, momentum, parameter, and factor planes through DirectTable
-   invocation rows.
-3. Bind complete complex current destinations through ordered attachment rows
-   using complex scale and explicit overwrite or accumulate semantics.
-4. Run the ordinary compiled finalizer or propagator only after all
-   contributions to that current.
-5. Keep all ineligible currents as compressed O3 DirectApplication residual
-   leaves.
+1. Select a two-component current only when every interaction contributing to
+   it, its selector partition, its finalizer, and all destination slots are
+   structurally proven.
+2. Build one O3 source containing the current's complete ordered contribution
+   sum and its finalizer substitution.
+3. Bind current, momentum, mutable-model-parameter, and coupling-component
+   inputs through one DirectTable invocation row.
+4. Write every canonical output of that current once through one identity,
+   overwrite attachment. There is no contribution accumulation table, scratch
+   current, or separate finalizer call.
+5. Remove the current's whole output from the residual stage. Four-component
+   and otherwise ineligible currents remain ordinary compressed O3
+   DirectApplication residual leaves.
 
-One destination may not be split between table and residual execution.
-Contributions to a destination retain their original evaluation-group order.
-Independent destinations may be grouped only when the plan's validated
-dependency and ownership data show that the grouping is order-independent.
+One current may not be split between table and residual execution. The
+generator constructs the symbolic sum in original interaction order and
+records those interaction IDs in the plan. Symbolica canonicalizes algebraic
+addition and O3 may reassociate floating-point operations, so bitwise
+contribution order is not claimed; acceptance is the explicit
+`rtol=1e-12`, `atol=1e-15` numerical contract.
 
-The initial slice contains complete two-component vector--Weyl current
-families plus structurally homogeneous singleton four-component three-vector
-currents. Eligibility is structural, never process-name based. A motif key
-includes source digest and ABI, canonical input order, input permutation,
-result particle/chirality/width, mutable-parameter and coupling provenance,
-selector-domain signature, finalizer identity, and optimization level.
+The exact `qq_Z6g` selected schedule admits 26 two-component currents. It
+emits 26 complete-current kernel identities, 26 invocation rows, 26 overwrite
+attachments, zero scratch components, and zero finalizer calls. Maximum
+complex input arity is 43 and every kernel has two complex outputs.
+Four-component currents are residual in this formulation.
 
-The slice is bounded to eight kernel identities, at most 16 complex inputs,
-64 KiB source payload per kernel, and 4 MiB semantic row data for the artifact.
-Vector--Weyl kernels must have exactly two complex outputs. Four complex
-outputs are allowed only for the authorized three-vector family, and every
-destination in that family must have exactly one invocation, one overwrite
-attachment, and no accumulation or residual contribution.
+The complete-current extension is bounded to 64 kernel identities, 64 complex
+inputs, four complex outputs, 64 KiB aggregate source-application payload,
+and 4 MiB semantic row data per artifact. These bounds stay within the APIs
+already present in the pinned SymJIT fork and add no dependency patch.
 
-The pre-code census denominator is every active materialized occurrence of a
-prepared-kernel identity that repeats globally. Eligible table invocations
-must match exactly the `49 + 49 + 5` authorized occurrence distribution and
-cover at least 50% of all 203 occurrences. Projected generated text must be at
-most 25% of the text it replaces.
+The outer compiled stage is still generated exactly once. A residual leaf
+reuses an already compiled outer chunk only when the chunk is retained in
+full, its DirectApplication binding is byte-for-byte consistent with the
+outer evaluator, and every residual input has an exact semantic and canonical
+symbol projection. Partial or unproven chunks fall back to ordinary residual
+compilation. This removes the duplicate residual compile responsible for the
+first candidate's 110-second generation time without introducing a second
+execution route.
 
-Implementation and measurement continue without another authorization pause
-while there is a suitable improvement inside these bounds. Landing still
-requires the final candidate to improve both primary batches by at least 10%.
-No whole-schedule superkernel, generic MIR outlining, additional fusion, or
-recurrence-style execution is in scope.
+Landing still requires the complete-current candidate to improve both primary
+batches by at least 10%. No whole-schedule superkernel, generic MIR outlining,
+additional stage fusion, or recurrence-style execution is in scope.
 
 ## Artifact cutover and diagnostics
 
@@ -329,7 +341,7 @@ only after the accepted candidate is pushed to `main` and its landing SHA,
 build/runtime identity, numerical evidence, and performance record are handed
 off.
 
-## Measured outcome and decision
+## First formulation: measured outcome and rejection
 
 The complete candidate was rejected on 2026-07-27 and must not be merged into
 `main`. The final measured source was
@@ -399,6 +411,36 @@ recurrence-like executor. Those approaches are explicitly outside this
 plan. Adding more four-component islands would amplify the same row dispatch
 and scratch-materialization costs.
 
-The implementation therefore follows the mandatory failure branch of the
-acceptance contract: the DirectTable microkernel candidate is retained only
-on its rejected feature branch for audit, is not extended, and is not landed.
+The contribution-level implementation therefore followed the mandatory
+failure branch of the acceptance contract and was not landed.
+
+## Complete-current formulation: active implementation
+
+Continued optimization work reopened the feature with the complete-current
+design above. This is a replacement, not a compatibility path: the generator
+no longer emits contribution tables, scratch-current bindings, identity
+finalizer kernels, accumulate attachments, or separate finalizer calls.
+The runtime rejects artifacts retaining those shapes and requires regenerated
+compiled-stage-plan v2 artifacts.
+
+The source-level `qq_Z6g` census currently reports:
+
+| Quantity | Complete-current candidate |
+|---|---:|
+| Eligible two-component currents | 26 |
+| Table kernel identities | 26 |
+| Invocation rows | 26 |
+| Overwrite attachment rows | 26 |
+| Scratch current components | 0 |
+| Separate finalizer calls | 0 |
+| Maximum complex inputs | 43 |
+| Complex outputs per kernel | 2 |
+
+An exact pinned-fork probe compiled representative composite sources in
+milliseconds and produced roughly 1.3--1.7 KiB source applications, indicating
+that the first candidate's 110-second generation was duplicate residual
+compilation rather than composite-source cost. Exact artifact generation,
+aggregate source bytes, numerical comparison, and alternating runtime
+measurements remain the go/no-go evidence. This formulation is still withheld
+from `main` unless both batch 128 and batch 1024 exceed the 10% acceptance
+threshold.

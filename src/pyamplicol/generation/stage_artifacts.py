@@ -29,6 +29,7 @@ from ..evaluators.execution_schema import (
 )
 from ..models.base import Model
 from .compiled_microkernels import (
+    CompiledMicrokernelStageLowering,
     compiled_microkernel_session,
     empty_residual_evaluator,
     residual_only_stage_plan,
@@ -163,9 +164,7 @@ def write_generic_stage_evaluator_artifacts(
         prepared_amplitude_stage,
         evaluator=_dict(amplitude_payload["evaluator"]),
         leaves=tuple(_dict(item) for item in _list(direct["leaves"])),
-        output_bindings=tuple(
-            _dict(item) for item in _list(direct["output_bindings"])
-        ),
+        output_bindings=tuple(_dict(item) for item in _list(direct["output_bindings"])),
         residual_application_abi=str(direct["application_abi"]),
     )
     stage_timings.append(
@@ -480,6 +479,264 @@ def _compiled_plane_arena_stage(
         "output_bindings": outputs,
         "leaves": leaves,
     }
+
+
+def _reuse_exact_residual_evaluator_chunks(
+    lowering: CompiledMicrokernelStageLowering,
+    *,
+    outer_evaluator: Mapping[str, object],
+    outer_direct: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Project complete retained outer chunks into the residual input space.
+
+    This optimization deliberately accepts only flat evaluator chunks whose
+    output ranges exactly match the microkernel lowering's original chunks.
+    Reusing a partial chunk would execute table-owned outputs again, while an
+    unproven input projection could bind a compiled application to the wrong
+    arena plane. Either condition therefore returns ``None`` and leaves the
+    caller on the ordinary residual compilation path.
+    """
+
+    original = lowering.original_stage
+    residual = lowering.residual_stage
+    if (
+        residual.output_length < 1
+        or outer_evaluator.get("kind") != "chunked-symbolica-evaluator"
+        or outer_evaluator.get("input_len") != original.parameter_count
+    ):
+        return None
+
+    raw_chunks = outer_evaluator.get("chunks")
+    raw_input_maps = outer_evaluator.get("chunk_input_indices")
+    raw_leaves = outer_direct.get("leaves")
+    if (
+        not _is_record_sequence(raw_chunks)
+        or not _is_index_map_sequence(raw_input_maps)
+        or not _is_record_sequence(raw_leaves)
+    ):
+        return None
+    chunks = tuple(raw_chunks)
+    input_maps = tuple(raw_input_maps)
+    leaves = tuple(raw_leaves)
+    ranges = tuple(lowering.original_chunk_ranges)
+    if not (len(chunks) == len(input_maps) == len(leaves) == len(ranges)):
+        return None
+
+    original_payload = original.to_json_dict()
+    original_payload["evaluator"] = dict(outer_evaluator)
+    try:
+        expected_outer_direct = _compiled_plane_arena_stage(original_payload)
+    except (TypeError, ValueError):
+        return None
+    if expected_outer_direct is None or expected_outer_direct != dict(outer_direct):
+        return None
+
+    old_to_new = _residual_parameter_projection(original, residual)
+    if old_to_new is None:
+        return None
+
+    for raw_chunk, raw_map, raw_leaf, (start, stop) in zip(
+        chunks, input_maps, leaves, ranges, strict=True
+    ):
+        if (
+            not isinstance(raw_chunk, Mapping)
+            or not isinstance(raw_leaf, Mapping)
+            or not _valid_index_map(raw_map, original.parameter_count)
+            or start < 0
+            or stop <= start
+            or stop > original.output_length
+        ):
+            return None
+        try:
+            chunk_leaves, output_stop, application_abi, source_abi = (
+                _compiled_plane_arena_leaves(
+                    raw_chunk,
+                    tuple(int(value) for value in raw_map),
+                    start,
+                )
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            chunk_leaves is None
+            or len(chunk_leaves) != 1
+            or output_stop != stop
+            or chunk_leaves[0] != dict(raw_leaf)
+            or application_abi != outer_direct.get("application_abi")
+            or source_abi != outer_direct.get("source_application_abi")
+            or raw_chunk.get("output_len") != stop - start
+            or raw_chunk.get("input_len") != len(raw_map)
+        ):
+            return None
+
+    retained_chunks = tuple(lowering.residual_original_chunk_indices)
+    original_outputs = tuple(lowering.residual_original_output_indices)
+    if (
+        not retained_chunks
+        or tuple(sorted(set(retained_chunks))) != retained_chunks
+        or any(index < 0 or index >= len(ranges) for index in retained_chunks)
+        or len(original_outputs) != residual.output_length
+    ):
+        return None
+
+    selected_chunks: list[dict[str, object]] = []
+    selected_maps: list[list[int]] = []
+    expected_partitions: list[tuple[int, int]] = []
+    selected_output_cursor = 0
+    used_residual_inputs: set[int] = set()
+    for chunk_index in retained_chunks:
+        start, stop = ranges[chunk_index]
+        width = stop - start
+        next_cursor = selected_output_cursor + width
+        if original_outputs[selected_output_cursor:next_cursor] != tuple(
+            range(start, stop)
+        ):
+            return None
+        remapped: list[int] = []
+        for old_index in input_maps[chunk_index]:
+            new_index = old_to_new.get(int(old_index))
+            if new_index is None:
+                return None
+            remapped.append(new_index)
+        if not _valid_index_map(remapped, residual.parameter_count):
+            return None
+        used_residual_inputs.update(remapped)
+        selected_chunks.append(dict(chunks[chunk_index]))
+        selected_maps.append(remapped)
+        expected_partitions.append((selected_output_cursor, next_cursor))
+        selected_output_cursor = next_cursor
+
+    if (
+        selected_output_cursor != residual.output_length
+        or tuple(expected_partitions) != residual.selector_output_partitions
+        or used_residual_inputs != set(range(residual.parameter_count))
+    ):
+        return None
+
+    return {
+        "kind": "chunked-symbolica-evaluator",
+        "input_len": residual.parameter_count,
+        "chunk_input_indices": selected_maps,
+        "chunks": selected_chunks,
+        "required_runtime_capabilities": list(
+            aggregate_runtime_capabilities(selected_chunks)
+        ),
+        "build_timing": {
+            "chunk_count": float(len(selected_chunks)),
+            "reused_outer_chunk_count": float(len(selected_chunks)),
+            "stage_evaluator_build_s": 0.0,
+            "symbolica_evaluator_build_s": 0.0,
+            "jit_compile_s": 0.0,
+        },
+    }
+
+
+def _residual_parameter_projection(
+    original: GenericCompiledStageBlueprint,
+    residual: GenericCompiledStageBlueprint,
+) -> dict[int, int] | None:
+    original_components = _indexed_stage_inputs(original)
+    residual_components = _indexed_stage_inputs(residual)
+    if original_components is None or residual_components is None:
+        return None
+    original_by_contract: dict[tuple[object, ...], int] = {}
+    for old_index, component in enumerate(original_components):
+        contract = _input_component_contract(component)
+        if contract in original_by_contract:
+            return None
+        original_by_contract[contract] = old_index
+
+    projection: dict[int, int] = {}
+    original_real = set(original.real_valued_inputs)
+    residual_real = set(residual.real_valued_inputs)
+    for new_index, component in enumerate(residual_components):
+        old_index = original_by_contract.get(_input_component_contract(component))
+        if (
+            old_index is None
+            or old_index in projection
+            or (old_index in original_real) != (new_index in residual_real)
+            or not _same_parameter_symbol(
+                original.parameter_symbols[old_index],
+                residual.parameter_symbols[new_index],
+            )
+        ):
+            return None
+        projection[old_index] = new_index
+    if tuple(projection) != tuple(sorted(projection)):
+        return None
+    return projection
+
+
+def _indexed_stage_inputs(
+    stage: GenericCompiledStageBlueprint,
+) -> tuple[object, ...] | None:
+    if (
+        stage.parameter_count < 0
+        or len(stage.parameter_symbols) != stage.parameter_count
+        or len(stage.input_components) != stage.parameter_count
+    ):
+        return None
+    result: list[object | None] = [None] * stage.parameter_count
+    for component in stage.input_components:
+        index = component.parameter_index
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < stage.parameter_count
+            or result[index] is not None
+        ):
+            return None
+        result[index] = component
+    if any(component is None for component in result):
+        return None
+    return tuple(component for component in result if component is not None)
+
+
+def _input_component_contract(component: object) -> tuple[object, ...]:
+    return (
+        getattr(component, "kind", None),
+        getattr(component, "source_id", None),
+        getattr(component, "component", None),
+        getattr(component, "global_component", None),
+        getattr(component, "real_valued", None),
+    )
+
+
+def _same_parameter_symbol(left: object, right: object) -> bool:
+    if left is right:
+        return True
+    left_canonical = getattr(left, "to_canonical_string", None)
+    right_canonical = getattr(right, "to_canonical_string", None)
+    if not callable(left_canonical) or not callable(right_canonical):
+        return False
+    try:
+        return str(left_canonical()) == str(right_canonical())
+    except Exception:
+        return False
+
+
+def _is_record_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _is_index_map_sequence(value: object) -> bool:
+    return _is_record_sequence(value) and all(
+        _is_record_sequence(item) for item in value
+    )
+
+
+def _valid_index_map(values: Sequence[object], upper_bound: int) -> bool:
+    previous = -1
+    for value in values:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= previous
+            or value >= upper_bound
+        ):
+            return False
+        previous = value
+    return True
 
 
 def _compiled_plane_arena_leaves(
@@ -945,29 +1202,35 @@ def build_and_write_generic_stage_evaluator_artifacts(
                 residual_leaves: tuple[dict[str, object], ...] = ()
                 residual_output_bindings: tuple[dict[str, object], ...] = ()
             else:
-                residual_compile_stage = replace(
-                    residual_stage,
-                    evaluator_label=(
-                        f"{residual_stage.evaluator_label}_microkernel_residual"
-                    ),
+                residual_evaluator = _reuse_exact_residual_evaluator_chunks(
+                    lowering,
+                    outer_evaluator=_dict(payload["evaluator"]),
+                    outer_direct=direct,
                 )
-                residual_evaluator = _compile_stage_evaluator_artifact(
-                    residual_compile_stage,
-                    output_dir,
-                    compiler=compiler,
-                    blueprint=None,
-                    symbolica_settings=replace(
-                        effective_stage_settings,
-                        compiled_output_chunk_size=None,
-                        output_chunk_strategy="uniform",
-                    ),
-                    merge_evaluators_strategy=merge_evaluators_strategy,
-                    verbose_evaluator_build=verbose_evaluator_build,
-                    jit_compile=jit_compile,
-                    progress_callback=evaluator_progress_callback,
-                    current_stage_position=position,
-                    current_stage_count=current_stage_count,
-                )
+                if residual_evaluator is None:
+                    residual_compile_stage = replace(
+                        residual_stage,
+                        evaluator_label=(
+                            f"{residual_stage.evaluator_label}_microkernel_residual"
+                        ),
+                    )
+                    residual_evaluator = _compile_stage_evaluator_artifact(
+                        residual_compile_stage,
+                        output_dir,
+                        compiler=compiler,
+                        blueprint=None,
+                        symbolica_settings=replace(
+                            effective_stage_settings,
+                            compiled_output_chunk_size=None,
+                            output_chunk_strategy="uniform",
+                        ),
+                        merge_evaluators_strategy=merge_evaluators_strategy,
+                        verbose_evaluator_build=verbose_evaluator_build,
+                        jit_compile=jit_compile,
+                        progress_callback=evaluator_progress_callback,
+                        current_stage_position=position,
+                        current_stage_count=current_stage_count,
+                    )
                 residual_payload = residual_stage.to_json_dict()
                 residual_payload["evaluator"] = residual_evaluator
                 residual_direct = _compiled_plane_arena_stage(residual_payload)
@@ -979,16 +1242,13 @@ def build_and_write_generic_stage_evaluator_artifacts(
                     _dict(item) for item in _list(residual_direct["leaves"])
                 )
                 residual_output_bindings = tuple(
-                    _dict(item)
-                    for item in _list(residual_direct["output_bindings"])
+                    _dict(item) for item in _list(residual_direct["output_bindings"])
                 )
-            payload["compiled_plane_arena"] = (
-                microkernel_session.build_stage_plan(
-                    lowering,
-                    residual_evaluator=residual_evaluator,
-                    residual_leaves=residual_leaves,
-                    residual_output_bindings=residual_output_bindings,
-                )
+            payload["compiled_plane_arena"] = microkernel_session.build_stage_plan(
+                lowering,
+                residual_evaluator=residual_evaluator,
+                residual_leaves=residual_leaves,
+                residual_output_bindings=residual_output_bindings,
             )
         timing = _stage_build_timing_record(
             prepared_stage.evaluator_label,

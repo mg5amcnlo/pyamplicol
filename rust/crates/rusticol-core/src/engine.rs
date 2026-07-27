@@ -1043,6 +1043,7 @@ struct CompiledTableCallGroupManifest {
     owned_current_ids: Vec<usize>,
     dependency_current_ids: Vec<usize>,
     dependency_current_components: Vec<usize>,
+    interaction_ids: Vec<usize>,
     selector_partition_ids: Vec<u32>,
 }
 
