@@ -328,3 +328,77 @@ Only fully gated milestones may be merged. The implementation goal is complete
 only after the accepted candidate is pushed to `main` and its landing SHA,
 build/runtime identity, numerical evidence, and performance record are handed
 off.
+
+## Measured outcome and decision
+
+The complete candidate was rejected on 2026-07-27 and must not be merged into
+`main`. The final measured source was
+`cf68e57c1fbc7dff640b563d3e540bfd0db57429`, built as candidate wheel
+SHA-256
+`91ee1b682a0dd2b147c2ccb06cf4a37cba62476092d5fa8f6e9f1b87dec3796c`.
+Its installed runtime reported native build-input SHA-256
+`5c90765bce354b10cd3fcb4ad68d36f896e50257efd8f60f10e2f0d6389c40ce`
+and native-module SHA-256
+`bc7b67df0c85043b37c22310017850f31664ba058465c711d692eb45f4750016`.
+The comparator remained exact `f4606fa9be52355b4a66efcfa2b7072d489205eb`
+with native-module SHA-256
+`f71d40debcb612f34da2e038a4b251a66ef010a27026f90946dee59f37d2ae7b`.
+
+Fresh complete artifacts were generated for the required built-in-SM process,
+topology-replay layout, and selected physical flow. Artifact generation
+completed successfully after fixing a stale serializer assertion that had
+compared projected residual bindings to the original full stage width.
+The resulting artifact evidence was:
+
+| Quantity | `f4606fa` baseline | `cf68e57` candidate | Candidate / baseline |
+|---|---:|---:|---:|
+| Artifact ID | `a234484fbaabfd58a1555ad34c8003587bd1458bca40f208b6e7970373833583` | `ef86100a62d2099e0b58aceece571f9ff22510ae7f93f27326f6b19a40075ea5` | — |
+| Core generation | 5.273607 s | 110.595564 s | 20.971 |
+| Generation command wall time | 6.845435 s | 112.642975 s | 16.455 |
+| Artifact tree | 23,606,943 bytes | 31,965,120 bytes | 1.354 |
+| Material payload | 23,595,658 bytes | 31,868,225 bytes | 1.351 |
+| Generation peak RSS | 0.300 GiB | 0.327 GiB | 1.090 |
+
+The first full seven-pair run was stopped before accepting any measurement
+because its precision-32 diagnostic spent more than five minutes in the
+process-level Decimal oracle before producing a warmed sample. The decisive
+go/no-go runtime evidence therefore used short, independent five-block Arena
+samples from the already authenticated read-only artifacts. These samples are
+diagnostic rejection evidence, not a substitute for the seven-pair acceptance
+campaign:
+
+| Batch | Baseline us/point | Candidate us/point | Candidate / baseline | Claimed gain |
+|---:|---:|---:|---:|---:|
+| 128 | 42.0984 | 56.0708 | 1.33190 | -33.19% |
+| 1024 | 41.7545 | 55.4654 | 1.32837 | -32.84% |
+
+At batch 1024 the eight sampled totals had maximum elementwise relative
+difference `1.98345e-14` and maximum absolute difference `6.04742e-32`.
+This is useful diagnostic correctness evidence, but the full numerical
+acceptance gate was deliberately not completed after both runtime targets had
+already failed decisively.
+
+The slowdown is structural. The selected-flow baseline executes 13 fused O3
+DirectApplication leaves. The candidate executes 42 ordered operations:
+17 contribution DirectTable calls, 16 finalizer DirectTable calls, eight
+residual leaves, and one amplitude leaf. Those tables expand to 5,918 unique
+contribution rows plus 1,034 finalizer rows. All contribution input rows are
+unique, so DirectTable fan-out cannot remove this work. The candidate also
+materializes 2,108 complex scratch components: contributions write
+overwrite/accumulate planes, then finalizers reread scratch and write the
+canonical currents. The baseline fused programs instead retain sums,
+propagation, common subexpressions, and register locality inside one compiled
+stage.
+
+Removing a few table-call boundaries, scalar parameter fills, or identity
+finalizers cannot recover the roughly 48% candidate throughput improvement
+needed to move from 56 us/point to the required 10% gain over a 42 us/point
+baseline. A credible repair would have to compile complete current or stage
+regions together through schedule superkernels, MIR outlining/fusion, or a
+recurrence-like executor. Those approaches are explicitly outside this
+plan. Adding more four-component islands would amplify the same row dispatch
+and scratch-materialization costs.
+
+The implementation therefore follows the mandatory failure branch of the
+acceptance contract: the DirectTable microkernel candidate is retained only
+on its rejected feature branch for audit, is not extended, and is not landed.
