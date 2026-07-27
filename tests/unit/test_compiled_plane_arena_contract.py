@@ -364,6 +364,33 @@ def test_stage_set_requires_complete_capability_bound_metadata() -> None:
         _stage_evaluator_set(pre_arena)
 
 
+def test_stage_set_accepts_pruned_residual_input_bindings() -> None:
+    payload = _set()
+    stage = payload["stages"][0]
+    residual = deepcopy(stage)
+    residual["input_value_slot_ids"] = []
+    residual["input_components"] = [
+        {
+            **stage["input_components"][2],
+            "parameter_index": 0,
+        }
+    ]
+    residual["parameter_count"] = 1
+    residual["value_parameter_count"] = 0
+    residual["momentum_parameter_count"] = 0
+    residual["model_parameter_count"] = 1
+    residual["real_valued_inputs"] = []
+    residual["evaluator"] = _leaf("evaluators/residual.symjit", 1, 2)
+    stage["compiled_plane_arena"] = _residual_plan(residual)
+
+    serialized = _stage_evaluator_set(payload)
+
+    direct = serialized["stages"][0]["compiled_plane_arena"]
+    assert serialized["stages"][0]["parameter_count"] == 3
+    assert direct["residual_evaluator"]["input_len"] == 1
+    assert direct["input_bindings"] == residual["input_components"]
+
+
 def test_direct_source_paths_follow_nested_lane_prefixes() -> None:
     serialized = _stage_evaluator_set(_set())
     prefixed = _prefix_evaluator_payload_paths(serialized, "lane-7")

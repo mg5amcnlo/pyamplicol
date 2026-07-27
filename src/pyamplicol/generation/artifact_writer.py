@@ -2492,8 +2492,16 @@ def _compiled_plane_arena_stage(
         raise ValueError("compiled stage-plan v2 contract is incompatible")
     residual = _mapping(result["residual_evaluator"])
     if residual.get("kind") != "compiled-stage-empty-residual":
-        result["residual_evaluator"] = _evaluator(residual)
-    if len(_sequence(result["input_bindings"])) != int(stage["parameter_count"]):
+        residual = _evaluator(residual)
+        result["residual_evaluator"] = residual
+    residual_input_len = residual.get("input_len")
+    if (
+        isinstance(residual_input_len, bool)
+        or not isinstance(residual_input_len, int)
+        or residual_input_len < 0
+    ):
+        raise ValueError("compiled residual evaluator input width is invalid")
+    if len(_sequence(result["input_bindings"])) != residual_input_len:
         raise ValueError("compiled stage-plan input binding count is invalid")
     return result
 

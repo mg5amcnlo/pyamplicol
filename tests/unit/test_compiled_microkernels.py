@@ -229,6 +229,22 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         for item in current_stages
         for call in item.table_calls
     ) == 103
+    assert [
+        (
+            item.original_stage.parameter_count,
+            item.residual_stage.parameter_count,
+        )
+        for item in lowerings
+    ] == [
+        (94, 24),
+        (176, 134),
+        (244, 186),
+        (292, 194),
+        (278, 132),
+        (194, 0),
+        (118, 0),
+        (8, 8),
+    ]
     subset_three_residual = current_stages[1].residual_stage
     assert subset_three_residual.parameter_count == 134
     assert subset_three_residual.value_parameter_count == 74
