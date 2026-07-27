@@ -156,6 +156,37 @@ def test_builtin_yang_mills_kernel_evaluation_relations_are_exact() -> None:
     assert model.vertex_evaluation_equivalence(22).input_order == (1, 0)
 
 
+def test_builtin_scalar_vector_kernel_evaluation_relation_is_exact() -> None:
+    model = BuiltinSMModel()
+    scalar = (1.25 - 0.5j,)
+    vector = (2.0, -1.0j, 0.5 + 0.25j, -3.0)
+    coupling = (0.7 - 0.1j, -0.4 + 0.2j)
+
+    scalar_vector = model.vertex_component_expression(
+        18,
+        scalar,
+        vector,
+        result_particle_id=23,
+        result_chirality=0,
+        coupling=coupling,
+    )
+    vector_scalar = model.vertex_component_expression(
+        19,
+        vector,
+        scalar,
+        result_particle_id=23,
+        result_chirality=0,
+        coupling=coupling,
+    )
+
+    assert scalar_vector == vector_scalar
+    assert model.vertex_evaluation_equivalence(18).class_id == (
+        model.vertex_evaluation_equivalence(19).class_id
+    )
+    assert model.vertex_evaluation_equivalence(18).input_order == (0, 1)
+    assert model.vertex_evaluation_equivalence(19).input_order == (1, 0)
+
+
 @pytest.mark.parametrize("kind,result_particle_id", ((10, 6), (11, -6)))
 @pytest.mark.parametrize("chirality", (-1, 1))
 def test_builtin_charged_current_embeds_weyl_input_in_massive_dirac_output(

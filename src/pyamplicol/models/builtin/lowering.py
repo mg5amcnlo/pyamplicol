@@ -429,6 +429,17 @@ class BuiltinSMLoweringMixin:
                 input_order=input_order,
             )
 
+        scalar_vector_orientations = {
+            18: (0, 1),
+            19: (1, 0),
+        }
+        input_order = scalar_vector_orientations.get(kind)
+        if input_order is not None:
+            return VertexEvaluationEquivalence(
+                class_id="builtin-sm:scalar-vector-to-vector",
+                input_order=input_order,
+            )
+
         fermion_pair_orientations = {
             21: (0, 1),
             22: (1, 0),
