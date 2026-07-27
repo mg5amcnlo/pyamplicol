@@ -65,6 +65,11 @@ Retained evaluator IR also exposes the main risk:
 | Amplitude | 1,152 | 12,044 bytes |
 | Full tail | 30,729 | 418,349 bytes |
 
+The exact retained baseline applications replaced by pair fusion total
+405,792 bytes; including the amplitude leaf gives 418,040 bytes. The
+disposable decision rejects a candidate whose stored source exceeds its
+corresponding replaced payload, independently of the broader 768 KiB cap.
+
 Every stage-6 complex output is referenced four or six times by stage 7,
 giving 3,072 references to 640 values. Fusion therefore depends on CSE
 recovering that sharing rather than expanding it. In contrast, each stage-7
@@ -132,10 +137,14 @@ when behavior-neutral.
    stack use above 1 MiB, payload above 768 KiB, compile/RSS explosion, or
    numerical mismatch.
 4. Prefer full-tail only when its payload is at most 1.25x pair-only, compile
-   time and RSS are at most 1.5x pair-only, and it improves the full schedule
-   by at least three percentage points more. Require the selected candidate
-   to project at least 12% whole-schedule gain at both batch 128 and 1024;
-   otherwise delete both probes and stop.
+   time is at most 1.5x pair-only, and it improves the full schedule by at
+   least three percentage points more. The disposable composition process
+   uses a process-lifetime RSS counter, which cannot honestly attribute a
+   separate peak to the second candidate; it therefore enforces the absolute
+   30 GiB watchdog but defers the relative RSS gate to isolated production
+   artifact generation. Require the selected candidate to project at least
+   12% whole-schedule gain at both batch 128 and 1024; otherwise delete both
+   probes and stop.
 5. Only after a probe passes, add the artifact cutover, certificate, and Rust
    validation/load path.
 6. Generate a complete `qq_Z6g` artifact and stop immediately if generation

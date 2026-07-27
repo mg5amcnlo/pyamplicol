@@ -114,6 +114,8 @@ def _validate_request(
         blockers.append("selector and structural-zero proof is incomplete")
     if blueprint.kind != "pyamplicol-generic-stage-compiler-blueprint":
         blockers.append("stage compiler blueprint kind is unsupported")
+    if not blueprint.runtime_available:
+        blockers.append("stage compiler blueprint runtime is unavailable")
     if not blueprint.expression_ready or blueprint.blockers:
         blockers.append("stage compiler blueprint is not expression-ready")
     if blueprint.stage_count != len(blueprint.stages) + 1:
@@ -201,6 +203,11 @@ def _validate_stage(stage: GenericCompiledStageBlueprint) -> None:
     }
     if any(component.kind not in kind_counts for component in ordered_components):
         blockers.append("has an unsupported input kind")
+    if any(
+        component.kind == "momentum" and not component.real_valued
+        for component in ordered_components
+    ):
+        blockers.append("has a complex-valued momentum input")
     if kind_counts["value"] != stage.value_parameter_count:
         blockers.append("has an inconsistent value-parameter count")
     if kind_counts["momentum"] != stage.momentum_parameter_count:

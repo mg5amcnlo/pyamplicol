@@ -239,7 +239,7 @@ def _terminal_blueprint() -> GenericStageCompilerBlueprint:
     )
     return GenericStageCompilerBlueprint(
         kind="pyamplicol-generic-stage-compiler-blueprint",
-        runtime_available=False,
+        runtime_available=True,
         parameter_count=0,
         value_parameter_count=0,
         momentum_parameter_count=0,
@@ -397,6 +397,40 @@ def test_composition_rejects_ineligible_execution_settings(
     arguments.update(override)
     with pytest.raises(TerminalSuperkernelError, match=match):
         compose_terminal_superkernels(_terminal_blueprint(), **arguments)  # type: ignore[arg-type]
+
+
+def test_composition_rejects_an_unavailable_runtime_blueprint() -> None:
+    with pytest.raises(TerminalSuperkernelError, match="runtime is unavailable"):
+        _compose(replace(_terminal_blueprint(), runtime_available=False))
+
+
+def test_composition_rejects_a_complex_momentum_input() -> None:
+    blueprint = _terminal_blueprint()
+    amplitude = blueprint.amplitude_stage
+    momentum = GenericStageInputComponent(
+        kind="momentum",
+        source_id=30,
+        component=0,
+        global_component=30,
+        parameter_index=3,
+        real_valued=False,
+    )
+    symbols = _local_symbols(4)
+    amplitude = replace(
+        amplitude,
+        input_components=(*amplitude.input_components, momentum),
+        parameter_count=4,
+        value_parameter_count=3,
+        momentum_parameter_count=1,
+        parameter_symbols=symbols,
+        output_expressions=(
+            symbols[0] + symbols[2] + symbols[3],
+            symbols[1] * symbols[2],
+        ),
+    )
+
+    with pytest.raises(TerminalSuperkernelError, match="complex-valued momentum"):
+        _compose(replace(blueprint, amplitude_stage=amplitude))
 
 
 def test_composition_rejects_an_external_terminal_output_consumer() -> None:
