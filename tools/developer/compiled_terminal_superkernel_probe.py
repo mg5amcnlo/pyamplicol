@@ -36,7 +36,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 from unittest.mock import patch
@@ -1032,6 +1032,82 @@ def _leaf_bundle(
     return payload
 
 
+def _restore_streamed_blueprint(
+    released: Any,
+    retained_stages: Sequence[Any],
+) -> Any:
+    """Restore a complete disposable blueprint from pre-release streamed stages."""
+
+    retained = tuple(retained_stages)
+    if len(retained) != released.stage_count:
+        _die(
+            "streamed target stage compiler retained "
+            f"{len(retained)} of {released.stage_count} stages"
+        )
+    if not retained or not str(retained[-1].stage_kind).startswith("amplitude"):
+        _die("streamed target stage compiler did not end with its amplitude stage")
+    if any(str(stage.stage_kind).startswith("amplitude") for stage in retained[:-1]):
+        _die("streamed target stage compiler exposed a non-terminal amplitude stage")
+
+    current = retained[:-1]
+    amplitude = retained[-1]
+    if len(current) != len(released.stages):
+        _die("streamed target stage compiler current-stage count changed on release")
+    if not released.expression_ready or released.blockers:
+        _die("streamed target compiler released a blocked blueprint")
+    for position, stage in enumerate(retained):
+        if not stage.expression_ready or stage.blockers:
+            _die(f"streamed target stage {position} is not expression-ready")
+        if len(stage.parameter_symbols) != stage.parameter_count:
+            _die(
+                f"streamed target stage {position} retained an incomplete "
+                "parameter layout"
+            )
+        if len(stage.output_expressions) != stage.output_length:
+            _die(
+                f"streamed target stage {position} retained incomplete "
+                "output expressions"
+            )
+    for position, stage in enumerate((*released.stages, released.amplitude_stage)):
+        if (
+            stage.parameter_symbols
+            or stage.output_expressions
+            or stage.symbolica_functions
+        ):
+            _die(
+                f"streamed target released stage {position} still owns expression data"
+            )
+    for position, (retained_stage, released_stage) in enumerate(
+        zip(current, released.stages, strict=True)
+    ):
+        shell = replace(
+            retained_stage,
+            parameter_symbols=(),
+            output_expressions=(),
+            symbolica_functions=(),
+        )
+        if asdict(shell) != asdict(released_stage):
+            _die(
+                "streamed target stage compiler metadata changed on release "
+                f"at current stage {position}"
+            )
+    amplitude_shell = replace(
+        amplitude,
+        parameter_symbols=(),
+        output_expressions=(),
+        symbolica_functions=(),
+    )
+    if asdict(amplitude_shell) != asdict(released.amplitude_stage):
+        _die("streamed target amplitude metadata changed on release")
+
+    return replace(
+        released,
+        runtime_available=True,
+        stages=current,
+        amplitude_stage=amplitude,
+    )
+
+
 def capture_exact_selected_blueprint(output_dir: Path) -> CapturedSchedule:
     """Generate the disposable baseline and retain its exact sector-0 blueprint."""
 
@@ -1080,25 +1156,7 @@ def capture_exact_selected_blueprint(output_dir: Path) -> CapturedSchedule:
             rewritten = dict(builder_kwargs)
             rewritten["stage_consumer"] = tee
             released = original_blueprint_builder(*builder_args, **rewritten)
-            current = tuple(
-                stage
-                for stage in retained_stages
-                if not str(stage.stage_kind).startswith("amplitude")
-            )
-            amplitude = tuple(
-                stage
-                for stage in retained_stages
-                if str(stage.stage_kind).startswith("amplitude")
-            )
-            if len(amplitude) != 1:
-                _die("target stage compiler did not expose one amplitude stage")
-            captured.append(
-                replace(
-                    released,
-                    stages=current,
-                    amplitude_stage=amplitude[0],
-                )
-            )
+            captured.append(_restore_streamed_blueprint(released, retained_stages))
             return released
 
         with patch.object(

@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: 0BSD
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+from pyamplicol.generation.stage_types import (
+    GenericCompiledStageBlueprint,
+    GenericStageCompilerBlueprint,
+    GenericStageOutputSlot,
+)
 from tools.developer import compiled_terminal_superkernel_probe as probe
 
 
@@ -55,6 +62,189 @@ def _composition(kind: str) -> SimpleNamespace:
         elided_stage_indices=(6, 7),
         dependency_components=(501, 502),
     )
+
+
+def _streamed_stage(
+    stage_index: int,
+    stage_kind: str,
+    *,
+    expression_ready: bool = True,
+    blockers: tuple[str, ...] = (),
+    parameter_symbols: tuple[object, ...] = (object(),),
+    output_expressions: tuple[object, ...] = (object(),),
+) -> GenericCompiledStageBlueprint:
+    return GenericCompiledStageBlueprint(
+        stage_index=stage_index,
+        stage_kind=stage_kind,
+        subset_size=None,
+        evaluator_label=f"stage-{stage_index}",
+        parameter_layout="stage-local-v1",
+        output_length=1,
+        output_slots=(
+            GenericStageOutputSlot(
+                value_slot_id=10,
+                current_id=20,
+                variant="default",
+                component_start=0,
+                component_stop=1,
+                output_start=0,
+                output_stop=1,
+            ),
+        ),
+        input_value_slot_ids=(),
+        output_value_slot_ids=(),
+        interaction_ids=(),
+        input_components=(),
+        parameter_count=1,
+        value_parameter_count=1,
+        momentum_parameter_count=0,
+        model_parameter_count=0,
+        real_valued_inputs=(),
+        expression_ready=expression_ready,
+        blockers=blockers,
+        first_output_previews=(),
+        parameter_symbols=parameter_symbols,
+        output_expressions=output_expressions,
+    )
+
+
+def _released_streamed_blueprint() -> tuple[
+    GenericStageCompilerBlueprint,
+    tuple[GenericCompiledStageBlueprint, ...],
+]:
+    current = _streamed_stage(0, "current")
+    amplitude = _streamed_stage(1, "amplitude")
+    released = GenericStageCompilerBlueprint(
+        kind="pyamplicol-generic-stage-compiler-blueprint",
+        runtime_available=False,
+        parameter_count=1,
+        value_parameter_count=1,
+        momentum_parameter_count=0,
+        model_parameter_count=0,
+        real_valued_inputs=(),
+        stage_count=2,
+        stages=(
+            replace(
+                current,
+                parameter_symbols=(),
+                output_expressions=(),
+            ),
+        ),
+        amplitude_stage=replace(
+            amplitude,
+            parameter_symbols=(),
+            output_expressions=(),
+        ),
+        expression_ready=True,
+        blockers=(),
+        parameter_symbols=(),
+    )
+    return released, (current, amplitude)
+
+
+def test_restore_streamed_blueprint_requires_complete_pre_release_stages() -> None:
+    released, retained = _released_streamed_blueprint()
+
+    restored = probe._restore_streamed_blueprint(released, retained)
+
+    assert restored.runtime_available is True
+    assert restored.expression_ready is True
+    assert restored.blockers == ()
+    assert restored.stages == (retained[0],)
+    assert restored.amplitude_stage == retained[1]
+    assert len(restored.stages[0].output_expressions) == 1
+    assert len(restored.amplitude_stage.parameter_symbols) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation,error",
+    (
+        (lambda stages: stages[:1], "retained 1 of 2 stages"),
+        (
+            lambda stages: (stages[1], stages[0]),
+            "did not end with its amplitude stage",
+        ),
+        (
+            lambda stages: (
+                replace(stages[0], blockers=("blocked",)),
+                stages[1],
+            ),
+            "is not expression-ready",
+        ),
+        (
+            lambda stages: (
+                replace(stages[0], parameter_symbols=()),
+                stages[1],
+            ),
+            "incomplete parameter layout",
+        ),
+        (
+            lambda stages: (
+                replace(stages[0], output_expressions=()),
+                stages[1],
+            ),
+            "incomplete output expressions",
+        ),
+    ),
+)
+def test_restore_streamed_blueprint_rejects_incomplete_capture(
+    mutation: Callable[
+        [tuple[GenericCompiledStageBlueprint, ...]],
+        tuple[GenericCompiledStageBlueprint, ...],
+    ],
+    error: str,
+) -> None:
+    released, retained = _released_streamed_blueprint()
+
+    with pytest.raises(probe.ProbeError, match=error):
+        probe._restore_streamed_blueprint(released, mutation(retained))
+
+
+def test_restore_streamed_blueprint_rejects_released_blockers() -> None:
+    released, retained = _released_streamed_blueprint()
+
+    with pytest.raises(probe.ProbeError, match="released a blocked blueprint"):
+        probe._restore_streamed_blueprint(
+            replace(released, expression_ready=False, blockers=("blocked",)),
+            retained,
+        )
+
+
+def test_restore_streamed_blueprint_authenticates_noncomparing_metadata() -> None:
+    released, retained = _released_streamed_blueprint()
+    changed_stages = (
+        replace(retained[0], selector_output_partitions=((0, 1),)),
+        replace(
+            retained[0],
+            output_slots=(
+                replace(
+                    retained[0].output_slots[0],
+                    color_selector_domain_ids=(7,),
+                ),
+            ),
+        ),
+    )
+
+    for changed in changed_stages:
+        with pytest.raises(probe.ProbeError, match="metadata changed on release"):
+            probe._restore_streamed_blueprint(
+                released,
+                (changed, retained[1]),
+            )
+
+
+def test_restore_streamed_blueprint_requires_released_expression_ownership() -> None:
+    released, retained = _released_streamed_blueprint()
+    unreleased_current = replace(
+        released.stages[0],
+        output_expressions=(object(),),
+    )
+
+    with pytest.raises(probe.ProbeError, match="still owns expression data"):
+        probe._restore_streamed_blueprint(
+            replace(released, stages=(unreleased_current,)),
+            retained,
+        )
 
 
 def _compile_record(
