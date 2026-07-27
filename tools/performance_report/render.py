@@ -1255,15 +1255,18 @@ def _best_mode_summary_pair(
             mode: sum(item.mode is mode for item in valid)
             for mode in _BEST_MODE_ORDER
         }
-        ratio_text = (
-            r"\bestmodesummary{"
-            + ratio_text
-            + r"}{\bestmodemix{"
+        mode_mix_text = (
+            r"\bestmodemix{"
             + "/".join(
                 f"{_BEST_MODE_CODES[mode]}:{counts[mode]}"
                 for mode in _BEST_MODE_ORDER
             )
-            + "}}"
+            + "}"
+        )
+        return (
+            rf"\bestmodesummarypair{{{baseline_text}}}"
+            rf"{{{ratio_text}}}"
+            rf"{{{mode_mix_text}}}"
         )
     return rf"\matrixsummarypair{{{baseline_text}}}{{{ratio_text}}}"
 
@@ -1486,8 +1489,9 @@ def render_best_mode_table(
             r"\textcolor{ReportBlue}{\texttt{[#1]}}}"
         ),
         (
-            r"\providecommand{\bestmodesummary}[2]{"
-            r"\begin{tabular}[t]{@{}l@{}}#1\\[-0.16em]#2\end{tabular}}"
+            r"\providecommand{\bestmodesummarypair}[3]{"
+            r"\begin{tabular}[t]{@{}l@{\hspace{0.04in}}l@{}}"
+            r"#1&#2\\[-0.16em]\multicolumn{2}{@{}l@{}}{#3}\end{tabular}}"
         ),
         r"\clearpage",
         (
