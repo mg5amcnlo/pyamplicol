@@ -31,7 +31,7 @@
     "model_compiler_version": 13,
     "model_source_digest": "277a81bb700a430f930d7973f44fa13d204e4884e6b29040948a2cbeeb8426f8",
     "package_version": "0.1.0.dev0+candidate.c2b7cc28699b",
-    "prepared_pack_compiler_sha256": "bdd94616a872665cd0203790976c3d21aabb48e0379fc14ca9242f45e6ea57de"
+    "prepared_pack_compiler_sha256": "fe93bbd349c14f28a85bac5b429925df518beb5561311561b60f05ee25913f86"
   },
   "schema_version": 1,
   "target": {

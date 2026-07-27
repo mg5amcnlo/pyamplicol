@@ -140,24 +140,29 @@ The initial implementation also includes the smallest structural extension:
 five singleton four-component gluon currents, current IDs
 `15,17,19,21,23`. They all use prepared three-vector kernel 4 and vector
 propagator 37. Eligibility is structural: each current is homogeneous, owns
-exactly one contribution, has 16 complex inputs and four complete complex
-outputs, and has no residual contribution. Kernel 4 has canonical signature
+exactly one contribution, and has no residual contribution. The prepared
+vertex has 16 complex inputs; embedding its propagator adds four momentum
+inputs, so the complete composite has 20 complex inputs and four complete
+complex outputs. Kernel 4 has canonical signature
 `120acbff47e08ce698a108c3c8b0758555d5292f24c6b05c4504a977714ebd8c`
-and 16,556 expression bytes. Propagator 37 has canonical signature
+and 20,317 projected expression bytes in the current pinned catalog.
+Propagator 37 has canonical signature
 `b04f53f0c0046718e3090d041bea2f7d31dd363f02d1f7fc614ce620a7e7cacd`.
 
-This authorized slice covers `103/203 = 50.739%` of the global prepared-kernel
-occurrences and therefore passes the 50% gate. It uses three vertex identities,
-at most seven known vertex/finalizer identities, at most 16 inputs, and no more
-than two outputs for vector--Weyl kernels or four outputs for the singleton
-three-vector family. Its prepared vertex source compression is
-`19,822/242,814 = 8.164%`, and its estimated additional semantic rows are
-1,440 bytes. Four-output kernels outside this exact structural family remain
-ineligible.
+This authorized slice covers `103/203 = 50.739%` of the global
+prepared-kernel occurrences (`5073` basis points under the runtime's
+deliberate floor) and therefore passes the 50% gate. It uses three vertex
+identities and six known vertex/finalizer identities. The initial prepared
+vertex inputs remain capped at 16; the complete-current extension is capped
+at 64 and observes 43 overall. Outputs remain two for vector--Weyl kernels or
+four for the singleton three-vector family. Its current prepared-source proxy
+is `26,233/391,469 = 6.70%`, and the five-row complete-current table adds
+exactly 1,040 semantic bytes. Four-output kernels outside this exact
+structural family remain ineligible.
 
 The captured census JSON is
 `COMPILED_DAG_O3_NON_UNION_MICROKERNEL_CENSUS.json`, with SHA-256
-`aff953353500d6bff3a15e9dc6f44449ca2ce227439ffcae985b4db4bf5f0b88`.
+`1afeebdd661064bd13aedb249948b53042d6a9f37e10f47814bcce236c6708ab`.
 It was produced from the clean generation worktree by constructing the
 existing unit-test `u u~ > Z g g g g g g` evaluator process and calling
 the materialized-stage and prepared-kernel catalog builders directly; no
@@ -170,11 +175,12 @@ pyAmpliCol native rebuild participated in the structural census.
 | Structurally homogeneous singleton three-vector destinations | exactly 5 | 5 |
 | Eligible occurrences | at least 50% | 103 / 203 (50.739%) |
 | Canonical vertex kernel identities | at most 8 | 3 |
-| Maximum complex inputs | at most 16 | 16 |
+| Initial prepared-kernel complex inputs | at most 16 | 16 |
+| Complete-current complex inputs | at most 64 | 43 |
 | Vector--Weyl outputs | exactly 2 | 2 |
 | Singleton three-vector outputs | exactly 4 | 4 |
-| Prepared vertex source ratio | at most 25% | 19,822 / 242,814 (8.164%) |
-| Projected semantic rows | at most 4 MiB | below the cap |
+| Prepared vertex source ratio | at most 25% | 26,233 / 391,469 (6.70%) |
+| Projected semantic rows | at most 4 MiB | 1,040 bytes for the extension |
 
 A standalone Rust probe compiled four patchless SymJIT O3 source classes
 (propagated/unpropagated crossed with chirality) using only DirectTable
@@ -218,9 +224,10 @@ The compiled schedule remains the owner of topology, helicity, selector,
 dependency, and arena policy. After the contribution-level implementation was
 rejected, the implementation was cut over to complete-current islands:
 
-1. Select a two-component current only when every interaction contributing to
-   it, its selector partition, its finalizer, and all destination slots are
-   structurally proven.
+1. Select a two-component current, or one of the structurally proven
+   singleton three-vector four-component currents, only when every
+   interaction contributing to it, its selector partition, its finalizer,
+   and all destination slots are structurally proven.
 2. Build one O3 source containing the current's complete ordered contribution
    sum and its finalizer substitution.
 3. Bind current, momentum, mutable-model-parameter, and coupling-component
@@ -239,11 +246,14 @@ addition and O3 may reassociate floating-point operations, so bitwise
 contribution order is not claimed; acceptance is the explicit
 `rtol=1e-12`, `atol=1e-15` numerical contract.
 
-The exact `qq_Z6g` selected schedule admits 26 two-component currents. It
-emits 26 complete-current kernel identities, 26 invocation rows, 26 overwrite
+The exact `qq_Z6g` selected schedule admits 26 two-component currents plus
+five singleton four-component currents. It emits 27 complete-current kernel
+identities and calls: 26 one-row vector--Weyl kernels plus one shared
+five-row three-vector kernel. There are 31 invocation rows, 31 overwrite
 attachments, zero scratch components, and zero finalizer calls. Maximum
-complex input arity is 43 and every kernel has two complex outputs.
-Four-component currents are residual in this formulation.
+complex input arity is 43; vector--Weyl kernels have two complex outputs and
+the one shared three-vector kernel has four. All other four-component
+currents remain residual.
 
 The complete-current extension is bounded to 64 kernel identities, 64 complex
 inputs, four complex outputs, 64 KiB aggregate source-application payload,
@@ -428,13 +438,14 @@ The source-level `qq_Z6g` census currently reports:
 | Quantity | Complete-current candidate |
 |---|---:|
 | Eligible two-component currents | 26 |
-| Table kernel identities | 26 |
-| Invocation rows | 26 |
-| Overwrite attachment rows | 26 |
+| Eligible singleton four-component currents | 5 |
+| Table kernel identities / calls | 27 |
+| Invocation rows | 31 |
+| Overwrite attachment rows | 31 |
 | Scratch current components | 0 |
 | Separate finalizer calls | 0 |
 | Maximum complex inputs | 43 |
-| Complex outputs per kernel | 2 |
+| Complex outputs per kernel | 2 or 4 |
 
 An exact pinned-fork probe compiled representative composite sources in
 milliseconds and produced roughly 1.3--1.7 KiB source applications, indicating

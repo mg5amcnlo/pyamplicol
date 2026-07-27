@@ -26,7 +26,7 @@
     "active_repeated_prepared_kernel_identity_count": 5,
     "eligible_occurrence_count": 103,
     "coverage": 0.5073891625615764,
-    "coverage_basis_points": 5074,
+    "coverage_basis_points": 5073,
     "status": "passed",
     "active_prepared_kernel_occurrence_counts": {
       "4": 35,
@@ -195,14 +195,14 @@
       "required_basis_points": 5000,
       "observed_numerator": 103,
       "observed_denominator": 203,
-      "observed_basis_points": 5074,
+      "observed_basis_points": 5073,
       "passed": true
     },
     "projected_source_compression": {
       "maximum_basis_points": 2500,
-      "unique_table_vertex_source_bytes": 19822,
-      "occurrence_expanded_replaced_vertex_source_bytes": 242814,
-      "observed_basis_points": 816,
+      "unique_table_vertex_source_bytes": 26233,
+      "occurrence_expanded_replaced_vertex_source_bytes": 391469,
+      "observed_basis_points": 670,
       "passed": true,
       "qualification": "Exact prepared-expression bytes for the two vector-Weyl kernels and the one authorized three-vector kernel; finalizers excluded from both sides."
     },
@@ -218,15 +218,17 @@
       "maximum_kernel_identities": 8,
       "observed_vertex_kernel_identities": 3,
       "observed_known_kernel_and_finalizer_identities": 7,
-      "maximum_complex_inputs": 16,
-      "observed_maximum_complex_inputs": 16,
+      "initial_prepared_kernel_maximum_complex_inputs": 16,
+      "observed_initial_prepared_kernel_maximum_complex_inputs": 16,
+      "complete_current_maximum_complex_inputs": 64,
+      "observed_complete_current_maximum_complex_inputs": 43,
       "maximum_complex_outputs_by_family": {
         "vector-weyl": 2,
         "three-vector-singleton": 4
       },
       "observed_maximum_complex_outputs": 4,
-      "maximum_source_payload_bytes": 65536,
-      "observed_maximum_source_payload_bytes": 16556,
+      "maximum_aggregate_source_payload_bytes": 65536,
+      "largest_prepared_expression_bytes": 16556,
       "maximum_semantic_table_bytes": 4194304
     }
   },
@@ -235,7 +237,7 @@
       "kind": "global-repeated-prepared-kernel-occurrences",
       "numerator": 103,
       "denominator": 203,
-      "basis_points": 5074,
+      "basis_points": 5073,
       "accepted": true,
       "reason": "user-authorized global cost-weighted materialized-schedule denominator"
     },
@@ -262,7 +264,7 @@
     "occurrence_proxy_after_extension": {
       "numerator": 103,
       "denominator": 203,
-      "basis_points": 5074
+      "basis_points": 5073
     },
     "vertex_prepared_kernel_id": 4,
     "vertex_complex_input_count": 16,
@@ -270,7 +272,9 @@
     "finalizer_prepared_kernel_id": 37,
     "finalizer_complex_input_count": 8,
     "finalizer_complex_output_count": 4,
-    "estimated_semantic_row_bytes": 1440,
+    "complete_composite_complex_input_count": 20,
+    "complete_composite_complex_output_count": 4,
+    "exact_semantic_row_bytes": 1040,
     "descriptor_bytes": 776
   },
   "symjit_observability": {

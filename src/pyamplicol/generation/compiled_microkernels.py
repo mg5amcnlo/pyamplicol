@@ -863,7 +863,7 @@ class CompiledMicrokernelSession:
             interactions = interactions_by_current[current_id]
             slots = slots_by_current.get(current_id, ())
             finalization = finalizers.get(current_id)
-            if not slots or finalization is None or current.dimension != 2:
+            if not slots or finalization is None or current.dimension not in {2, 4}:
                 continue
             chunk_ids = {_slot_chunk_index(slot, ranges) for slot in slots}
             if None in chunk_ids or len(chunk_ids) != 1:
@@ -886,6 +886,7 @@ class CompiledMicrokernelSession:
                     interaction,
                     spec,
                     binding,
+                    contribution_count=len(interactions),
                 ):
                     structural = False
                     break
@@ -936,8 +937,7 @@ class CompiledMicrokernelSession:
         for interaction in self.dag.interactions:
             binding = self._vertex_binding(interaction)
             binding_by_interaction[interaction.id] = binding
-            if self.dag.currents[interaction.result_id].dimension == 2:
-                active_occurrences[int(binding.kernel_id)] += 1  # type: ignore[attr-defined]
+            active_occurrences[int(binding.kernel_id)] += 1  # type: ignore[attr-defined]
             interactions_by_current[interaction.result_id].append(interaction)
         repeated_kernel_ids = {
             kernel_id for kernel_id, count in active_occurrences.items() if count > 1
@@ -958,7 +958,7 @@ class CompiledMicrokernelSession:
         for current_id, interactions in sorted(interactions_by_current.items()):
             current = self.dag.currents[current_id]
             finalizer = finalizers.get(current_id)
-            if finalizer is None or current.dimension != 2:
+            if finalizer is None or current.dimension not in {2, 4}:
                 continue
             vertex_ids: list[int] = []
             if any(
@@ -970,6 +970,7 @@ class CompiledMicrokernelSession:
                         )
                     ],
                     binding_by_interaction[interaction.id],
+                    contribution_count=len(interactions),
                 )
                 for interaction in interactions
             ):
@@ -1096,6 +1097,8 @@ class CompiledMicrokernelSession:
         interaction: InteractionNode,
         spec: PreparedKernelSpec,
         binding: object,
+        *,
+        contribution_count: int,
     ) -> bool:
         if (
             spec.contract_kind != "vertex"
@@ -1115,10 +1118,21 @@ class CompiledMicrokernelSession:
         ):
             return False
         result_state = binding.result_state  # type: ignore[attr-defined]
+        left_state = binding.left_state  # type: ignore[attr-defined]
+        right_state = binding.right_state  # type: ignore[attr-defined]
         result = self.dag.currents[interaction.result_id]
         if result_state.dimension != result.dimension:
             return False
-        return result.dimension == 2 and result_state.basis == "weyl-chiral"
+        if result.dimension == 2:
+            return result_state.basis == "weyl-chiral"
+        return (
+            result.dimension == 4
+            and contribution_count == 1
+            and result_state.basis == "lorentz-vector"
+            and left_state.basis == "lorentz-vector"
+            and right_state.basis == "lorentz-vector"
+            and any("three-vector-current" in proof for proof in spec.proof_classes)
+        )
 
     def _vertex_binding(self, interaction: InteractionNode) -> object:
         left = self.dag.currents[interaction.left_id]
@@ -1332,9 +1346,10 @@ class CompiledMicrokernelSession:
 
         from symbolica import Expression
 
-        if item.dimension != 2:
+        if item.dimension not in {2, 4}:
             raise ValueError(
-                "compiled complete-current islands require two-component currents"
+                "compiled complete-current islands require two- or "
+                "four-component currents"
             )
         if len(interactions) != len(witnesses) or not interactions:
             raise ValueError("compiled complete-current witnesses are incomplete")

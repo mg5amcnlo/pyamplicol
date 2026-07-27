@@ -175,14 +175,14 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
 
     assert session.profitability_diagnostics == {
         "contract": ("materialized-active-repeated-prepared-kernel-occurrences-v1"),
-        "active_occurrence_count": 98,
-        "eligible_occurrence_count": 98,
-        "coverage_basis_points": 10000,
-        "unique_projected_source_bytes": 5916,
-        "replaced_projected_source_bytes": 289884,
-        "projected_source_basis_points": 204,
-        "kernel_identity_count": 4,
-        "admitted_current_count": 26,
+        "active_occurrence_count": 203,
+        "eligible_occurrence_count": 103,
+        "coverage_basis_points": 5073,
+        "unique_projected_source_bytes": 26233,
+        "replaced_projected_source_bytes": 391469,
+        "projected_source_basis_points": 670,
+        "kernel_identity_count": 6,
+        "admitted_current_count": 31,
         "admitted": True,
     }
     current_stages = lowerings[:-1]
@@ -190,7 +190,7 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         [int(call["invocation_rows"]["count"]) for call in item.table_calls]
         for item in current_stages
     ] == [
-        [1, 1, 1, 1],
+        [1, 1, 1, 1, 5],
         [1, 1, 1, 1],
         [1, 1, 1, 1],
         [1, 1, 1, 1],
@@ -198,15 +198,15 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         [1, 1, 1, 1],
         [1, 1],
     ]
-    assert sum(len(item.table_calls) for item in current_stages) == 26
-    assert sum(len(item.owned_current_ids) for item in current_stages) == 26
+    assert sum(len(item.table_calls) for item in current_stages) == 27
+    assert sum(len(item.owned_current_ids) for item in current_stages) == 31
     assert (
         sum(
             int(call["invocation_rows"]["count"])
             for item in current_stages
             for call in item.table_calls
         )
-        == 26
+        == 31
     )
     assert all(
         int(call["invocation_rows"]["count"])
@@ -215,14 +215,29 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         for item in current_stages
         for call in item.table_calls
     )
-    assert len(session._kernel_sources) == 26
+    [four_component_call] = [
+        call
+        for item in current_stages
+        for call in item.table_calls
+        if int(call["invocation_rows"]["count"]) == 5
+    ]
+    assert four_component_call["owned_current_ids"] == [15, 17, 19, 21, 23]
+    assert four_component_call["interaction_ids"] == [4, 6, 8, 10, 12]
+    assert four_component_call["invocation_rows"]["size_bytes"] == 840
+    assert four_component_call["attachment_rows"]["size_bytes"] == 200
+    four_component_source = session._kernel_sources[
+        int(four_component_call["table_kernel_id"])
+    ]
+    assert four_component_source.input_complex_count == 20
+    assert four_component_source.output_complex_count == 4
+    assert len(session._kernel_sources) == 27
     assert (
         max(source.input_complex_count for source in session._kernel_sources.values())
         == 43
     )
     assert {
         source.output_complex_count for source in session._kernel_sources.values()
-    } == {2}
+    } == {2, 4}
     assert all(
         item.factor_catalog
         == (
@@ -281,12 +296,14 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
     )
     for lowering in current_stages:
         for call in lowering.table_calls:
-            [current_id] = call["owned_current_ids"]
             expected_order = [
                 interaction_id
+                for current_id in call["owned_current_ids"]
                 for interaction_id in lowering.original_stage.interaction_ids
-                if evaluator.compiled.dag.interactions[interaction_id].result_id
-                == current_id
+                if (
+                    evaluator.compiled.dag.interactions[interaction_id].result_id
+                    == current_id
+                )
             ]
             assert call["interaction_ids"] == expected_order
         if lowering.table_calls:
@@ -312,7 +329,7 @@ def test_qq_z6g_microkernel_census_and_call_partition_are_frozen(
         )
         for item in lowerings
     ] == [
-        (94, 68),
+        (94, 24),
         (176, 134),
         (244, 186),
         (292, 194),
@@ -355,7 +372,7 @@ def test_small_ddbar_z3g_is_residual_only(tmp_path: Path) -> None:
         symbolica_settings=settings,
     )
 
-    assert session.profitability_diagnostics["eligible_occurrence_count"] == 32
+    assert session.profitability_diagnostics["eligible_occurrence_count"] == 34
     assert session.profitability_diagnostics["admitted"] is False
     assert not session._admitted_current_ids
     assert all(

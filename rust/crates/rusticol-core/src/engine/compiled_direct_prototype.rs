@@ -2548,6 +2548,7 @@ fn load_stage(
                         kernel,
                         call,
                         &direct.plane_catalog,
+                        &current_components_by_id,
                         &invocation_bytes,
                         &attachment_bytes,
                     )?;
@@ -2648,6 +2649,7 @@ fn validate_complete_current_table_rows(
     kernel: &CompiledTableKernelManifest,
     call: &CompiledTableCallGroupManifest,
     plane_catalog: &[CompiledPlaneCatalogEntryManifest],
+    current_components_by_id: &BTreeMap<usize, Vec<usize>>,
     invocation_bytes: &[u8],
     attachment_bytes: &[u8],
 ) -> RusticolResult<()> {
@@ -2679,6 +2681,23 @@ fn validate_complete_current_table_rows(
     let attachment_width = attachment_plane_count
         .checked_add(2)
         .ok_or_else(|| RusticolError::integrity("compiled attachment row width overflows"))?;
+    let mut current_plane_ids = BTreeMap::new();
+    for (plane_id, plane) in plane_catalog.iter().enumerate() {
+        if plane.storage != "current" {
+            continue;
+        }
+        let current_id = plane.current_id.ok_or_else(|| {
+            RusticolError::integrity("compiled current plane has no semantic owner")
+        })?;
+        if current_plane_ids
+            .insert((current_id, plane.component, plane.part.as_str()), plane_id)
+            .is_some()
+        {
+            return Err(RusticolError::integrity(
+                "compiled plane catalog aliases a semantic current plane",
+            ));
+        }
+    }
     let row_count = call.owned_current_ids.len();
     if invocation_bytes.len()
         != row_count
@@ -2751,22 +2770,72 @@ fn validate_complete_current_table_rows(
 
         let attachment_start = row * attachment_width;
         let expected_current_id = call.owned_current_ids[row];
-        for column in 0..attachment_plane_count {
-            let plane_id = word(
+        let expected_components = current_components_by_id
+            .get(&expected_current_id)
+            .ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled complete-current attachment owner is absent from stage outputs",
+                )
+            })?;
+        if expected_components.len() != attachment_plane_count / 2 {
+            return Err(RusticolError::integrity(
+                "compiled complete-current attachment width disagrees with its stage outputs",
+            ));
+        }
+        for (complex_column, expected_component) in expected_components.iter().enumerate() {
+            let real_column = 2 * complex_column;
+            let real_plane_id = word(
                 attachment_bytes,
-                attachment_start + column,
+                attachment_start + real_column,
                 "compiled attachment plane",
             )? as usize;
-            let plane = plane_catalog.get(plane_id).ok_or_else(|| {
+            let imag_plane_id = word(
+                attachment_bytes,
+                attachment_start + real_column + 1,
+                "compiled attachment plane",
+            )? as usize;
+            let real_plane = plane_catalog.get(real_plane_id).ok_or_else(|| {
                 RusticolError::integrity(
                     "compiled complete-current attachment references an absent plane",
                 )
             })?;
-            if plane.storage != "current"
-                || plane.current_id.map(|value| value as usize) != Some(expected_current_id)
-            {
+            let imag_plane = plane_catalog.get(imag_plane_id).ok_or_else(|| {
+                RusticolError::integrity(
+                    "compiled complete-current attachment references an absent plane",
+                )
+            })?;
+            for (plane_id, plane, part) in [
+                (real_plane_id, real_plane, "real"),
+                (imag_plane_id, imag_plane, "imag"),
+            ] {
+                if plane.storage != "current"
+                    || plane.current_id.map(|value| value as usize) != Some(expected_current_id)
+                {
+                    return Err(RusticolError::integrity(
+                        "compiled complete-current attachment escapes its declared owner",
+                    ));
+                }
+                if plane.component != *expected_component || plane.part != part {
+                    return Err(RusticolError::integrity(
+                        "compiled complete-current attachment does not exactly cover its stage output",
+                    ));
+                }
+                let semantic_owner = u32::try_from(expected_current_id).map_err(|_| {
+                    RusticolError::integrity(
+                        "compiled complete-current attachment owner exceeds u32",
+                    )
+                })?;
+                if current_plane_ids.get(&(semantic_owner, plane.component, part))
+                    != Some(&plane_id)
+                {
+                    return Err(RusticolError::integrity(
+                        "compiled complete-current attachment aliases an output plane",
+                    ));
+                }
+            }
+            if real_plane_id == imag_plane_id {
                 return Err(RusticolError::integrity(
-                    "compiled complete-current attachment escapes its declared owner",
+                    "compiled complete-current attachment aliases an output plane",
                 ));
             }
         }
@@ -3880,10 +3949,12 @@ extern "C" int native_direct_leaf_direct_application_v1(
         };
         let invocation_bytes = row_bytes(&[0, 1, 0, 1]);
         let attachment_bytes = row_bytes(&[2, 3, 0, 0]);
+        let expected_output_components = BTreeMap::from([(1, vec![1])]);
         validate_complete_current_table_rows(
             &plan.table_kernels[0],
             &plan.table_calls[0],
             &plan.plane_catalog,
+            &expected_output_components,
             &invocation_bytes,
             &attachment_bytes,
         )
@@ -3901,6 +3972,11 @@ extern "C" int native_direct_leaf_direct_application_v1(
             ),
             (
                 invocation_bytes.clone(),
+                row_bytes(&[2, 2, 0, 0]),
+                "exactly cover",
+            ),
+            (
+                invocation_bytes.clone(),
                 row_bytes(&[2, 3, 1, 0]),
                 "identity overwrite",
             ),
@@ -3914,12 +3990,31 @@ extern "C" int native_direct_leaf_direct_application_v1(
                 &plan.table_kernels[0],
                 &plan.table_calls[0],
                 &plan.plane_catalog,
+                &expected_output_components,
                 &bad_invocations,
                 &bad_attachments,
             )
             .expect_err("malformed complete-current rows must fail closed");
             assert!(error.to_string().contains(expected));
         }
+        let mut aliased_catalog = plan.plane_catalog.clone();
+        let mut aliased_plane = aliased_catalog[2].clone();
+        aliased_plane.plane_id = aliased_catalog.len() as u32;
+        aliased_catalog.push(aliased_plane);
+        let error = validate_complete_current_table_rows(
+            &plan.table_kernels[0],
+            &plan.table_calls[0],
+            &aliased_catalog,
+            &expected_output_components,
+            &invocation_bytes,
+            &attachment_bytes,
+        )
+        .expect_err("aliased semantic output planes must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("aliases a semantic current plane")
+        );
 
         let amplitude = stage_manifest(
             "amplitude-stage",
