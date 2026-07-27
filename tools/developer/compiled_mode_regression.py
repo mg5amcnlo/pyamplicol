@@ -3190,6 +3190,23 @@ def run_regression(arguments: argparse.Namespace) -> dict[str, Any]:
         "baseline": baseline_python,
         "current": current_python,
     }
+    baseline_profile_protocol = getattr(
+        arguments,
+        "baseline_profile_protocol",
+        FROZEN_BASELINE_PROFILE_PROTOCOL,
+    )
+    if baseline_profile_protocol not in {
+        FROZEN_BASELINE_PROFILE_PROTOCOL,
+        ARENA_PROFILE_PROTOCOL,
+    }:
+        raise RegressionError(
+            "unsupported baseline profile protocol: "
+            f"{baseline_profile_protocol!r}"
+        )
+    profile_protocols = {
+        "baseline": baseline_profile_protocol,
+        "current": ARENA_PROFILE_PROTOCOL,
+    }
     provenance = {
         "driver": _path_identity(Path(__file__)),
         "watchdog": _path_identity(WATCHDOG),
@@ -3283,11 +3300,7 @@ def run_regression(arguments: argparse.Namespace) -> dict[str, Any]:
                 helicities=arguments.helicity,
                 color_flows=arguments.color_flow,
                 execution_mode=execution_mode,
-                profile_protocol=(
-                    ARENA_PROFILE_PROTOCOL
-                    if lane == "current"
-                    else FROZEN_BASELINE_PROFILE_PROTOCOL
-                ),
+                profile_protocol=profile_protocols[lane],
                 dependency_site=dependency_sites[lane],
                 include_precision32=request_precision32,
             )
@@ -3302,7 +3315,9 @@ def run_regression(arguments: argparse.Namespace) -> dict[str, Any]:
                 batch_size=arguments.batch_size,
                 expected_execution_mode=execution_mode,
                 require_precision32=request_precision32,
-                require_arena_profile=lane == "current",
+                require_arena_profile=(
+                    profile_protocols[lane] == ARENA_PROFILE_PROTOCOL
+                ),
             )
             observed_precision32 = isinstance(
                 sample.get("precision32_numerical_result"),
@@ -3494,6 +3509,7 @@ def run_regression(arguments: argparse.Namespace) -> dict[str, Any]:
                 ARENA_PHASE_TIMING_SCOPE
             ),
             "required_current_profile_attribution_evaluator_timing_available": False,
+            "required_baseline_profile_protocol": baseline_profile_protocol,
             "required_current_profile_protocol": ARENA_PROFILE_PROTOCOL,
             "timing_sample_contract": PAIRED_TIMING_SAMPLE_CONTRACT,
             "precision32_correctness_policy": PRECISION32_CORRECTNESS_POLICY,
@@ -3533,6 +3549,15 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--baseline-python", type=Path, required=True)
     result.add_argument("--current-python", type=Path, required=True)
+    result.add_argument(
+        "--baseline-profile-protocol",
+        choices=(FROZEN_BASELINE_PROFILE_PROTOCOL, ARENA_PROFILE_PROTOCOL),
+        default=FROZEN_BASELINE_PROFILE_PROTOCOL,
+        help=(
+            "profile boundary supported by the baseline runtime "
+            "(default: frozen-pre-arena)"
+        ),
+    )
     result.add_argument("--output-root", type=Path, required=True)
     result.add_argument(
         "--result-path",

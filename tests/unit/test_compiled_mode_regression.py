@@ -344,6 +344,10 @@ def test_parser_exposes_required_lanes_and_plan_defaults(tmp_path: Path) -> None
     assert arguments.samples == 7
     assert arguments.target_runtime == 5.0
     assert arguments.minimum_samples == 7
+    assert (
+        arguments.baseline_profile_protocol
+        == regression.FROZEN_BASELINE_PROFILE_PROTOCOL
+    )
 
 
 def test_parser_rejects_fewer_than_five_outer_samples(tmp_path: Path) -> None:
@@ -1626,9 +1630,15 @@ def test_eager_artifact_is_never_accepted_as_compiled(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "baseline_profile_protocol",
+    (None, regression.ARENA_PROFILE_PROTOCOL),
+    ids=("default-frozen-baseline", "arena-baseline"),
+)
 def test_run_regression_reuses_one_read_only_shared_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    baseline_profile_protocol: str | None,
 ) -> None:
     baseline_python = tmp_path / "baseline-python"
     current_python = tmp_path / "current-python"
@@ -1681,10 +1691,30 @@ def test_run_regression_reuses_one_read_only_shared_artifact(
         profile_timeout=120.0,
         regenerate_artifacts=False,
     )
+    if baseline_profile_protocol is not None:
+        arguments.baseline_profile_protocol = baseline_profile_protocol
 
     result = regression.run_regression(arguments)
 
     assert len(observed_commands) == 10
+    expected_baseline_profile_protocol = (
+        regression.FROZEN_BASELINE_PROFILE_PROTOCOL
+        if baseline_profile_protocol is None
+        else baseline_profile_protocol
+    )
+    assert {
+        (
+            "baseline" if Path(command[0]) == baseline_python else "current",
+            command[command.index("--profile-protocol") + 1],
+        )
+        for command in observed_commands
+    } == {
+        ("baseline", expected_baseline_profile_protocol),
+        ("current", regression.ARENA_PROFILE_PROTOCOL),
+    }
+    assert result["configuration"]["required_baseline_profile_protocol"] == (
+        expected_baseline_profile_protocol
+    )
     assert (artifact / "payload.bin").read_bytes() == original_payload
     assert result["configuration"]["shared_artifact"] == str(artifact)
     assert result["resources"]["generation_subprocess_count"] == 0
