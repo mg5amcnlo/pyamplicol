@@ -6,10 +6,10 @@ SymJIT capabilities; pyAmpliCol recurrence roles and artifact policy remain in
 Rusticol. They are retained as a reviewable record and are no longer applied
 by pyAmpliCol's contributor installer.
 
-The same four commits are published on
+The complete integration series is published on
 `ValentinHirschi/symjit_changes_for_pyamplicol` branch
 `pyamplicol-generic-direct-apis` at
-`89efdb806e7fcd9ac68a9d38f3f2880adf1987d2` and proposed upstream in
+`60a9d66fbfb2181d36a5747c389714eccc187244` and proposed upstream in
 `siravan/symjit#12`.
 
 ## Upstream submission order
@@ -26,8 +26,13 @@ The same four commits are published on
    table-driven direct application for repeated row/point execution and
    multi-destination fan-out on AArch64 and x86-64.
 
-All four patches are already present in the locked fork revision. The active
-contributor patch closure is empty.
+All four archived upstream patches are already present in the locked fork
+revision. Three subsequent fork commits permit internal complex stack spills,
+safely materialize allocator-produced scratch outputs through a checked
+four-slot stack frame and preserved general-register pair, and make this
+pyAmpliCol integration branch `rlib`-only. The contributor installer applies
+no patches and performs no source rewrite: its pristine archive and candidate
+tree identities are required to match exactly.
 
 The direct application input format is for trusted bytecode. It is not a
 sandbox or hostile-input parser. Shape, range, and alias checks remain because

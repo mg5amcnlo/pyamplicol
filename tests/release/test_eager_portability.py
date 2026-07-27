@@ -535,6 +535,69 @@ def test_producer_rejects_an_unexpected_architecture_before_building(
     assert not (tmp_path / "transfer").exists()
 
 
+def test_producer_cli_accepts_explicit_release_asset_mode(tmp_path: Path) -> None:
+    arguments = portability._parser().parse_args(
+        [
+            "produce",
+            str(tmp_path / "transfer"),
+            "--asset-mode",
+            "release",
+        ]
+    )
+
+    assert arguments.asset_mode == "release"
+
+
+def test_release_asset_output_uses_source_only_store_layout(tmp_path: Path) -> None:
+    output = tmp_path / "transfer"
+
+    assert portability._source_ready_asset_directory(output, "candidate") == output
+    assert (
+        portability._source_ready_asset_directory(
+            output,
+            "release",
+        )
+        == output / "release_assets" / "prepared_models"
+    )
+    with pytest.raises(
+        portability.PortabilityError,
+        match="unsupported prepared-model asset mode",
+    ):
+        portability._source_ready_asset_directory(output, "mixed")
+
+
+def test_transfer_bundle_member_accepts_only_root_or_release_store() -> None:
+    assert portability._transfer_bundle_member("built-in-sm.pyamplicol-model") == Path(
+        "built-in-sm.pyamplicol-model"
+    )
+    assert portability._transfer_bundle_member(
+        "release_assets/prepared_models/built-in-sm.pyamplicol-model"
+    ) == Path("release_assets/prepared_models/built-in-sm.pyamplicol-model")
+    for value in (
+        "nested/built-in-sm.pyamplicol-model",
+        "release_assets/built-in-sm.pyamplicol-model",
+        "release_assets/prepared_models/nested/built-in-sm.pyamplicol-model",
+    ):
+        with pytest.raises(
+            portability.PortabilityError,
+            match="exact release prepared-model source store",
+        ):
+            portability._transfer_bundle_member(value)
+
+
+def test_release_asset_dispatch_reaches_real_writer(tmp_path: Path) -> None:
+    bundle = tmp_path / "invalid.pyamplicol-model"
+    bundle.write_bytes(b"not a prepared-model bundle")
+
+    with pytest.raises(RuntimeError, match="prepared-model bundle is invalid"):
+        portability._write_source_ready_asset(
+            bundle,
+            tmp_path / "output",
+            architecture="x86_64",
+            asset_mode="release",
+        )
+
+
 def test_consumer_accepts_portable_pack_across_architectures(
     tmp_path: Path,
     contracts: portability.RuntimeContracts,

@@ -39,6 +39,24 @@ def test_prepared_model_bootstrap_rejects_ambiguous_values(
         backend._prepared_model_bootstrap("candidate")
 
 
+def test_release_prepared_model_bootstrap_requires_explicit_release_context() -> None:
+    assert backend._release_prepared_model_bootstrap("release", None) is False
+    with pytest.raises(RuntimeError, match="explicit producer context"):
+        backend._release_prepared_model_bootstrap("release", "wrong")
+    with pytest.raises(RuntimeError, match="requires release dependency mode"):
+        backend._release_prepared_model_bootstrap(
+            "candidate",
+            backend._RELEASE_PREPARED_MODEL_BOOTSTRAP_CONTEXT,
+        )
+    assert (
+        backend._release_prepared_model_bootstrap(
+            "release",
+            backend._RELEASE_PREPARED_MODEL_BOOTSTRAP_CONTEXT,
+        )
+        is True
+    )
+
+
 def test_selftest_fixture_bootstrap_requires_explicit_candidate_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,6 +375,105 @@ def test_release_overlay_skips_contributor_native_digest(monkeypatch) -> None:
         assert not (overlay / "src/pyamplicol/_build_info.json").exists()
 
 
+def test_release_overlay_requires_source_store_in_git_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_checkout = tmp_path / "checkout"
+    source_checkout.mkdir()
+    (source_checkout / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+
+    def copy_without_store(destination: Path) -> None:
+        destination.mkdir(parents=True)
+
+    monkeypatch.setattr(backend, "ROOT", source_checkout)
+    monkeypatch.setattr(backend, "_copy_allowlisted_source", copy_without_store)
+    monkeypatch.setattr(backend, "_stage_cargo_inputs", lambda *_args, **_kwargs: None)
+
+    with (
+        pytest.raises(RuntimeError, match="source store is missing"),
+        backend._overlay("release", project_release_prepared_models=True),
+    ):
+        pass
+
+
+def test_release_overlay_reuses_canonical_assets_from_source_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_archive = tmp_path / "archive"
+    source_archive.mkdir()
+
+    def copy_canonical_release_assets(destination: Path) -> None:
+        asset = destination / "src/pyamplicol/assets/prepared_models/release.bin"
+        asset.parent.mkdir(parents=True)
+        asset.write_bytes(b"canonical release payload")
+
+    monkeypatch.setattr(backend, "ROOT", source_archive)
+    monkeypatch.setattr(
+        backend,
+        "_copy_allowlisted_source",
+        copy_canonical_release_assets,
+    )
+    monkeypatch.setattr(backend, "_stage_cargo_inputs", lambda *_args, **_kwargs: None)
+
+    with backend._overlay(
+        "release",
+        project_release_prepared_models=True,
+    ) as (overlay, _target):
+        assert (
+            overlay / "src/pyamplicol/assets/prepared_models/release.bin"
+        ).read_bytes() == b"canonical release payload"
+        assert not (overlay / "release_assets").exists()
+
+
+def test_release_prepared_model_bootstrap_overlay_is_non_publishable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "_clean_source_revision", lambda: "b" * 40)
+    monkeypatch.setattr(backend, "_native_build_inputs_digest", lambda _root: "c" * 64)
+
+    with backend._overlay(
+        "release",
+        release_prepared_model_bootstrap=True,
+    ) as (overlay, _target):
+        build_info = json.loads(
+            (overlay / "src/pyamplicol/_build_info.json").read_text(encoding="utf-8")
+        )
+
+        assert build_info == {
+            "candidate_fingerprint": None,
+            "native_build_inputs_sha256": "c" * 64,
+            "publishable": False,
+            "release_prepared_model_bootstrap": True,
+            "schema_version": 1,
+            "selftest_fixture_bootstrap": False,
+            "source_checkout": str(ROOT.resolve()),
+            "source_revision": "b" * 40,
+            "version": "0.1.0",
+        }
+        assert (overlay / "Cargo.lock").read_bytes() == (
+            ROOT / "Cargo.lock"
+        ).read_bytes()
+        assert not (overlay / ".cargo/config.toml").exists()
+
+
+def test_release_prepared_model_bootstrap_rejects_dirty_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "_clean_source_revision", lambda: None)
+    monkeypatch.setattr(backend, "_native_build_inputs_digest", lambda _root: "c" * 64)
+
+    with (
+        pytest.raises(RuntimeError, match="exact clean Git revision"),
+        backend._overlay(
+            "release",
+            release_prepared_model_bootstrap=True,
+        ),
+    ):
+        pass
+
+
 def test_selftest_staging_rejects_an_unavailable_target() -> None:
     with (
         backend._overlay("release") as (overlay, _target),
@@ -585,6 +702,7 @@ def test_archive_overlay_without_git_history_uses_pruned_allowlist(
     retained = {
         Path("build_backend/backend.py"): "archive = True\n",
         Path("docs/arxiv/pyAmpliCol.tex"): "maintained TeX\n",
+        Path("release_assets/prepared_models/README.md"): "release store\n",
         Path("src/pyamplicol/_sdk/config.py"): "maintained SDK config\n",
         Path("tests/fixtures/candidate-Cargo.lock"): "fixture lock\n",
     }
@@ -689,6 +807,27 @@ def test_candidate_digest_covers_only_contributor_dependency_inputs(
     assert backend._candidate_digest(*inputs) == config_changed
 
 
+def test_release_prepared_store_is_outside_native_build_identity(
+    tmp_path: Path,
+) -> None:
+    cargo = tmp_path / "Cargo.toml"
+    cargo.write_text("[workspace]\n", encoding="utf-8")
+    before = backend._native_build_inputs_digest(tmp_path)
+    store = tmp_path / "release_assets" / "prepared_models"
+    store.mkdir(parents=True)
+    (store / "built-in-sm-jit-o2-aarch64.metadata.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    assert backend._native_build_inputs_digest(tmp_path) == before
+
+    native = tmp_path / "rust" / "native.rs"
+    native.parent.mkdir()
+    native.write_text("fn changed() {}\n", encoding="utf-8")
+    assert backend._native_build_inputs_digest(tmp_path) != before
+
+
 def test_candidate_digest_rejects_patch_paths_outside_dependency_checkouts(
     tmp_path: Path,
 ) -> None:
@@ -756,8 +895,13 @@ def test_retained_pep517_hooks_use_gate_overlay_and_clean_environment(
     )
 
     @contextlib.contextmanager
-    def fake_overlay(mode: str):
+    def fake_overlay(
+        mode: str,
+        *,
+        project_release_prepared_models: bool = False,
+    ):
         assert mode == "release"
+        assert project_release_prepared_models is True
         yield overlay, target
 
     def fake_sdk(root: Path, target_dir: Path) -> Path:
@@ -982,7 +1126,12 @@ def test_pep517_backend_rejects_recursive_delegation(
     overlay.mkdir()
 
     @contextlib.contextmanager
-    def fake_overlay(_mode: str):
+    def fake_overlay(
+        _mode: str,
+        *,
+        project_release_prepared_models: bool = False,
+    ):
+        assert project_release_prepared_models is True
         yield overlay, tmp_path / "target"
 
     monkeypatch.setattr(backend, "_overlay", fake_overlay)

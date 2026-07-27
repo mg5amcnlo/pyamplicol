@@ -363,6 +363,64 @@ def _write_source_ready_candidate_asset(
             sys.path.remove(str(build_backend))
 
 
+def _write_source_ready_asset(
+    bundle: Path,
+    output_directory: Path,
+    *,
+    architecture: str,
+    asset_mode: str,
+) -> tuple[Path, Path]:
+    if asset_mode == "candidate":
+        return _write_source_ready_candidate_asset(
+            bundle,
+            output_directory,
+            architecture=architecture,
+        )
+    if asset_mode != "release":
+        raise PortabilityError(f"unsupported prepared-model asset mode: {asset_mode}")
+    build_backend = _ROOT / "build_backend"
+    inserted = False
+    if str(build_backend) not in sys.path:
+        sys.path.insert(0, str(build_backend))
+        inserted = True
+    try:
+        from prepared_models import write_release_packaged_prepared_model_asset
+
+        return write_release_packaged_prepared_model_asset(
+            _ROOT,
+            bundle,
+            output_directory,
+            architecture=architecture,
+        )
+    finally:
+        if inserted:
+            sys.path.remove(str(build_backend))
+
+
+def _source_ready_asset_directory(output: Path, asset_mode: str) -> Path:
+    if asset_mode == "candidate":
+        return output
+    if asset_mode == "release":
+        return output / "release_assets" / "prepared_models"
+    raise PortabilityError(f"unsupported prepared-model asset mode: {asset_mode}")
+
+
+def _transfer_bundle_member(value: object) -> PurePosixPath:
+    relative = PurePosixPath(_canonical_member_path(value, "bundle filename"))
+    parts = relative.parts
+    if len(parts) == 1:
+        return relative
+    if len(parts) == 3 and parts[:2] == (
+        "release_assets",
+        "prepared_models",
+    ):
+        return relative
+    raise PortabilityError(
+        "transferred bundle must be at the transfer root or in the exact "
+        "release prepared-model source store"
+    )
+
+
 def _preflight_all_prepared_applications(bundle: Path) -> int:
     from pyamplicol import _rusticol
 
@@ -420,6 +478,7 @@ def produce_transfer(
     python: Path,
     expected_system: str | None = None,
     expected_machine: str | None = None,
+    asset_mode: str = "candidate",
 ) -> dict[str, object]:
     actual_system, actual_machine, actual_architecture = _host_identity(
         "producer",
@@ -436,6 +495,7 @@ def produce_transfer(
     output.mkdir(parents=True, exist_ok=True)
     contracts = _runtime_contracts()
     environment = _command_environment()
+    asset_output = _source_ready_asset_directory(output, asset_mode)
 
     with tempfile.TemporaryDirectory(
         prefix="pyamplicol-eager-portability-pack-",
@@ -458,10 +518,11 @@ def produce_transfer(
         audit["preflight_evaluator_count"] = _preflight_all_prepared_applications(
             generated_bundle
         )
-        metadata_path, bundle = _write_source_ready_candidate_asset(
+        metadata_path, bundle = _write_source_ready_asset(
             generated_bundle,
-            output,
+            asset_output,
             architecture=actual_architecture,
+            asset_mode=asset_mode,
         )
 
     with tempfile.TemporaryDirectory(
@@ -503,7 +564,7 @@ def produce_transfer(
 
     fixture: dict[str, object] = {
         "bundle": {
-            "filename": bundle.name,
+            "filename": bundle.relative_to(output).as_posix(),
             **audit,
         },
         "expected": {
@@ -862,12 +923,7 @@ def consume_transfer(
     transfer = transfer_directory.expanduser().resolve(strict=True)
     fixture = _fixture(transfer / DEFAULT_FIXTURE_NAME)
     bundle_record = _object(fixture.get("bundle"), "transfer.bundle")
-    filename = _canonical_member_path(bundle_record.get("filename"), "bundle filename")
-    if len(PurePosixPath(filename).parts) != 1:
-        raise PortabilityError(
-            "transferred bundle filename must not contain directories"
-        )
-    bundle = transfer / filename
+    bundle = transfer / _transfer_bundle_member(bundle_record.get("filename"))
     contracts = _runtime_contracts()
     audit = audit_architecture_jit_bundle(
         bundle,
@@ -1021,6 +1077,15 @@ def _parser() -> argparse.ArgumentParser:
     produce.add_argument("--python", type=Path, default=Path(sys.executable))
     produce.add_argument("--expected-system")
     produce.add_argument("--expected-machine")
+    produce.add_argument(
+        "--asset-mode",
+        choices=("candidate", "release"),
+        default="candidate",
+        help=(
+            "Dependency identity written into the source-ready pack; release "
+            "pairs are placed below release_assets/prepared_models."
+        ),
+    )
 
     consume = subparsers.add_parser(
         "consume",
@@ -1051,6 +1116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 python=_python_executable(arguments.python),
                 expected_system=arguments.expected_system,
                 expected_machine=arguments.expected_machine,
+                asset_mode=arguments.asset_mode,
             )
         else:
             result = consume_transfer(

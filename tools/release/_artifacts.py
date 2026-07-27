@@ -225,6 +225,7 @@ _FORBIDDEN_SDIST_MEMBERS = {
 _FORBIDDEN_SDIST_PREFIXES = (
     "dependencies/checkouts/",
     "dependencies/patches/",
+    "release_assets/",
 )
 
 
@@ -503,14 +504,19 @@ def _candidate_dependency_overrides() -> dict[str, str]:
         raise ArtifactError(
             "candidate dependency provenance has an unsupported contributor lock"
         )
+    if contributor.get("patches") != []:
+        raise ArtifactError(
+            "candidate dependency provenance must disable local source patches"
+        )
     if (
         not isinstance(state, dict)
         or state.get("schema_version") != 1
         or state.get("publishable") is not False
+        or state.get("patches") != []
     ):
         raise ArtifactError(
-            "candidate dependency provenance requires non-publishable schema-v1 "
-            "installer state"
+            "candidate dependency provenance requires patchless, non-publishable "
+            "schema-v1 installer state"
         )
     expected_digests = {
         "release_lock_sha256": hashlib.sha256(release_path.read_bytes()).hexdigest(),
@@ -740,7 +746,6 @@ def _validate_prepared_model_assets(
             f"missing={missing}, extra={extra}"
         )
 
-    portable_bundle: bytes | None = None
     for architecture in PREPARED_MODEL_ARCHITECTURES:
         stem = f"{PREPARED_MODEL_ASSET_BASENAME}-{architecture}"
         metadata_name = f"{prepared_prefix}{stem}.metadata.json"
@@ -818,12 +823,6 @@ def _validate_prepared_model_assets(
             raise ArtifactError(
                 f"prepared-model bundle hash/size is invalid: {bundle_name}"
             )
-        if portable_bundle is not None and bundle != portable_bundle:
-            raise ArtifactError(
-                "prepared-model architecture aliases must contain "
-                "byte-identical portable bundles"
-            )
-        portable_bundle = bundle
 
 
 def _prepared_pack_compiler_digest(

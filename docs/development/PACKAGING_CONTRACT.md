@@ -24,8 +24,10 @@ unchanged.
 ## Dependency Modes
 
 Release mode reads `dependencies/release-lock.toml` and accepts only exact
-published package/crate versions and compatible ABI metadata. Git, path,
-editable, and candidate dependencies are forbidden.
+published package/crate versions and compatible ABI metadata. An immutable Git
+revision is permitted only when both the release lock and canonical
+`Cargo.lock` name the same repository and full commit. Path, editable,
+floating-Git, and candidate dependencies are forbidden.
 
 Candidate mode is available only from a full source checkout. It reads the
 repository-only contributor contract and produces explicitly non-publishable
@@ -35,6 +37,40 @@ from release wheels and source distributions.
 Release and candidate Cargo resolution are physically separate. A release
 command must fail closed when exact published inputs are unavailable; it must
 never fall back to contributor state.
+
+## Release Prepared-Model Production
+
+The canonical package directory
+`src/pyamplicol/assets/prepared_models` remains candidate-owned in a source
+checkout. Contributor overlays and wheels use those files byte-for-byte and
+never consult release identity.
+
+Release-only source inputs live outside the Python package at
+`release_assets/prepared_models`. A normal release build from a Git checkout
+requires exactly the README and both architecture pairs in that directory. The
+build overlay replaces the four canonical candidate payload files with the
+release pairs, removes the auxiliary store, and then validates the projected
+package assets against the active release lock. Missing, mixed, candidate, or
+stale release packs are build errors; the PEP 517 interface has no release
+bypass. The auxiliary store is deliberately outside the native-build identity,
+so producing its packs cannot change the bootstrap runtime that produced them.
+
+When those source-owned packs must be regenerated, manually dispatch
+`.github/workflows/release-prepared-models.yml`. Its dedicated backend entry
+point creates a temporary release-version bootstrap wheel with both package
+payloads and the auxiliary store removed. That wheel is explicitly marked
+`publishable: false` and
+`release_prepared_model_bootstrap: true`, requires an exact clean Git revision,
+and is rejected by the ordinary release artifact audit. It exists only long
+enough to run the architecture-local producer.
+
+The producer writes `mode: release`, an explicit null candidate fingerprint,
+package and bundle producer version `0.1.0`, and a source identity derived only
+from `dependencies/release-lock.toml` and canonical `Cargo.lock`. The workflow
+writes each pair below `release_assets/prepared_models` in its upload, then
+uploads it for review; it cannot commit, publish, or mutate the repository.
+Both architecture pairs must be committed to the source-only store in a later
+reviewed change before an ordinary release build can succeed.
 
 ## Wheel Contents
 
@@ -81,8 +117,14 @@ build with `python -m pip install .` using published dependencies and contain:
 - schemas, tests, examples, docs, and release tooling;
 - the README, licenses, notices, and TeX report sources.
 
-It excludes dependency checkouts, contributor setup, local candidate inputs,
-generated process outputs, build products, caches, and local environments.
+The canonical package paths in the retained sdist contain only the validated
+release pairs. The auxiliary `release_assets` store and the candidate package
+payloads are absent, so building a wheel from that sdist validates and reuses
+the canonical release payload without a second projection.
+
+The sdist excludes dependency checkouts, contributor setup, local candidate
+inputs, the auxiliary release source store, generated process outputs, build
+products, caches, and local environments.
 
 `just sdist`, `just wheel-from-sdist`, and the PEP 517 hooks exercise the same
 backend. The sdist audit checks required members and forbidden source-checkout
