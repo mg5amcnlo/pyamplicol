@@ -1748,10 +1748,13 @@ fn numerical_evidence(
                 };
                 max_absolute_difference = max_absolute_difference.max(absolute);
                 max_relative_difference = max_relative_difference.max(relative);
+                let tolerance = numerical_tolerance(reference, rtol, atol);
                 ensure!(
-                    absolute <= atol + rtol * reference.abs(),
+                    absolute <= tolerance,
                     "{} numerical mismatch at batch {}, point {}, plane {:?}: \
-                     actual={actual:.17e}, reference={reference:.17e}",
+                     actual={actual:.17e}, reference={reference:.17e}, \
+                     absolute={absolute:.17e}, tolerance={tolerance:.17e}, \
+                     rtol={rtol:.17e}, atol={atol:.17e}",
                     kind.label(),
                     runtime.arena.logical_batch,
                     point,
@@ -1771,6 +1774,10 @@ fn numerical_evidence(
         rtol,
         atol,
     })
+}
+
+fn numerical_tolerance(reference: f64, rtol: f64, atol: f64) -> f64 {
+    atol + rtol * reference.abs()
 }
 
 impl Arena {
@@ -2118,5 +2125,17 @@ mod tests {
         assert_eq!(&*arena.current_real, initial);
         assert!(arena.zero.iter().all(|value| *value == 0.0));
         assert!(arena.model_imaginary.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn numerical_tolerance_accepts_observed_o3_reassociation() {
+        let actual = 9.939_574_824_707_947_f64;
+        let reference = 9.939_574_824_707_945_f64;
+        let absolute = (actual - reference).abs();
+        let tolerance = numerical_tolerance(reference, 1.0e-12, 1.0e-15);
+
+        assert!(absolute <= tolerance);
+        assert!(absolute > 0.0);
+        assert!((reference + tolerance * 2.0 - reference).abs() > tolerance);
     }
 }
