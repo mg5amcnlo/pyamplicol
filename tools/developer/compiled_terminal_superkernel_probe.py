@@ -461,6 +461,7 @@ def _random_external_values(
     produced = {
         int(slot.component_start) + output_index - int(slot.output_start)
         for stage in stages
+        if not str(stage.stage_kind).startswith("amplitude")
         for slot in stage.output_slots
         for output_index in range(int(slot.output_start), int(slot.output_stop))
     }

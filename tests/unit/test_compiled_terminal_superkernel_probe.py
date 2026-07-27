@@ -247,6 +247,60 @@ def test_restore_streamed_blueprint_requires_released_expression_ownership() -> 
         )
 
 
+def test_random_external_values_ignore_amplitude_output_index_aliases() -> None:
+    external = _component(0, source_id=4, global_component=4)
+    current = SimpleNamespace(
+        stage_kind="current",
+        input_components=(external,),
+        output_slots=(
+            SimpleNamespace(
+                component_start=10,
+                output_start=0,
+                output_stop=1,
+            ),
+        ),
+    )
+    amplitude = SimpleNamespace(
+        stage_kind="amplitude",
+        input_components=(),
+        output_slots=(
+            SimpleNamespace(
+                component_start=4,
+                output_start=0,
+                output_stop=1,
+            ),
+        ),
+    )
+
+    values = probe._random_external_values((current, amplitude), point_count=3)
+
+    assert ("value", 4) in values
+    assert values[("value", 4)].shape == (3,)
+
+
+def test_random_external_values_exclude_current_outputs() -> None:
+    producer = SimpleNamespace(
+        stage_kind="current",
+        input_components=(),
+        output_slots=(
+            SimpleNamespace(
+                component_start=4,
+                output_start=0,
+                output_stop=1,
+            ),
+        ),
+    )
+    consumer = SimpleNamespace(
+        stage_kind="current",
+        input_components=(_component(0, source_id=4, global_component=4),),
+        output_slots=(),
+    )
+
+    values = probe._random_external_values((producer, consumer), point_count=3)
+
+    assert ("value", 4) not in values
+
+
 def _compile_record(
     *,
     payload_bytes: int,
