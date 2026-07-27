@@ -11,15 +11,15 @@ Only measurements whose numerical checks pass are counted below. The scope compr
 \midrule
 1 & 64 & 28 & \textcolor{ReportOrange}{incomplete (0 censored, 36 open)} \\
 2 & 186 & 100 & \textcolor{ReportOrange}{incomplete (0 censored, 86 open)} \\
-3 & 206 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 206 open)} \\
-4 & 286 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 286 open)} \\
-5 & 285 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 285 open)} \\
-6 & 165 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 165 open)} \\
-7 & 165 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 165 open)} \\
-8 & 165 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 165 open)} \\
-9 & 124 & 0 & \textcolor{ReportOrange}{incomplete (0 censored, 124 open)} \\
+3 & 206 & 81 & \textcolor{ReportOrange}{incomplete (0 censored, 125 open)} \\
+4 & 286 & 21 & \textcolor{ReportOrange}{incomplete (0 censored, 265 open)} \\
+5 & 285 & 12 & \textcolor{ReportOrange}{incomplete (0 censored, 273 open)} \\
+6 & 165 & 6 & \textcolor{ReportOrange}{incomplete (0 censored, 159 open)} \\
+7 & 165 & 22 & \textcolor{ReportOrange}{incomplete (0 censored, 143 open)} \\
+8 & 165 & 6 & \textcolor{ReportOrange}{incomplete (0 censored, 159 open)} \\
+9 & 124 & 6 & \textcolor{ReportOrange}{incomplete (0 censored, 118 open)} \\
 \midrule
-\textbf{total} & 1646 & 128 & \textcolor{ReportOrange}{incomplete (0 censored, 1518 open)} \\
+\textbf{total} & 1646 & 282 & \textcolor{ReportOrange}{incomplete (0 censored, 1364 open)} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -31,12 +31,12 @@ Only measurements whose numerical checks pass are counted below. The scope compr
 \toprule
 \textbf{validation comparison} & \textbf{passed} & \textbf{largest relative difference} \\
 \midrule
-independent original-\AC{} reference records & 40 & \textcolor{ReportMuted}{reference} \\
-\PAC{} versus independent reference & 88 & \(\texttt{3.832}\times10^{-11}\) \\
-compiled/eager versus recurrence & 0 & \textcolor{ReportMuted}{---} \\
-optimized result versus resolved sum & 88 & \(\texttt{8.595}\times10^{-16}\) \\
+independent original-\AC{} reference records & 103 & \textcolor{ReportMuted}{reference} \\
+\PAC{} versus independent reference & 177 & \(\texttt{4.458}\times10^{-11}\) \\
+compiled/eager versus recurrence & 2 & \(\texttt{2.547}\times10^{-15}\) \\
+optimized result versus resolved sum & 179 & \(\texttt{1.833}\times10^{-15}\) \\
 scalar result versus higher precision & 0 & \textcolor{ReportMuted}{---} \\
 \bottomrule
 \end{tabular}
 \end{center}
-\ReportTableNote{Profile: \texttt{\ReportProfileName}. Measured source: \nolinkurl{6536ef131e18e7ff873eb1f4db1f08631155f3a9}. Independent-reference comparisons use a relative tolerance of \(10^{-8}\); cross-mode, resolved-sum, and higher-precision comparisons use \(10^{-12}\).}
+\ReportTableNote{Profile: \texttt{\ReportProfileName}. Measured source: \nolinkurl{6536ef131e18e7ff873eb1f4db1f08631155f3a9} \(\rightarrow\) \nolinkurl{be11d8304fdc04893dc0e23e9619be848126e3bc} \textcolor{ReportGreen}{(authenticated Class-C lineage)}. Independent-reference comparisons use a relative tolerance of \(10^{-8}\); cross-mode, resolved-sum, and higher-precision comparisons use \(10^{-12}\).}
