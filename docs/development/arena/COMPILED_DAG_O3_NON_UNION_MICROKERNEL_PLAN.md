@@ -424,7 +424,7 @@ and scratch-materialization costs.
 The contribution-level implementation therefore followed the mandatory
 failure branch of the acceptance contract and was not landed.
 
-## Complete-current formulation: active implementation
+## Complete-current formulation: measured outcome and rejection
 
 Continued optimization work reopened the feature with the complete-current
 design above. This is a replacement, not a compatibility path: the generator
@@ -452,6 +452,80 @@ milliseconds and produced roughly 1.3--1.7 KiB source applications, indicating
 that the first candidate's 110-second generation was duplicate residual
 compilation rather than composite-source cost. Exact artifact generation,
 aggregate source bytes, numerical comparison, and alternating runtime
-measurements remain the go/no-go evidence. This formulation is still withheld
-from `main` unless both batch 128 and batch 1024 exceed the 10% acceptance
-threshold.
+measurements were therefore required before any landing.
+
+The completed formulation was rejected on 2026-07-27 and must not be merged
+into `main`. The exact candidate source was
+`2fd961286cbb7854a93e4b59f6bdec237a98ff6f`, built as candidate wheel
+SHA-256
+`a03d8a415517cbe715b88c2a3d6e15326801f255d9db229d7d1f3004c406c7c0`.
+Its installed runtime reported native build-input SHA-256
+`61f9029a0c2789ab88c6d6c346a4bbe2a4006feb2aabfff63832aea4c6e8a76b`
+and native-module SHA-256
+`8c9dbbf04104d64e4368bc4a3c0ae153a11e160cfaaf9c4f853eca6ec6a4bfaf`.
+The matched comparator was
+`2b359bc0f50f724ec45f5ca4e71c458b3ce4f03e`, with native build-input
+SHA-256
+`c60c078033c7f66eebf21c6bc0f8215cefb3448575ee3f2cb5e4c722d301ad54`
+and native-module SHA-256
+`bf2da2b8f6383eefa2268a9c946a11b0ad357d979f3a22119ae2a7855c559279`.
+
+Fresh complete artifacts used identical built-in-SM process, O3 JIT, LC
+topology-replay, worker, validation, and selected-flow inputs:
+
+| Quantity | `2b359bc` baseline | `2fd9612` candidate | Candidate / baseline |
+|---|---:|---:|---:|
+| Generation command wall time | 5.9197 s | 13.5269 s | 2.285 |
+| JIT generation time | 3.8309 s | 10.4950 s | 2.739 |
+| Artifact tree | 23,611,060 bytes | 30,745,408 bytes | 1.302 |
+| Generation peak RSS | 0.303 GiB | 0.342 GiB | 1.129 |
+
+The exact cross-runtime eight-point selected-flow comparison passed with
+maximum absolute difference `6.201494420926899e-32`, maximum relative
+difference `6.2014944209269e-17`, and
+`evaluate() == evaluate_resolved().total()` under `rtol=1e-12` and
+`atol=1e-15`.
+
+The decisive go/no-go used five alternating outer subprocess samples per lane
+and batch. Each subprocess collected five native Arena headline blocks from
+the same deterministic timing batch. The raw JSON evidence aggregate has
+SHA-256
+`bb9f486ded98f98deb9481853f24475dd32d6ce600d4da359bf193e15da9fc45`.
+
+| Batch | Baseline us/point (median +/- MAD) | Candidate us/point (median +/- MAD) | Headline gain | Paired gain (median +/- MAD) |
+|---:|---:|---:|---:|---:|
+| 128 | 42.7410 +/- 1.0198 | 53.0954 +/- 0.7583 | -24.23% | -22.15% +/- 5.56% |
+| 1024 | 42.6835 +/- 0.7590 | 52.8326 +/- 0.3117 | -23.78% | -25.24% +/- 0.74% |
+
+The regression is structural rather than a cold-load or allocation effect.
+For the selected-flow helicity-sum path, the baseline executes 13 fused O3
+DirectApplication leaves per helicity pass. The candidate executes 28
+DirectTable groups plus nine residual leaves. Four helicity passes therefore
+produce exactly the observed increase from 52 to 148 Arena calls per
+top-level evaluation. The 28 table groups contain 1,034 invocation rows, and
+their 2,108 tableized complex outputs reload their inputs and traverse generic
+factor, operation, attachment, and destination handling. Logical source
+inputs rise from 9,305 in the fused baseline to 43,392 in the candidate, a
+4.66x increase.
+
+The generation and size failures have the same fragmentation cause. The
+baseline PACBIN contains 63 source and 63 state members. The candidate retains
+all of them, then adds 81 DirectTable sources and 17 residual source/state
+compiles. Cross-lane source memoization could remove at most 54 table
+compilations and roughly 3.67 seconds, leaving generation about 66% slower.
+Raw content deduplication could save at most about 0.4 MiB, far short of the
+4.77 MiB needed to satisfy the artifact limit. The v2 plan's repeated plane
+catalogs and bindings account for most of the JSON growth.
+
+Reaching a 10% gain from the measured candidate would require a further
+roughly 27.5% runtime reduction, in addition to independent generation and
+schema redesigns. A specialized identity-overwrite DirectTable ABI plus
+coarse current fusion might remove some envelope work, but it requires a new
+SymJIT API and still loses the fused baseline's shared-input CSE and register
+locality. It is not a credible bounded repair under this plan.
+
+The complete-current implementation therefore followed the mandatory failure
+branch of the acceptance contract. The DirectTable microkernel family is
+abandoned for compiled non-union-flow execution; future work should optimize
+the already-fused DirectApplication schedule rather than tableizing its
+currents.
