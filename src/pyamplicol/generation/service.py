@@ -17,7 +17,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
-from pyamplicol._internal.versions import verify_native_module
+from pyamplicol._internal.versions import active_source_revision, verify_native_module
 from pyamplicol.api.errors import GenerationError, ModelError, PyAmpliColError
 from pyamplicol.api.models import CompiledModel, _compiled_model_payload
 from pyamplicol.api.requests import (
@@ -91,6 +91,7 @@ from .dag_algorithms import (
     prune_global_helicity_flip_equivalent_roots,
 )
 from .dag_compiler import _restrict_color_plan, compile_generic_dag
+from .dag_equivalence import project_rectangular_dynamic_color_classes
 from .dag_types import GenericDAG
 from .eager_columnar import (
     EAGER_LOWERING_INPUT_ABI,
@@ -2089,6 +2090,13 @@ class GenerationBackend:
             if parity_preweighted
             else prune_global_helicity_flip_equivalent_roots(process.dag, model)
         )
+        reduced, dynamic_color_projection = (
+            project_rectangular_dynamic_color_classes(
+                reduced,
+                model,
+                source_revision=active_source_revision(),
+            )
+        )
         helicity_sum_dag: GenericDAG | None = None
         helicity_selector_union_dag: GenericDAG | None = None
         all_flow_union = self._all_flow_union_enabled
@@ -2160,6 +2168,7 @@ class GenerationBackend:
                 "after_amplitude_roots": len(reduced.amplitude_roots),
                 "mode": "proven global-helicity-flip equivalence",
             },
+            "dynamic_color_projection": dynamic_color_projection.to_json_dict(),
             **(
                 {}
                 if reduced.helicity_recurrence is None
@@ -2231,6 +2240,7 @@ class GenerationBackend:
             "interaction_count": len(reduced.interactions),
             "interaction_evaluation_count": reduced.interaction_evaluation_count,
             "amplitude_root_count": len(reduced.amplitude_roots),
+            "dynamic_color_projection": dynamic_color_projection.to_json_dict(),
             **(
                 {}
                 if reduced.helicity_recurrence is None
@@ -2980,6 +2990,7 @@ class GenerationBackend:
                 "current_count": len(dag.currents),
                 "source_count": len(dag.sources),
                 "interaction_count": len(dag.interactions),
+                "interaction_evaluation_count": dag.interaction_evaluation_count,
                 "amplitude_root_count": len(dag.amplitude_roots),
                 "truncated": False,
             },
@@ -3169,6 +3180,9 @@ class GenerationBackend:
                     "current_count": len(helicity_sum_dag.currents),
                     "source_count": len(helicity_sum_dag.sources),
                     "interaction_count": len(helicity_sum_dag.interactions),
+                    "interaction_evaluation_count": (
+                        helicity_sum_dag.interaction_evaluation_count
+                    ),
                     "amplitude_root_count": len(helicity_sum_dag.amplitude_roots),
                     "truncated": False,
                 },
@@ -3257,6 +3271,9 @@ class GenerationBackend:
                             "current_count": len(lane.dag.currents),
                             "source_count": len(lane.dag.sources),
                             "interaction_count": len(lane.dag.interactions),
+                            "interaction_evaluation_count": (
+                                lane.dag.interaction_evaluation_count
+                            ),
                             "amplitude_root_count": len(lane.dag.amplitude_roots),
                             "truncated": False,
                         },
@@ -3305,6 +3322,7 @@ class GenerationBackend:
                 "current_count": len(dag.currents),
                 "source_count": len(dag.sources),
                 "interaction_count": len(dag.interactions),
+                "interaction_evaluation_count": dag.interaction_evaluation_count,
                 "amplitude_root_count": len(dag.amplitude_roots),
                 "truncated": False,
             },
@@ -4405,6 +4423,9 @@ def _runtime_schema_dag_summary(
         "current_count": len(current_slots),
         "source_count": int(source_fill["source_count"]),
         "interaction_count": sum(int(stage["interaction_count"]) for stage in stages),
+        "interaction_evaluation_count": sum(
+            int(stage["interaction_evaluation_count"]) for stage in stages
+        ),
         "amplitude_root_count": int(amplitude_stage["output_count"]),
         "truncated": False,
     }
