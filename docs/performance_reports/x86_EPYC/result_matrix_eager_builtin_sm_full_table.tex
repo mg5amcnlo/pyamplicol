@@ -6,14 +6,16 @@
 \providecommand{\matrixratio}[2]{\matrixpunct{(}\textcolor{#1}{\texttt{x#2}}\matrixpunct{)}}
 \providecommand{\matrixratiopair}[4]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\textcolor{#3}{\texttt{#4}}\matrixpunct{)}}
 \providecommand{\matrixratiopairnotexposed}[2]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\matrixnotexposed{ReportMuted}\matrixpunct{)}}
+\providecommand{\matrixratiopairtotalevaluator}[3]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\matrixtotalevaluator{#3}\matrixpunct{)}}
 \providecommand{\matrixna}[1]{\textcolor{#1}{\texttt{N/A}}}
 \providecommand{\matrixnotapplicable}[1]{\textcolor{#1}{\textsc{not applicable}}}
 \providecommand{\matrixnotexposed}[1]{\textcolor{#1}{\textsc{not exposed}}}
+\providecommand{\matrixtotalevaluator}[1]{\textcolor{ReportBlue}{\texttt{T }}#1}
 \providecommand{\matrixbelow}[1]{\textcolor{ReportMuted}{\texttt{<#1}}}
 \providecommand{\matrixnaratio}[1]{\matrixpunct{(}\matrixna{#1}\matrixpunct{)}}
 \providecommand{\matrixstatus}[2]{\textcolor{#1}{\textsc{#2}}}
 \providecommand{\matrixncabsolute}[1]{\textcolor{ReportBlue}{\texttt{C }}#1\matrixpunct{; }\matrixstatus{ReportMuted}{n.c.}}
-\providecommand{\matrixcelllc}[6]{\begingroup\matrixentryfontlc\begin{tabular}[t]{@{}l@{\hspace{0.03in}}l@{\hspace{0.03in}}l@{}}#1&#2&#3\\#4&#5&#6\end{tabular}\endgroup}
+\providecommand{\matrixcelllc}[6]{\begingroup\matrixentryfontlc\scalebox{0.94}{\begin{tabular}[t]{@{}l@{\hspace{0.03in}}l@{\hspace{0.03in}}l@{}}#1&#2&#3\\#4&#5&#6\end{tabular}}\endgroup}
 \providecommand{\matrixcellcontracted}[4]{\begingroup\matrixentryfont\begin{tabular}[t]{@{}l@{\hspace{0.04in}}l@{}}#1&#2\\#3&#4\end{tabular}\endgroup}
 \providecommand{\matrixpair}[2]{\begin{tabular}[t]{@{}l@{\hspace{0.025in}/\hspace{0.025in}}l@{}}#1&#2\end{tabular}}
 \providecommand{\matrixsummarypair}[2]{\begin{tabular}[t]{@{}l@{\hspace{0.04in}}l@{}}#1&#2\end{tabular}}
@@ -26,32 +28,32 @@
 \footnotesize
 \setlength{\tabcolsep}{2.1pt}
 \renewcommand{\arraystretch}{1.10}
-\begin{tabular}{@{}r@{\hspace{0.04in}}L{1.65in}@{\hspace{0.06in}}L{2.49in}@{\hspace{0.06in}}L{2.49in}@{\hspace{0.06in}}L{2.49in}@{}}
+\begin{tabular}{@{}r@{\hspace{0.04in}}L{1.65in}@{\hspace{0.06in}}L{2.42in}@{\hspace{0.06in}}L{2.42in}@{\hspace{0.06in}}L{2.42in}@{}}
 \toprule
 \textbf{ID} & \textbf{base process} & \textbf{n=1} & \textbf{n=2} & \textbf{n=3} \\
 \specialrule{0.85pt}{0pt}{0pt}
 \rowcolor{refblue}
-\texttt{1} & $d\bar d\to Z+(n-1)g$ & \matrixcellcontracted{\texttt{6.54}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.265}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.71}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.718}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.67}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{2.9}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{1} & $d\bar d\to Z+(n-1)g$ & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
-\texttt{2} & $u\bar d\to W^++(n-1)g$ & \matrixcellcontracted{\texttt{7.88}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.198}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.56}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.441}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.53}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{1.91}}{\matrixstatus{ReportMuted}{N/A}} \\
-\addlinespace[0.05em]
-\rowcolor{refblue}
-\texttt{3} & $d\bar d\to e^+e^-+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.6}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.311}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.54}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.616}}{\matrixstatus{ReportMuted}{N/A}} \\
-\addlinespace[0.05em]
-\texttt{4} & $u\bar d\to e^+\nu_e+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.59}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.154}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.67}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.273}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{2} & $u\bar d\to W^++(n-1)g$ & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
 \rowcolor{refblue}
-\texttt{5} & $d\bar d\to ZZ+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.65}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{1}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.6}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{2.77}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{3} & $d\bar d\to e^+e^-+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
-\texttt{6} & $gg\to t\bar t+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.63}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{1.53}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.84}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{13.2}}{\matrixstatus{ReportMuted}{N/A}} \\
-\addlinespace[0.05em]
-\rowcolor{refblue}
-\texttt{7} & $d\bar d\to t\bar t+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.81}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{0.697}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{6.59}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{4.44}}{\matrixstatus{ReportMuted}{N/A}} \\
-\addlinespace[0.05em]
-\texttt{8} & $gg\to gg+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.75}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{5.96}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{7.34}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{57}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{4} & $u\bar d\to e^+\nu_e+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
 \rowcolor{refblue}
-\texttt{9} & $d\bar d\to ZZZ+(n-3)g$ & \matrixnotapplicable{ReportMuted} & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\texttt{6.88}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{5.82}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{5} & $d\bar d\to ZZ+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
+\addlinespace[0.05em]
+\texttt{6} & $gg\to t\bar t+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
+\addlinespace[0.05em]
+\rowcolor{refblue}
+\texttt{7} & $d\bar d\to t\bar t+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
+\addlinespace[0.05em]
+\texttt{8} & $gg\to gg+(n-2)g$ & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
+\addlinespace[0.05em]
+\rowcolor{refblue}
+\texttt{9} & $d\bar d\to ZZZ+(n-3)g$ & \matrixnotapplicable{ReportMuted} & \matrixnotapplicable{ReportMuted} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
 \texttt{10} & $d\bar d\to e^+e^-ZH+(n-4)g$ & \matrixnotapplicable{ReportMuted} & \matrixnotapplicable{ReportMuted} & \matrixnotapplicable{ReportMuted} \\
 \addlinespace[0.05em]
@@ -72,7 +74,7 @@
 \bottomrule
 \end{tabular}
 \endgroup
-\ReportTableNote{Baseline: recurrence JIT O2; candidate: eager-DAG JIT O2. Each cell shows the baseline generation and wall time, followed by candidate/baseline generation and wall-time ratios. A separate execution-attribution ratio appears only when both measurements expose one. Not applicable marks a process/multiplicity combination outside the process-family definition. Not exposed means that a successful wall-time measurement has no separately reported execution attribution; neither label denotes an unfilled measurement.}
+\ReportTableNote{Baseline: recurrence JIT O2; candidate: eager-DAG JIT O2. Each cell shows the baseline generation and wall time, followed by candidate/baseline generation and wall-time ratios. A separate execution-attribution ratio appears only when both measurements expose one. Not applicable marks a process/multiplicity combination outside the process-family definition. Not exposed means that a successful wall-time measurement has no separately reported execution attribution; for compiled and eager rows, the wall value remains the authenticated warmed total-evaluator boundary. Future compiled and eager entries additionally show an accumulated absolute evaluator-total value marked T; it is not an execution-attribution ratio. Older entries remain marked not exposed; neither label denotes an unfilled measurement.}
 \end{minipage}
 \clearpage
 \noindent\begin{minipage}{\linewidth}
@@ -107,7 +109,7 @@
 \texttt{8} & $gg\to gg+(n-2)g$ & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
 \rowcolor{refblue}
-\texttt{9} & $d\bar d\to ZZZ+(n-3)g$ & \matrixcellcontracted{\texttt{8.1}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{12.2}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\texttt{8.6}}{\matrixstatus{ReportMuted}{N/A}}{\texttt{60}}{\matrixstatus{ReportMuted}{N/A}} \\
+\texttt{9} & $d\bar d\to ZZZ+(n-3)g$ & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
 \texttt{10} & $d\bar d\to e^+e^-ZH+(n-4)g$ & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} & \matrixcellcontracted{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}}{\matrixstatus{ReportMuted}{N/A}} \\
 \addlinespace[0.05em]
@@ -128,5 +130,5 @@
 \bottomrule
 \end{tabular}
 \endgroup
-\ReportTableNote{Baseline: recurrence JIT O2; candidate: eager-DAG JIT O2. Each cell shows the baseline generation and wall time, followed by candidate/baseline generation and wall-time ratios. A separate execution-attribution ratio appears only when both measurements expose one. Not applicable marks a process/multiplicity combination outside the process-family definition. Not exposed means that a successful wall-time measurement has no separately reported execution attribution; neither label denotes an unfilled measurement.}
+\ReportTableNote{Baseline: recurrence JIT O2; candidate: eager-DAG JIT O2. Each cell shows the baseline generation and wall time, followed by candidate/baseline generation and wall-time ratios. A separate execution-attribution ratio appears only when both measurements expose one. Not applicable marks a process/multiplicity combination outside the process-family definition. Not exposed means that a successful wall-time measurement has no separately reported execution attribution; for compiled and eager rows, the wall value remains the authenticated warmed total-evaluator boundary. Future compiled and eager entries additionally show an accumulated absolute evaluator-total value marked T; it is not an execution-attribution ratio. Older entries remain marked not exposed; neither label denotes an unfilled measurement.}
 \end{minipage}

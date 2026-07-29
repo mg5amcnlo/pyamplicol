@@ -6,14 +6,16 @@
 \providecommand{\matrixratio}[2]{\matrixpunct{(}\textcolor{#1}{\texttt{x#2}}\matrixpunct{)}}
 \providecommand{\matrixratiopair}[4]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\textcolor{#3}{\texttt{#4}}\matrixpunct{)}}
 \providecommand{\matrixratiopairnotexposed}[2]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\matrixnotexposed{ReportMuted}\matrixpunct{)}}
+\providecommand{\matrixratiopairtotalevaluator}[3]{\matrixpunct{(}\textcolor{#1}{\texttt{#2}}\matrixpunct{|}\matrixtotalevaluator{#3}\matrixpunct{)}}
 \providecommand{\matrixna}[1]{\textcolor{#1}{\texttt{N/A}}}
 \providecommand{\matrixnotapplicable}[1]{\textcolor{#1}{\textsc{not applicable}}}
 \providecommand{\matrixnotexposed}[1]{\textcolor{#1}{\textsc{not exposed}}}
+\providecommand{\matrixtotalevaluator}[1]{\textcolor{ReportBlue}{\texttt{T }}#1}
 \providecommand{\matrixbelow}[1]{\textcolor{ReportMuted}{\texttt{<#1}}}
 \providecommand{\matrixnaratio}[1]{\matrixpunct{(}\matrixna{#1}\matrixpunct{)}}
 \providecommand{\matrixstatus}[2]{\textcolor{#1}{\textsc{#2}}}
 \providecommand{\matrixncabsolute}[1]{\textcolor{ReportBlue}{\texttt{C }}#1\matrixpunct{; }\matrixstatus{ReportMuted}{n.c.}}
-\providecommand{\matrixcelllc}[6]{\begingroup\matrixentryfontlc\begin{tabular}[t]{@{}l@{\hspace{0.03in}}l@{\hspace{0.03in}}l@{}}#1&#2&#3\\#4&#5&#6\end{tabular}\endgroup}
+\providecommand{\matrixcelllc}[6]{\begingroup\matrixentryfontlc\scalebox{0.94}{\begin{tabular}[t]{@{}l@{\hspace{0.03in}}l@{\hspace{0.03in}}l@{}}#1&#2&#3\\#4&#5&#6\end{tabular}}\endgroup}
 \providecommand{\matrixcellcontracted}[4]{\begingroup\matrixentryfont\begin{tabular}[t]{@{}l@{\hspace{0.04in}}l@{}}#1&#2\\#3&#4\end{tabular}\endgroup}
 \clearpage
 \subsection{Built-in SM dedicated \(d\bar d\to Z+\) gluon performance}
@@ -39,7 +41,7 @@
 \rowcolor{ReportGreen!12}
 1 & eager-DAG JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
-1 & recurrence JIT O2 & \texttt{6.52}\,\matrixratio{ReportGreen}{0.204} & \texttt{0.242}\,\matrixratio{ReportRed}{4.29} & \texttt{0.166}\,\matrixratio{ReportRed}{2.94} & \matrixncabsolute{\texttt{6.51}} & \texttt{0.135}\,\matrixratio{ReportOrange}{1.08} & \texttt{0.0197}\,\matrixratio{ReportGreen}{0.158} \\
+1 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
 2 & \AC{} reference & \texttt{25.6} & \texttt{0.366} & \matrixnotexposed{ReportMuted} & \texttt{0.000914} & \texttt{0.288} & \matrixnotexposed{ReportMuted} \\
@@ -51,7 +53,7 @@
 \rowcolor{ReportGreen!12}
 2 & eager-DAG JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
-2 & recurrence JIT O2 & \texttt{6.7}\,\matrixratio{ReportGreen}{0.261} & \texttt{0.614}\,\matrixratio{ReportOrange}{1.68} & \texttt{0.472}\,\matrixratio{ReportOrange}{1.29} & \matrixncabsolute{\texttt{6.61}} & \texttt{0.288}\,\matrixratio{ReportGreen}{0.999} & \texttt{0.0933}\,\matrixratio{ReportGreen}{0.324} \\
+2 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
 3 & \AC{} reference & \texttt{27.4} & \texttt{1.23} & \matrixnotexposed{ReportMuted} & \texttt{0.00149} & \texttt{0.834} & \matrixnotexposed{ReportMuted} \\
@@ -63,11 +65,11 @@
 \rowcolor{ReportGreen!12}
 3 & eager-DAG JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
-3 & recurrence JIT O2 & \texttt{6.75}\,\matrixratio{ReportGreen}{0.246} & \texttt{1.83}\,\matrixratio{ReportOrange}{1.49} & \texttt{1.56}\,\matrixratio{ReportOrange}{1.27} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
+3 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \bottomrule
 \end{tabular}
 \endgroup
-\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c. because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution; it is not a missing measurement.}
+\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c.; n.c. means not comparable because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution. For compiled and eager rows, wall time still exposes the authenticated warmed total-evaluator boundary. Future compiled and eager entries also show the accumulated absolute evaluator total marked T; T is not an attribution ratio. Older entries remain marked not exposed; it is not a missing measurement.}
 \end{minipage}
 \clearpage
 \noindent\begin{minipage}{\linewidth}
@@ -83,7 +85,7 @@
 & & \textbf{gen [s]} & \textbf{wall [us/pt]} & \textbf{exec [us/pt]} & \textbf{gen [s]} & \textbf{wall [us/pt]} & \textbf{exec [us/pt]} \\
 \midrule
 \rowcolor{refblue}
-4 & \AC{} reference & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
+4 & \AC{} reference & \texttt{64.7} & \texttt{4.16} & \matrixnotexposed{ReportMuted} & \texttt{0.00227} & \texttt{2.93} & \matrixnotexposed{ReportMuted} \\
 4 & compiled JIT O1 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 4 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 4 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
@@ -95,7 +97,7 @@
 4 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
-5 & \AC{} reference & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
+5 & \AC{} reference & \texttt{38.8} & \texttt{12.4} & \matrixnotexposed{ReportMuted} & \texttt{0.0149} & \texttt{15.2} & \matrixnotexposed{ReportMuted} \\
 5 & compiled JIT O1 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 5 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 5 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
@@ -107,7 +109,7 @@
 5 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
-6 & \AC{} reference & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
+6 & \AC{} reference & \texttt{151} & \texttt{157} & \matrixnotexposed{ReportMuted} & \texttt{0.229} & \texttt{97.2} & \matrixnotexposed{ReportMuted} \\
 6 & compiled JIT O1 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 6 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 6 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
@@ -120,7 +122,7 @@
 \bottomrule
 \end{tabular}
 \endgroup
-\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c. because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution; it is not a missing measurement.}
+\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c.; n.c. means not comparable because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution. For compiled and eager rows, wall time still exposes the authenticated warmed total-evaluator boundary. Future compiled and eager entries also show the accumulated absolute evaluator total marked T; T is not an attribution ratio. Older entries remain marked not exposed; it is not a missing measurement.}
 \end{minipage}
 \clearpage
 \noindent\begin{minipage}{\linewidth}
@@ -141,14 +143,14 @@
 7 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 7 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
-7 & compiled JIT O3 & \texttt{28}\,\matrixratio{ReportGreen}{0.958} & \texttt{110}\,\matrixratio{ReportOrange}{1.2} & \matrixnotexposed{ReportMuted} & \matrixncabsolute{\texttt{989}} & \texttt{450}\,\matrixratio{ReportGreen}{0.527} & \matrixnotexposed{ReportMuted} \\
+7 & compiled JIT O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
 7 & eager-DAG JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \rowcolor{ReportGreen!12}
-7 & recurrence JIT O2 & \texttt{11.6}\,\matrixratio{ReportGreen}{0.397} & \texttt{63.4}\,\matrixratio{ReportGreen}{0.69} & \texttt{61.8}\,\matrixratio{ReportGreen}{0.673} & \matrixncabsolute{\texttt{39.6}} & \texttt{430}\,\matrixratio{ReportGreen}{0.504} & \texttt{434}\,\matrixratio{ReportGreen}{0.509} \\
+7 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
-8 & \AC{} reference & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
+8 & \AC{} reference & \texttt{63.5} & \texttt{234} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
 8 & compiled JIT O1 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 8 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 8 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
@@ -160,7 +162,7 @@
 8 & recurrence JIT O2 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 \midrule[0.45pt]
 \rowcolor{refblue}
-9 & \AC{} reference & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixnotexposed{ReportMuted} \\
+9 & \AC{} reference & \texttt{62.5} & \texttt{568} & \matrixnotexposed{ReportMuted} & \texttt{511} & \texttt{2.7e+05} & \matrixnotexposed{ReportMuted} \\
 9 & compiled JIT O1 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 9 & compiled ASM O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
 9 & compiled C++ O3 & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} & \matrixstatus{ReportMuted}{N/A} \\
@@ -173,5 +175,5 @@
 \bottomrule
 \end{tabular}
 \endgroup
-\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c. because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution; it is not a missing measurement.}
+\ReportTableNote{Original AmpliCol is the denominator. Each pyAmpliCol row reports separate topology-replay and all-flow-union generation and runtime measurements. Parenthesized values are candidate/reference ratios. All-flow generation shows the absolute pyAmpliCol value marked n.c.; n.c. means not comparable because its setup boundary differs from the reference. The wall time is the common runtime observable. Not exposed means that a successful wall measurement has no separately reported execution attribution. For compiled and eager rows, wall time still exposes the authenticated warmed total-evaluator boundary. Future compiled and eager entries also show the accumulated absolute evaluator total marked T; T is not an attribution ratio. Older entries remain marked not exposed; it is not a missing measurement.}
 \end{minipage}
