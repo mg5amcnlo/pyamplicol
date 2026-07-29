@@ -29,10 +29,12 @@ checkout. Current publication gates are listed in
 [Release Status](docs/user/release-status.md).
 
 The example deliberately defines a two-flavor `p`/`j` set containing `d`,
-`d~`, and `g`. The current planner reduces the cartesian request to 19 physical
-concrete processes. Select one using its readable concrete expression or its
-stable runtime ID. For example, `d d~ > z g g` has the stable ID
-`p_p_to_z_j_j_4` inside `artifacts/pp_zjj`.
+`d~`, and `g`. Expansion finds 19 physical concrete candidates and generation
+retains the 18 with model-supported tree-level amplitudes. The omitted
+`g g > Z g g` channel starts at loop level in the Standard Model. Select a
+retained process using its readable concrete expression or its stable runtime
+ID. For example, `d d~ > z g g` has the stable ID `p_p_to_z_j_j_4` inside
+`artifacts/pp_zjj`.
 
 Inspect the complete output inventory before selecting a process:
 

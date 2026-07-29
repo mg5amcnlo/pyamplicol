@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import pytest
 
+import pyamplicol.generation.service as service_module
 from pyamplicol.api import Generator, ProcessAlias, ProcessRequest, ProcessSet
 from pyamplicol.api.errors import GenerationError
 from pyamplicol.config import EvaluatorConfig, ProcessConfig, RunConfig
 from pyamplicol.generation.dag_algorithms import infer_minimal_coupling_order_limits
 from pyamplicol.generation.dag_types import ColorState, CurrentIndex
+from pyamplicol.generation.progress import PhaseHandle
 from pyamplicol.generation.runtime_schema import build_runtime_expression_schema
 from pyamplicol.generation.service import GenerationBackend
 from pyamplicol.models import BuiltinSMModel
@@ -60,6 +62,41 @@ def test_generation_plan_defers_dag_compilation() -> None:
     assert process["dag_compilation_deferred"] is True
     assert "source_count" not in process
     assert plan.concrete_processes[0].expression == "d d~ > z"
+
+
+def test_only_expansion_derived_unsupported_tree_channel_is_prunable() -> None:
+    backend = GenerationBackend(None, None)
+    model = BuiltinSMModel()
+    process_ir = build_process_ir("g g > z g g")
+    expanded = service_module._ExpandedProcess(
+        request=ProcessRequest.parse(
+            process_ir.process,
+            name="pp_zjj_19",
+        ),
+        process_ir=process_ir,
+        source_expansion_size=19,
+    )
+
+    outcome = backend._compile_for_generation(
+        expanded,
+        model,
+        PhaseHandle("multiparticle-dag", None, 1),
+    )
+
+    assert isinstance(outcome, service_module._UnsupportedProcess)
+    assert outcome.expanded == expanded
+    assert "no model-supported amplitudes" in outcome.reason
+
+    explicit = service_module._ExpandedProcess(
+        request=ProcessRequest.parse(process_ir.process, name="explicit"),
+        process_ir=process_ir,
+    )
+    with pytest.raises(GenerationError, match="no model-supported amplitudes"):
+        backend._compile_for_generation(
+            explicit,
+            model,
+            PhaseHandle("explicit-dag", None, 1),
+        )
 
 
 def test_generation_plan_and_physics_preserve_selected_coverage() -> None:
