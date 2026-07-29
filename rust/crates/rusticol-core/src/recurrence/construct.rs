@@ -6007,6 +6007,10 @@ fn build_replay_targets(
     if !strategy.uses_topology_replay_targets() {
         return Ok(Vec::new());
     }
+    if strategy == RecurrenceStrategy::ContractedColorUnion && process.replay_partitions.is_empty()
+    {
+        return Ok(Vec::new());
+    }
     let source_momentum_signs = external_source_momentum_signs(process)?;
     let retained_flows = retained_public_flows(process)?;
     let retained_sectors = retained_flows
@@ -7411,6 +7415,18 @@ mod tests {
             u32_sequence_ranges: vec![CheckedTableRange::new(0, 0)],
             u32_sequence_values: vec![],
         }
+    }
+
+    #[test]
+    fn contracted_without_replay_certificate_has_no_synthetic_targets() {
+        let process = scalar_reference_process(4);
+        let catalog = ProcessCatalog::new(&process).unwrap();
+
+        assert!(
+            build_replay_targets(RecurrenceStrategy::ContractedColorUnion, &process, &catalog,)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn scalar_reference_program(

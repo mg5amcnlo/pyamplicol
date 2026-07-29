@@ -41,6 +41,18 @@ _SAME_FLAVOUR_PROCESS = "d d~ > d d~"
 _NEUTRAL_CURRENT_PROCESS = "d d~ > e+ e-"
 _CHARGED_CURRENT_PROCESS = "u d~ > e+ ve"
 _TWO_QUARK_LINE_PROCESS = "d d~ > t t~"
+_CONTRACTED_ALIAS_NLC_PROCESSES = (
+    _TWO_QUARK_LINE_PROCESS,
+    "d d~ > t t~ g",
+    "d d~ > t t~ g g",
+    "d d~ > t t~ z h",
+)
+_CONTRACTED_ALIAS_STRUCTURE_CAPS = {
+    _TWO_QUARK_LINE_PROCESS: (26, 18, 44, 36, 16),
+    "d d~ > t t~ g": (128, 194, 218, 340, 64),
+    "d d~ > t t~ g g": (862, 2346, 1472, 3908, 384),
+    "d d~ > t t~ z h": (173, 421, 279, 763, 48),
+}
 # The immutable physics-v2 oracle was captured with the former rounded default.
 _HISTORICAL_REFERENCE_ALPHA_EW = 0.007546771114
 _CONTRACTED_COLOR_PROCESSES = (
@@ -694,6 +706,52 @@ def _contracted_structure_signature(artifact: Path) -> dict[str, object]:
     }
 
 
+def _assert_contracted_construction_is_not_inflated(
+    artifact: Path,
+    process_expression: str,
+) -> None:
+    manifest = load_manifest(artifact)
+    assert len(manifest.processes) == 1
+    process_id = str(manifest.processes[0]["id"])
+    execution = json.loads(
+        (
+            artifact
+            / "processes"
+            / process_id
+            / "execution.json"
+        ).read_text(encoding="utf-8")
+    )
+    inspection = execution["plan"]["inspection_summary"]
+    schedule = inspection["schedule"]
+    construction = inspection["construction"]
+    color = execution["runtime_metadata"]["color_contraction"]
+    (
+        current_cap,
+        contribution_cap,
+        peak_current_cap,
+        peak_contribution_cap,
+        destination_cap,
+    ) = _CONTRACTED_ALIAS_STRUCTURE_CAPS[process_expression]
+    assert 0 < schedule["current_count"] <= current_cap
+    assert 0 < schedule["contribution_count"] <= contribution_cap
+    assert 0 < construction["peak_current_count"] <= peak_current_cap
+    assert 0 < construction["peak_contribution_count"] <= peak_contribution_cap
+    assert 0 < schedule["amplitude_destination_count"] <= destination_cap
+    assert schedule["replay_target_count"] == 0
+    assert construction["peak_current_count"] >= schedule["current_count"]
+    assert construction["peak_contribution_count"] >= schedule["contribution_count"]
+    assert construction["peak_to_final_current_ratio"] == pytest.approx(
+        construction["peak_current_count"] / schedule["current_count"]
+    )
+    assert construction["peak_to_final_contribution_ratio"] == pytest.approx(
+        construction["peak_contribution_count"] / schedule["contribution_count"]
+    )
+    assert (
+        color["materialized_destination_count"]
+        == schedule["amplitude_destination_count"]
+    )
+
+
 @pytest.fixture(scope="module")
 def builtin_sm_recurrence_jit_o2_model() -> Iterator[ModelSource]:
     """Use a source-current prepared pack without weakening packaged checks."""
@@ -1049,6 +1107,48 @@ def test_builtin_contracted_color_recurrence_matches_compiled(
     )
 
 
+@pytest.mark.parametrize("process_expression", _CONTRACTED_ALIAS_NLC_PROCESSES)
+def test_builtin_nlc_aliases_do_not_create_replay_destinations(
+    tmp_path: Path,
+    process_expression: str,
+    builtin_sm_recurrence_jit_o2_model: ModelSource,
+) -> None:
+    """Do not synthesize replay destinations for contracted open-line aliases."""
+
+    _require_native_recurrence()
+    recurrence_artifact = tmp_path / "recurrence-nlc"
+    compiled_artifact = tmp_path / "compiled-nlc"
+    Generator(
+        _generation_config(
+            "recurrence",
+            color_accuracy="nlc",
+        )
+    ).generate(
+        process_expression,
+        recurrence_artifact,
+        model=builtin_sm_recurrence_jit_o2_model,
+    )
+    Generator(
+        _generation_config(
+            "compiled",
+            color_accuracy="nlc",
+        )
+    ).generate(
+        process_expression,
+        compiled_artifact,
+    )
+    _assert_contracted_color_artifacts_match(
+        recurrence_artifact,
+        compiled_artifact,
+        process_expression,
+        "nlc",
+    )
+    _assert_contracted_construction_is_not_inflated(
+        recurrence_artifact,
+        process_expression,
+    )
+
+
 @pytest.mark.parametrize("process_expression", _CONTRACTED_COLOR_PROCESSES)
 @pytest.mark.parametrize("color_accuracy", ("nlc", "full"))
 def test_ufo_sm_contracted_color_recurrence_matches_compiled(
@@ -1089,6 +1189,46 @@ def test_ufo_sm_contracted_color_recurrence_matches_compiled(
         parameter_update=(
             ("MZ", 100.0) if process_expression == _PROCESS else None
         ),
+    )
+
+
+def test_ufo_sm_nlc_aliases_do_not_create_replay_destinations(
+    tmp_path: Path,
+    ufo_sm_recurrence_jit_o2_model: CompiledModel,
+) -> None:
+    """The no-certificate contracted path is prepared-model independent."""
+
+    recurrence_artifact = tmp_path / "recurrence-ufo-nlc"
+    compiled_artifact = tmp_path / "compiled-ufo-nlc"
+    Generator(
+        _generation_config(
+            "recurrence",
+            color_accuracy="nlc",
+        )
+    ).generate(
+        _TWO_QUARK_LINE_PROCESS,
+        recurrence_artifact,
+        model=ufo_sm_recurrence_jit_o2_model,
+    )
+    Generator(
+        _generation_config(
+            "compiled",
+            color_accuracy="nlc",
+        )
+    ).generate(
+        _TWO_QUARK_LINE_PROCESS,
+        compiled_artifact,
+        model=ufo_sm_recurrence_jit_o2_model,
+    )
+    _assert_contracted_color_artifacts_match(
+        recurrence_artifact,
+        compiled_artifact,
+        _TWO_QUARK_LINE_PROCESS,
+        "nlc",
+    )
+    _assert_contracted_construction_is_not_inflated(
+        recurrence_artifact,
+        _TWO_QUARK_LINE_PROCESS,
     )
 
 
