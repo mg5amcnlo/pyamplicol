@@ -14,6 +14,10 @@ const TEST_PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL: u64 = 2;
 const TEST_PREPARED_JIT_PORTABLE_TARGET: &str = "symjit-storage-v3-portable";
 
 fn symjit_manifest(application_path: &str, exact_state_path: &str, input_len: usize) -> Value {
+    let plane_application_path = application_path.strip_suffix(".symjit").map_or_else(
+        || format!("{application_path}.plane.symjit"),
+        |stem| format!("{stem}.plane.symjit"),
+    );
     json!({
         "kind": "symjit-application-evaluator",
         "runtime_capability": SYMJIT_APPLICATION_RUNTIME_CAPABILITY,
@@ -21,6 +25,32 @@ fn symjit_manifest(application_path: &str, exact_state_path: &str, input_len: us
         "label": "prepared_test_kernel",
         "application_path": application_path,
         "application_abi": TEST_SYMJIT_APPLICATION_ABI,
+        "plane_application": {
+            "application_path": plane_application_path,
+            "application_abi": TEST_SYMJIT_PLANE_APPLICATION_ABI,
+            "storage_abi": TEST_SYMJIT_APPLICATION_ABI,
+            "element_layout": "split-complex-plane-major",
+            "descriptor_order": "inputs-re-im-then-outputs-re-im",
+            "input_complex_count": input_len,
+            "output_complex_count": 1,
+            "input_plane_count": 2 * input_len,
+            "output_plane_count": 2,
+            "compiler_type": "native",
+            "translation_mode": "symbolica-structured-instructions",
+            "optimization_level": TEST_PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL,
+            "simd": true,
+            "complex": true,
+            "fast_math": true,
+            "fast_complex": false,
+            "compression": false,
+            "threading": false,
+            "direct_arena": true,
+            "source_digest": "0".repeat(64),
+            "target": {
+                "word_bits": 64,
+                "endianness": "little",
+            },
+        },
         "input_len": input_len,
         "output_len": 1,
         "element_layout": "complex-f64",
@@ -254,6 +284,95 @@ fn prepared_jit_pack_requires_plane_application_dependency_abi() {
     assert!(error.to_string().contains("plane-application ABI"));
 }
 
+#[test]
+fn raw_prepared_jit_manifest_projects_plane_without_direct_table() {
+    let mut pack = filtered_pack(vec![kernel(
+        50,
+        "closure",
+        vec![input("left-current", 0)],
+        "kernels/50/application.symjit",
+    )]);
+    pack.validate()
+        .expect("raw prepared JIT pack with a plane application");
+    assert!(
+        pack.kernels[0]
+            .extra_evaluator_payload_paths()
+            .expect("raw JIT extra payload paths")
+            .is_empty(),
+        "a raw prepared JIT pack has no process-stage DirectTable payload"
+    );
+
+    let runtime = pack.kernels[0]
+        .runtime_evaluator_manifest()
+        .expect("project raw prepared evaluator");
+    let EvaluatorManifest::SymjitApplication {
+        plane_application: Some(plane),
+        ..
+    } = runtime
+    else {
+        panic!("raw prepared evaluator must retain its plane application");
+    };
+    assert_eq!(
+        plane.application_path,
+        "kernels/50/application.plane.symjit"
+    );
+
+    add_direct_table_manifest(&mut pack.kernels[0]);
+    let runtime = pack.kernels[0]
+        .runtime_evaluator_manifest()
+        .expect("project process-stage prepared evaluator");
+    assert!(matches!(
+        runtime,
+        EvaluatorManifest::SymjitApplication {
+            plane_application: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        pack.kernels[0]
+            .extra_evaluator_payload_paths()
+            .expect("process-stage extra payload paths"),
+        ["kernels/50/eager-direct-table-descriptor-v1.bin"]
+    );
+}
+
+#[test]
+fn prepared_jit_plane_application_is_fail_closed() {
+    let pack = filtered_pack(vec![kernel(
+        50,
+        "closure",
+        vec![input("left-current", 0)],
+        "kernels/50/application.symjit",
+    )]);
+
+    let mut missing = pack.clone();
+    missing.kernels[0]
+        .f64_evaluator_manifest
+        .as_object_mut()
+        .expect("test evaluator object")
+        .remove("plane_application");
+    let error = missing
+        .validate()
+        .expect_err("missing plane application must fail");
+    assert!(error.to_string().contains("regenerate"));
+
+    for (field, value) in [
+        ("application_abi", json!("wrong-plane-abi")),
+        ("input_plane_count", json!(3)),
+        ("target", Value::Null),
+    ] {
+        let mut malformed = pack.clone();
+        malformed.kernels[0].f64_evaluator_manifest["plane_application"][field] = value;
+        let error = malformed
+            .validate()
+            .expect_err("malformed plane application must fail");
+        assert!(
+            error.to_string().contains("regenerate"),
+            "malformed plane field {field} must include regeneration guidance: {error}"
+        );
+    }
+}
+
 fn compiled_pack(backend: &str, runtime_capability: &str) -> PreparedKernelPackManifest {
     let exact_evaluator_state_path = "kernels/7/exact.bin".to_string();
     let kernel = PreparedKernelManifest {
@@ -457,6 +576,20 @@ fn prepared_symjit_backend_executes_a_filtered_eager_plan() {
         application_bytes,
     )
     .expect("write prepared test application");
+    let plane_application_bytes =
+        crate::engine::compile_symbolica_program_to_plane_application_bytes(
+            instructions,
+            2,
+            1,
+            TEST_PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL as u8,
+            false,
+        )
+        .expect("compile prepared test plane application");
+    fs::write(
+        root.join("kernels/50/application.plane.symjit"),
+        plane_application_bytes,
+    )
+    .expect("write prepared test plane application");
 
     let pack = filtered_pack(vec![kernel(
         50,
@@ -465,6 +598,11 @@ fn prepared_symjit_backend_executes_a_filtered_eager_plan() {
         "kernels/50/application.symjit",
     )]);
     pack.validate().expect("valid filtered test pack");
+    assert_eq!(
+        PreparedEvaluatorBackend::preflight_all(&pack, &root)
+            .expect("preflight raw prepared JIT pack without a DirectTable"),
+        1
+    );
     let mut backend = PreparedEvaluatorBackend::load(&pack, &root)
         .expect("load prepared SymJIT evaluator backend");
     let definition = EagerPlanDefinition {

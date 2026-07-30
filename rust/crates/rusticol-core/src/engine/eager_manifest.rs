@@ -1705,6 +1705,15 @@ impl PreparedKernelManifest {
                 self.kernel_id
             )));
         }
+        if kind == "symjit-application-evaluator" {
+            validate_prepared_symjit_plane_application(
+                self.kernel_id,
+                object,
+                self.input_arity,
+                usize::try_from(self.output_arity).unwrap_or(usize::MAX),
+                PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL as u8,
+            )?;
+        }
         let runtime = self.runtime_evaluator_manifest()?;
         let capabilities = evaluator_runtime_capabilities(&runtime)?;
         if capabilities != BTreeSet::from([expected_capability.to_string()]) {
@@ -2012,6 +2021,13 @@ impl PreparedKernelVariantManifest {
         }
         required_nonempty_string(object, "label", self.base_kernel_id)?;
         required_nonempty_string(object, "evaluator_state_path", self.base_kernel_id)?;
+        validate_prepared_symjit_plane_application(
+            self.base_kernel_id,
+            object,
+            self.input_arity,
+            self.output_arity,
+            PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL as u8,
+        )?;
         let application_abi =
             required_nonempty_string(object, "application_abi", self.base_kernel_id)?;
         if pack
@@ -2138,6 +2154,12 @@ fn validate_prepared_evaluator_keys(
     kind: &str,
     object: &serde_json::Map<String, Value>,
 ) -> RusticolResult<()> {
+    if kind == "symjit-application-evaluator" && !object.contains_key("plane_application") {
+        return Err(RusticolError::compatibility(format!(
+            "prepared JIT kernel {kernel_id} predates the SymJIT plane-application ABI; \
+             regenerate the prepared model"
+        )));
+    }
     let expected = match kind {
         "symjit-application-evaluator" => [
             "application_abi",
@@ -2156,6 +2178,7 @@ fn validate_prepared_evaluator_keys(
             "label",
             "optimization_level",
             "output_len",
+            "plane_application",
             "required_defuns",
             "runtime_capability",
             "settings",
@@ -2198,6 +2221,29 @@ fn validate_prepared_evaluator_keys(
         )));
     }
     Ok(())
+}
+
+fn validate_prepared_symjit_plane_application(
+    kernel_id: u32,
+    object: &serde_json::Map<String, Value>,
+    input_len: usize,
+    output_len: usize,
+    optimization_level: u8,
+) -> RusticolResult<()> {
+    let raw = object.get("plane_application").ok_or_else(|| {
+        RusticolError::compatibility(format!(
+            "prepared JIT kernel {kernel_id} predates the SymJIT plane-application ABI; \
+             regenerate the prepared model"
+        ))
+    })?;
+    let plane: SymjitPlaneApplicationManifest =
+        serde_json::from_value(raw.clone()).map_err(|error| {
+            RusticolError::compatibility(format!(
+                "prepared JIT kernel {kernel_id} has invalid SymJIT plane-application metadata; \
+                 regenerate the prepared model: {error}"
+            ))
+        })?;
+    plane.validate(input_len, output_len, optimization_level)
 }
 
 fn required_nonempty_string<'a>(
