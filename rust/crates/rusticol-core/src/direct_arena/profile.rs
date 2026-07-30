@@ -11,6 +11,8 @@ pub enum DirectArenaTrafficKind {
     Gather,
     Scatter,
     Remap,
+    InternalScratch,
+    InternalBroadcast,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -23,6 +25,14 @@ pub struct DirectArenaTrafficCounters {
     pub gather_bytes: u64,
     pub scatter_bytes: u64,
     pub remap_bytes: u64,
+    /// P-kernel output scratch reads/writes internal to an arena lane.
+    ///
+    /// This is deliberately excluded from [`Self::validate_direct`], whose
+    /// counters describe forbidden arena-boundary materialization.
+    pub internal_scratch_bytes: u64,
+    /// P-kernel broadcast-plane reads and refresh writes internal to an arena
+    /// lane. This is likewise not boundary materialization.
+    pub internal_broadcast_bytes: u64,
 }
 
 impl DirectArenaTrafficCounters {
@@ -39,6 +49,8 @@ impl DirectArenaTrafficCounters {
             DirectArenaTrafficKind::Gather => &mut self.gather_bytes,
             DirectArenaTrafficKind::Scatter => &mut self.scatter_bytes,
             DirectArenaTrafficKind::Remap => &mut self.remap_bytes,
+            DirectArenaTrafficKind::InternalScratch => &mut self.internal_scratch_bytes,
+            DirectArenaTrafficKind::InternalBroadcast => &mut self.internal_broadcast_bytes,
         };
         *counter = counter.saturating_add(bytes);
     }
@@ -67,6 +79,8 @@ mod tests {
     fn forbidden_traffic_fails_closed() {
         let mut counters = DirectArenaTrafficCounters::default();
         counters.record_call(7, 128);
+        counters.record_traffic(DirectArenaTrafficKind::InternalScratch, 4096);
+        counters.record_traffic(DirectArenaTrafficKind::InternalBroadcast, 2048);
         assert!(counters.validate_direct().is_ok());
         counters.record_traffic(DirectArenaTrafficKind::Gather, 8);
         assert!(counters.validate_direct().is_err());

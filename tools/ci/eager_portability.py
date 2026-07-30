@@ -135,6 +135,7 @@ def _runtime_contracts() -> RuntimeContracts:
         SYMBOLICA_SERIALIZATION_ABI,
         SYMJIT_APPLICATION_ABI,
         SYMJIT_F64_RUNTIME_CAPABILITY,
+        SYMJIT_PLANE_APPLICATION_ABI,
         package_version,
     )
     from pyamplicol.models.prepared import (
@@ -150,6 +151,7 @@ def _runtime_contracts() -> RuntimeContracts:
         compiled_model_schema_version=COMPILED_MODEL_SCHEMA_VERSION,
         symbolica_serialization_abi=SYMBOLICA_SERIALIZATION_ABI,
         symjit_application_abi=SYMJIT_APPLICATION_ABI,
+        symjit_plane_application_abi=SYMJIT_PLANE_APPLICATION_ABI,
         symjit_runtime_capability=SYMJIT_F64_RUNTIME_CAPABILITY,
         eager_runtime_capability=EAGER_RUNTIME_LAYOUT_F64_CAPABILITY,
         package_version=package_version(),

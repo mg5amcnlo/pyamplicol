@@ -20,13 +20,15 @@ C_ABI_VERSION = 1
 # revisions and patch hashes live only in dependencies/contributor-lock.toml.
 SYMBOLICA_SERIALIZATION_ABI = "symbolica-bincode2-v1"
 SYMJIT_APPLICATION_ABI = "symjit-application-storage-v3"
+SYMJIT_PLANE_APPLICATION_ABI = "pyamplicol-symjit-plane-application-v1"
 NATIVE_COMPILED_DIRECT_APPLICATION_ABI = (
     "pyamplicol-native-compiled-direct-application-v1"
 )
 NATIVE_EAGER_DIRECT_TABLE_APPLICATION_ABI = "pyamplicol-eager-native-direct-table-v1"
-COMPILED_PLANE_DIRECT_APPLICATION_ABI = "symjit-direct-application-storage-v1"
-EAGER_DIRECT_TABLE_DESCRIPTOR_ABI = "symjit-direct-table-descriptor-v1"
-EAGER_DIRECT_TABLE_BINDING_ABI = "symjit-direct-table-binding-v1"
+COMPILED_PLANE_DIRECT_APPLICATION_ABI = "pyamplicol-compiled-plane-kernel-v2"
+EAGER_DIRECT_TABLE_DESCRIPTOR_ABI = "pyamplicol-eager-plane-table-descriptor-v1"
+EAGER_DIRECT_TABLE_BINDING_ABI = "pyamplicol-eager-plane-table-binding-v2"
+RECURRENCE_DIRECT_BINDING_ABI = "pyamplicol-recurrence-plane-binding-v2"
 
 SYMJIT_F64_RUNTIME_CAPABILITY = "symjit.application.complex-f64.v1"
 SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY = (
@@ -424,6 +426,7 @@ __all__ = [
     "RECURRENCE_COLOR_RUNTIME_CAPABILITY",
     "RECURRENCE_DIRECT_ARENA_RUNTIME_CAPABILITY",
     "RECURRENCE_DIRECT_BACKEND_ABI",
+    "RECURRENCE_DIRECT_BINDING_ABI",
     "RECURRENCE_DIRECT_TEMPLATE_ABI",
     "RECURRENCE_PLAN_ABI",
     "RECURRENCE_RUNTIME_LAYOUT_ABI",
@@ -433,6 +436,7 @@ __all__ = [
     "SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY",
     "SYMBOLICA_SERIALIZATION_ABI",
     "SYMJIT_APPLICATION_ABI",
+    "SYMJIT_PLANE_APPLICATION_ABI",
     "SYMJIT_F64_RUNTIME_CAPABILITY",
     "TOML_SCHEMA_VERSION",
     "active_native_source_identity",

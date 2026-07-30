@@ -53,15 +53,14 @@ _LC_ALL_FLOW_PROFILE_RECOMMENDATION = (
     "--lc-flow-layout all-flow-union for the optimized "
     "all-flows/single-helicity workload"
 )
-_EVALUATOR_TOTAL_SAMPLE_CONTRACT = (
-    "accumulated-repeated-warmed-evaluator-total-v1"
-)
+_EVALUATOR_TOTAL_SAMPLE_CONTRACT = "accumulated-repeated-warmed-evaluator-total-v1"
 _COMPILED_DIRECT_ARENA_COUNTER_KEYS = (
     "compiled_direct_arena_engine_count",
     "compiled_direct_arena_call_count",
     "compiled_direct_arena_boundary_input_bytes",
     "compiled_direct_arena_boundary_current_output_bytes",
     "compiled_direct_arena_boundary_amplitude_output_bytes",
+    "compiled_direct_arena_internal_broadcast_bytes",
 )
 
 
@@ -166,6 +165,9 @@ class _NativeProfileCounterSample:
     compiled_direct_arena_boundary_input_bytes_per_call: float | None
     compiled_direct_arena_boundary_current_output_bytes_per_call: float | None
     compiled_direct_arena_boundary_amplitude_output_bytes_per_call: float | None
+    compiled_direct_arena_internal_broadcast_bytes_per_call: float | None
+    eager_internal_scratch_bytes_per_point: float | None
+    eager_internal_broadcast_bytes_per_call: float | None
     recurrence_momentum_scalar_values_per_point: float | None
     recurrence_schedule_executions_per_call: float | None
     recurrence_replay_schedule_executions_per_call: float | None
@@ -180,6 +182,8 @@ class _NativeProfileCounterSample:
     recurrence_finalization_rows_per_call: float | None
     recurrence_closure_calls_per_call: float | None
     recurrence_closure_rows_per_call: float | None
+    recurrence_internal_scratch_bytes_per_point: float | None
+    recurrence_internal_broadcast_bytes_per_point: float | None
     observed_scratch_reallocations_per_call: float | None
     native_output_allocations_per_call: float | None
 
@@ -1164,6 +1168,15 @@ def _native_profile_counters(
         compiled_direct_arena_boundary_amplitude_output_bytes_per_call=per_call(
             "compiled_direct_arena_boundary_amplitude_output_bytes"
         ),
+        compiled_direct_arena_internal_broadcast_bytes_per_call=per_call(
+            "compiled_direct_arena_internal_broadcast_bytes"
+        ),
+        eager_internal_scratch_bytes_per_point=per_point(
+            "eager_internal_scratch_bytes"
+        ),
+        eager_internal_broadcast_bytes_per_call=per_call(
+            "eager_internal_broadcast_bytes"
+        ),
         recurrence_momentum_scalar_values_per_point=per_point(
             "recurrence_momentum_scalar_value_count"
         ),
@@ -1198,6 +1211,12 @@ def _native_profile_counters(
         ),
         recurrence_closure_calls_per_call=per_call("recurrence_closure_call_count"),
         recurrence_closure_rows_per_call=per_call("recurrence_closure_row_count"),
+        recurrence_internal_scratch_bytes_per_point=per_point(
+            "recurrence_internal_scratch_bytes"
+        ),
+        recurrence_internal_broadcast_bytes_per_point=per_point(
+            "recurrence_internal_broadcast_bytes"
+        ),
         observed_scratch_reallocations_per_call=per_call(
             "observed_scratch_reallocation_count"
         ),

@@ -178,8 +178,8 @@ pub const RECURRENCE_CONTRACTED_COLOR_RUNTIME_CAPABILITY: &str =
     crate::recurrence::RECURRENCE_CONTRACTED_COLOR_CAPABILITY;
 pub const COMPILED_RUNTIME_SELECTORS_CAPABILITY: &str = "rusticol.compiled.runtime-selectors.v1";
 pub const COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY: &str = "compiled-plane-arena-v1";
-pub const COMPILED_PLANE_DIRECT_APPLICATION_ABI: &str = "symjit-direct-application-storage-v1";
-pub const COMPILED_PLANE_SOURCE_APPLICATION_ABI: &str = "symjit-application-storage-v3";
+pub const COMPILED_PLANE_DIRECT_APPLICATION_ABI: &str = "pyamplicol-compiled-plane-kernel-v2";
+pub const COMPILED_PLANE_SOURCE_APPLICATION_ABI: &str = "pyamplicol-symjit-plane-application-v1";
 pub const COMPILED_HELICITY_DUAL_LANE_CAPABILITY: &str = "rusticol.compiled.helicity-dual-lane.v1";
 pub const COMPILED_HELICITY_SELECTOR_UNION_CAPABILITY: &str =
     "rusticol.compiled.helicity-selector-union.v1";
@@ -193,6 +193,8 @@ pub const COMPILED_COLOR_TOPOLOGY_LANES_CAPABILITY: &str =
     "rusticol.compiled.color-topology-lanes.v1";
 #[cfg(feature = "f64-symjit")]
 pub const SYMJIT_APPLICATION_STORAGE_ABI: &str = "symjit-application-storage-v3";
+#[cfg(feature = "f64-symjit")]
+pub const SYMJIT_PLANE_APPLICATION_ABI: &str = "pyamplicol-symjit-plane-application-v1";
 
 #[doc(hidden)]
 pub fn preflight_prepared_kernel_pack(
@@ -1922,6 +1924,8 @@ enum EvaluatorManifest {
         word_bits: u8,
         endianness: String,
         required_defuns: Vec<String>,
+        #[serde(default)]
+        plane_application: Option<SymjitPlaneApplicationManifest>,
         evaluator_state_path: Option<String>,
         evaluator_state_runtime_capability: Option<String>,
     },
@@ -1953,6 +1957,80 @@ enum EvaluatorManifest {
         chunk_input_indices: Option<Vec<Vec<usize>>>,
         chunks: Vec<EvaluatorManifest>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SymjitPlaneApplicationManifest {
+    application_path: String,
+    application_abi: String,
+    storage_abi: String,
+    element_layout: String,
+    descriptor_order: String,
+    input_complex_count: usize,
+    output_complex_count: usize,
+    input_plane_count: usize,
+    output_plane_count: usize,
+    compiler_type: String,
+    translation_mode: String,
+    optimization_level: u8,
+    simd: bool,
+    complex: bool,
+    fast_math: bool,
+    fast_complex: bool,
+    compression: bool,
+    threading: bool,
+    direct_arena: bool,
+    source_digest: String,
+    target: Value,
+}
+
+impl SymjitPlaneApplicationManifest {
+    fn validate(
+        &self,
+        input_complex_count: usize,
+        output_complex_count: usize,
+        optimization_level: u8,
+    ) -> RusticolResult<()> {
+        let expected_inputs = input_complex_count
+            .checked_mul(2)
+            .ok_or_else(|| RusticolError::integrity("SymJIT plane input count overflows usize"))?;
+        let expected_outputs = output_complex_count
+            .checked_mul(2)
+            .ok_or_else(|| RusticolError::integrity("SymJIT plane output count overflows usize"))?;
+        let digest_valid = self.source_digest.len() == 64
+            && self
+                .source_digest
+                .bytes()
+                .all(|value| value.is_ascii_hexdigit() && !value.is_ascii_uppercase());
+        if self.application_path.is_empty()
+            || self.application_abi != SYMJIT_PLANE_APPLICATION_ABI
+            || self.storage_abi != SYMJIT_APPLICATION_STORAGE_ABI
+            || self.element_layout != "split-complex-plane-major"
+            || self.descriptor_order != "inputs-re-im-then-outputs-re-im"
+            || self.input_complex_count != input_complex_count
+            || self.output_complex_count != output_complex_count
+            || self.input_plane_count != expected_inputs
+            || self.output_plane_count != expected_outputs
+            || self.compiler_type != "native"
+            || self.translation_mode != "symbolica-structured-instructions"
+            || self.optimization_level != optimization_level
+            || !self.simd
+            || !self.complex
+            || !self.fast_math
+            || self.fast_complex
+            || self.threading
+            || !self.direct_arena
+            || !digest_valid
+            || !self.target.is_object()
+        {
+            return Err(RusticolError::compatibility(
+                "SymJIT plane application metadata is incompatible; regenerate the artifact",
+            ));
+        }
+        let _ = self.compression;
+        Ok(())
+    }
 }
 
 /// One leaf in the canonical evaluator preorder used by loading, selector
@@ -2696,6 +2774,8 @@ struct RuntimeProfile {
     compiled_direct_arena_boundary_input_bytes: u64,
     compiled_direct_arena_boundary_current_output_bytes: u64,
     compiled_direct_arena_boundary_amplitude_output_bytes: u64,
+    /// Broadcast-plane refresh traffic internal to compiled P-kernels.
+    compiled_direct_arena_internal_broadcast_bytes: u64,
     reduction_input_component_count: u64,
     resolved_materialized_component_count: u64,
     total_materialized_value_count: u64,
@@ -2710,6 +2790,11 @@ struct RuntimeProfile {
     eager_closure_s: f64,
     eager_reduction_s: f64,
     eager_copy_out_s: f64,
+    /// P-kernel scratch reads and writes wholly inside eager Direct-Arena execution.
+    eager_internal_scratch_bytes: u64,
+    /// Point-independent coupling and parameter refreshes wholly inside eager
+    /// Direct-Arena execution.
+    eager_internal_broadcast_bytes: u64,
     recurrence_momentum_fill_s: f64,
     recurrence_union_source_fill_s: f64,
     /// Inclusive top-level recurrence schedule envelope. The role-specific
@@ -2735,6 +2820,10 @@ struct RuntimeProfile {
     recurrence_finalization_row_count: u64,
     recurrence_closure_call_count: u64,
     recurrence_closure_row_count: u64,
+    /// P-kernel output scratch traffic entirely inside recurrence execution.
+    recurrence_internal_scratch_bytes: u64,
+    /// P-kernel broadcast-plane traffic entirely inside recurrence execution.
+    recurrence_internal_broadcast_bytes: u64,
 }
 
 // Saved SymJIT applications are native payloads and do not currently guarantee
@@ -2818,6 +2907,8 @@ impl RuntimeProfile {
             sector.compiled_direct_arena_boundary_current_output_bytes;
         self.compiled_direct_arena_boundary_amplitude_output_bytes +=
             sector.compiled_direct_arena_boundary_amplitude_output_bytes;
+        self.compiled_direct_arena_internal_broadcast_bytes +=
+            sector.compiled_direct_arena_internal_broadcast_bytes;
         self.reduction_input_component_count += sector.reduction_input_component_count;
         self.resolved_materialized_component_count += sector.resolved_materialized_component_count;
         self.total_materialized_value_count += sector.total_materialized_value_count;
@@ -2832,6 +2923,8 @@ impl RuntimeProfile {
         self.eager_closure_s += sector.eager_closure_s;
         self.eager_reduction_s += sector.eager_reduction_s;
         self.eager_copy_out_s += sector.eager_copy_out_s;
+        self.eager_internal_scratch_bytes += sector.eager_internal_scratch_bytes;
+        self.eager_internal_broadcast_bytes += sector.eager_internal_broadcast_bytes;
         add_profile_vector(
             &mut self.stage_input_pack_by_stage_s,
             &sector.stage_input_pack_by_stage_s,
@@ -3229,6 +3322,12 @@ pub struct NativeRuntimeProfile {
     pub eager_closure_s: f64,
     pub eager_reduction_s: f64,
     pub eager_copy_out_s: f64,
+    /// P-kernel output scratch traffic entirely inside eager execution.
+    /// This is never arena-boundary traffic.
+    pub eager_internal_scratch_bytes: u64,
+    /// Point-independent coupling and parameter refreshes entirely inside
+    /// eager execution. This is never arena-boundary traffic.
+    pub eager_internal_broadcast_bytes: u64,
     pub recurrence_momentum_fill_s: f64,
     pub recurrence_union_source_fill_s: f64,
     /// Inclusive top-level recurrence schedule envelope.
@@ -3256,6 +3355,12 @@ pub struct NativeRuntimeProfile {
     pub recurrence_finalization_row_count: u64,
     pub recurrence_closure_call_count: u64,
     pub recurrence_closure_row_count: u64,
+    /// P-kernel output scratch traffic entirely inside recurrence execution.
+    /// This is never arena-boundary traffic.
+    pub recurrence_internal_scratch_bytes: u64,
+    /// P-kernel broadcast-plane reads and refresh writes entirely inside
+    /// recurrence execution. This is never input-pack traffic.
+    pub recurrence_internal_broadcast_bytes: u64,
     pub selector_planner_s: f64,
     pub selector_gather_s: f64,
     pub selector_scatter_s: f64,
@@ -3299,6 +3404,9 @@ pub struct NativeRuntimeProfile {
     pub compiled_direct_arena_boundary_input_bytes: u64,
     pub compiled_direct_arena_boundary_current_output_bytes: u64,
     pub compiled_direct_arena_boundary_amplitude_output_bytes: u64,
+    /// Broadcast-plane refresh traffic internal to compiled P-kernels. This
+    /// is never arena-boundary input-pack traffic.
+    pub compiled_direct_arena_internal_broadcast_bytes: u64,
     pub reduction_input_component_count: u64,
     pub selector_gather_point_count: u64,
     pub selector_gather_bytes: u64,
@@ -3360,6 +3468,8 @@ impl From<RuntimeProfile> for NativeRuntimeProfile {
             eager_closure_s: profile.eager_closure_s,
             eager_reduction_s: profile.eager_reduction_s,
             eager_copy_out_s: profile.eager_copy_out_s,
+            eager_internal_scratch_bytes: profile.eager_internal_scratch_bytes,
+            eager_internal_broadcast_bytes: profile.eager_internal_broadcast_bytes,
             recurrence_momentum_fill_s: profile.recurrence_momentum_fill_s,
             recurrence_union_source_fill_s: profile.recurrence_union_source_fill_s,
             recurrence_schedule_s: profile.recurrence_schedule_s,
@@ -3384,6 +3494,8 @@ impl From<RuntimeProfile> for NativeRuntimeProfile {
             recurrence_finalization_row_count: profile.recurrence_finalization_row_count,
             recurrence_closure_call_count: profile.recurrence_closure_call_count,
             recurrence_closure_row_count: profile.recurrence_closure_row_count,
+            recurrence_internal_scratch_bytes: profile.recurrence_internal_scratch_bytes,
+            recurrence_internal_broadcast_bytes: profile.recurrence_internal_broadcast_bytes,
             selector_planner_s: 0.0,
             selector_gather_s: 0.0,
             selector_scatter_s: 0.0,
@@ -3431,6 +3543,8 @@ impl From<RuntimeProfile> for NativeRuntimeProfile {
                 .compiled_direct_arena_boundary_current_output_bytes,
             compiled_direct_arena_boundary_amplitude_output_bytes: profile
                 .compiled_direct_arena_boundary_amplitude_output_bytes,
+            compiled_direct_arena_internal_broadcast_bytes: profile
+                .compiled_direct_arena_internal_broadcast_bytes,
             reduction_input_component_count: profile.reduction_input_component_count,
             selector_gather_point_count: 0,
             selector_gather_bytes: 0,
@@ -3636,6 +3750,8 @@ impl NativeRuntimeProfile {
         self.eager_closure_s += other.eager_closure_s;
         self.eager_reduction_s += other.eager_reduction_s;
         self.eager_copy_out_s += other.eager_copy_out_s;
+        self.eager_internal_scratch_bytes += other.eager_internal_scratch_bytes;
+        self.eager_internal_broadcast_bytes += other.eager_internal_broadcast_bytes;
         self.recurrence_momentum_fill_s += other.recurrence_momentum_fill_s;
         self.recurrence_union_source_fill_s += other.recurrence_union_source_fill_s;
         self.recurrence_schedule_s += other.recurrence_schedule_s;
@@ -3660,6 +3776,8 @@ impl NativeRuntimeProfile {
         self.recurrence_finalization_row_count += other.recurrence_finalization_row_count;
         self.recurrence_closure_call_count += other.recurrence_closure_call_count;
         self.recurrence_closure_row_count += other.recurrence_closure_row_count;
+        self.recurrence_internal_scratch_bytes += other.recurrence_internal_scratch_bytes;
+        self.recurrence_internal_broadcast_bytes += other.recurrence_internal_broadcast_bytes;
         self.selector_planner_s += other.selector_planner_s;
         self.selector_gather_s += other.selector_gather_s;
         self.selector_scatter_s += other.selector_scatter_s;
@@ -3712,6 +3830,8 @@ impl NativeRuntimeProfile {
             other.compiled_direct_arena_boundary_current_output_bytes;
         self.compiled_direct_arena_boundary_amplitude_output_bytes +=
             other.compiled_direct_arena_boundary_amplitude_output_bytes;
+        self.compiled_direct_arena_internal_broadcast_bytes +=
+            other.compiled_direct_arena_internal_broadcast_bytes;
         self.reduction_input_component_count += other.reduction_input_component_count;
         self.selector_gather_point_count += other.selector_gather_point_count;
         self.selector_gather_bytes += other.selector_gather_bytes;
@@ -4275,6 +4395,8 @@ pub(crate) use evaluator::native_direct::tests::count_allocations;
 pub(crate) use evaluator::symjit_direct::tests::count_allocations;
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 pub(crate) use evaluator::symjit_eager_direct;
+#[cfg(feature = "f64-symjit")]
+pub use evaluator::symjit_plane::compile_symbolica_program_to_plane_application_bytes;
 use evaluator::*;
 
 #[path = "wavefunctions.rs"]

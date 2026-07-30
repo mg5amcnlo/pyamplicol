@@ -29,6 +29,7 @@ def contracts() -> portability.RuntimeContracts:
         compiled_model_schema_version=9,
         symbolica_serialization_abi="symbolica-bincode2-v1",
         symjit_application_abi="symjit-application-storage-v3",
+        symjit_plane_application_abi="pyamplicol-symjit-plane-application-v1",
         symjit_runtime_capability="symjit.application.complex-f64.v1",
         eager_runtime_capability="rusticol.eager-runtime-layout.complex-f64.v1",
         package_version="0.1.0.dev0+candidate.portability",
@@ -91,6 +92,7 @@ def _write_bundle(
             "dependency_abis": {
                 "symbolica_serialization": contracts.symbolica_serialization_abi,
                 "symjit_application": contracts.symjit_application_abi,
+                "symjit_plane_application": contracts.symjit_plane_application_abi,
             },
             "kernels": [
                 {
@@ -735,6 +737,15 @@ def test_portability_workflow_transfers_portable_packs() -> None:
     assert "rust/crates/rusticol-core/src/eager_runtime/**" in trigger
     assert "rust/crates/rusticol-core/src/engine/**" in trigger
     assert "rust/crates/rusticol-core/src/evaluator/symjit.rs" in trigger
+    for adapter in (
+        "symjit_plane.rs",
+        "symjit_direct.rs",
+        "symjit_eager_direct.rs",
+        "symjit_compiled_direct.rs",
+    ):
+        assert (
+            workflow.count(f"rust/crates/rusticol-core/src/evaluator/{adapter}") == 2
+        )
     assert "dependencies/contributor-lock.toml" in trigger
     assert "src/pyamplicol/evaluators/symbolica*.py" in trigger
     assert workflow.count("eager_portability.py produce") == 1

@@ -64,6 +64,7 @@ _COFF_MACHINE_IDS = frozenset(
     }
 )
 SYMJIT_STORAGE_V3_APPLICATION_ABI = "symjit-application-storage-v3"
+SYMJIT_PLANE_APPLICATION_ABI = "pyamplicol-symjit-plane-application-v1"
 SYMJIT_STORAGE_V3_ARCHITECTURES = ("aarch64", "x86_64")
 _MACHINE_ARCHITECTURE_ALIASES = {
     "aarch64": "aarch64",
@@ -89,6 +90,7 @@ class RuntimeContracts:
     compiled_model_schema_version: int
     symbolica_serialization_abi: str
     symjit_application_abi: str
+    symjit_plane_application_abi: str
     symjit_runtime_capability: str
     eager_runtime_capability: str
     package_version: str
@@ -356,6 +358,11 @@ def audit_architecture_jit_bundle(
         raise PortabilityError("prepared JIT Symbolica serialization ABI mismatch")
     if dependency_abis.get("symjit_application") != contracts.symjit_application_abi:
         raise PortabilityError("prepared JIT application storage ABI mismatch")
+    if (
+        dependency_abis.get("symjit_plane_application")
+        != contracts.symjit_plane_application_abi
+    ):
+        raise PortabilityError("prepared JIT plane-application ABI mismatch")
 
     optimization = object_value(
         kernel_pack.get("optimization_settings"),
@@ -528,12 +535,14 @@ def audit_architecture_jit_bundle(
         "producer_version": producer_version,
         "symjit_application_count": len(application_paths),
         "symjit_application_abi": contracts.symjit_application_abi,
+        "symjit_plane_application_abi": contracts.symjit_plane_application_abi,
         "target": expected_target,
     }
 
 
 __all__ = [
     "FORBIDDEN_SUFFIXES",
+    "SYMJIT_PLANE_APPLICATION_ABI",
     "SYMJIT_STORAGE_V3_APPLICATION_ABI",
     "SYMJIT_STORAGE_V3_ARCHITECTURES",
     "PortabilityError",

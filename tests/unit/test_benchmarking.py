@@ -161,6 +161,8 @@ class _RuntimeWithDetailedEagerProfile(_RuntimeWithEagerProfile):
                 "eager_scatter_finalization_time_s": 32.0e-6,
                 "eager_closure_time_s": 4.0e-6,
                 "eager_copy_out_time_s": 6.0e-6,
+                "eager_internal_scratch_bytes": len(momenta) * 96,  # type: ignore[arg-type]
+                "eager_internal_broadcast_bytes": 128,
             }
         )
         return profile
@@ -312,6 +314,7 @@ class _TimedRuntimeWithCompiledDirectArenaRepeatedProfile(
             "compiled_direct_arena_boundary_input_bytes": 0,
             "compiled_direct_arena_boundary_current_output_bytes": 0,
             "compiled_direct_arena_boundary_amplitude_output_bytes": 0,
+            "compiled_direct_arena_internal_broadcast_bytes": repetitions * 64,
         }
 
 
@@ -382,6 +385,8 @@ class _TimedRuntimeWithRecurrenceRepeatedProfile(_TimedRuntimeWithRepeatedProfil
             "recurrence_finalization_row_count": repetitions * 34,
             "recurrence_closure_call_count": repetitions * 2,
             "recurrence_closure_row_count": repetitions * 12,
+            "recurrence_internal_scratch_bytes": points * 64,
+            "recurrence_internal_broadcast_bytes": points * 24,
         }
 
 
@@ -1296,6 +1301,7 @@ def test_compiled_direct_arena_rejects_boundary_traffic(
         "compiled_direct_arena_boundary_input_bytes": 0,
         "compiled_direct_arena_boundary_current_output_bytes": 0,
         "compiled_direct_arena_boundary_amplitude_output_bytes": 0,
+        "compiled_direct_arena_internal_broadcast_bytes": 0,
     }
     profile[boundary_counter] = 16
 
@@ -1319,6 +1325,7 @@ def test_compiled_direct_arena_calls_must_cover_backend_calls() -> None:
                 "compiled_direct_arena_boundary_input_bytes": 0,
                 "compiled_direct_arena_boundary_current_output_bytes": 0,
                 "compiled_direct_arena_boundary_amplitude_output_bytes": 0,
+                "compiled_direct_arena_internal_broadcast_bytes": 0,
             },
             fallback_points=1,
         )
@@ -1339,6 +1346,7 @@ def test_compiled_direct_arena_requires_fused_orchestration_timing() -> None:
                 "compiled_direct_arena_boundary_input_bytes": 0,
                 "compiled_direct_arena_boundary_current_output_bytes": 0,
                 "compiled_direct_arena_boundary_amplitude_output_bytes": 0,
+                "compiled_direct_arena_internal_broadcast_bytes": 0,
             },
             fallback_points=1,
         )

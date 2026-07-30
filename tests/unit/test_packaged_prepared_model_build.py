@@ -119,12 +119,17 @@ def _release_bundle(overlay: Path, package_version: str = "0.1.0") -> object:
         package_root / "_internal" / "versions.py",
         "SYMJIT_APPLICATION_ABI",
     )
+    symjit_plane_abi = prepared_models_module._literal_assignment(
+        package_root / "_internal" / "versions.py",
+        "SYMJIT_PLANE_APPLICATION_ABI",
+    )
     pack = SimpleNamespace(
         backend="jit",
         dependency_abis={
             "symbolica_serialization": symbolica_abi,
             "symbolica_version": "2.2.0",
             "symjit_application": symjit_abi,
+            "symjit_plane_application": symjit_plane_abi,
         },
         kernels=(object(),),
         optimization_settings={"jit_optimization_level": 2},
@@ -187,9 +192,7 @@ def test_source_ready_asset_metadata_is_derived_from_bundle_and_source(
         assert actual_metadata["producer"][key] == expected_metadata["producer"][key]
     assert {
         key: value for key, value in actual_metadata.items() if key != "producer"
-    } == {
-        key: value for key, value in expected_metadata.items() if key != "producer"
-    }
+    } == {key: value for key, value in expected_metadata.items() if key != "producer"}
     assert bundle_path.read_bytes() == source_bundle.read_bytes()
 
 
@@ -230,7 +233,7 @@ def test_release_source_ready_asset_uses_only_release_lock_identity(
     }
     assert metadata["producer"]["package_version"] == "0.1.0"
     assert metadata["dependencies"]["symbolica_version"] == "2.2.0"
-    assert metadata["dependencies"]["symjit_version"] == "2.21.1"
+    assert metadata["dependencies"]["symjit_version"] == "2.22.0"
     assert bundle_path.read_bytes() == source_bundle.read_bytes()
 
 
@@ -421,13 +424,7 @@ def test_wheel_staging_accepts_prepared_payload_compiler_edits(
     tmp_path: Path,
 ) -> None:
     overlay = _overlay(tmp_path)
-    source = (
-        overlay
-        / "src"
-        / "pyamplicol"
-        / "evaluators"
-        / "symbolica_compile.py"
-    )
+    source = overlay / "src" / "pyamplicol" / "evaluators" / "symbolica_compile.py"
     source.write_text(
         source.read_text(encoding="utf-8") + "\n# drift\n",
         encoding="utf-8",
@@ -482,12 +479,7 @@ def test_wheel_staging_rejects_unexpected_prepared_model_tree(
 ) -> None:
     overlay = _overlay(tmp_path)
     unexpected = (
-        overlay
-        / "src"
-        / "pyamplicol"
-        / "assets"
-        / "prepared_models"
-        / "second-pack"
+        overlay / "src" / "pyamplicol" / "assets" / "prepared_models" / "second-pack"
     )
     unexpected.mkdir()
     with pytest.raises(RuntimeError, match="unexpected: second-pack"):

@@ -82,100 +82,119 @@ def test_venv_reset_bootstraps_with_the_unmoved_base_interpreter(
     assert module._venv_bootstrap_python() == base_python
 
 
-def test_symjit_fork_revision_archive_and_pristine_tree_are_pinned() -> None:
+def test_upstream_symjit_revision_archive_and_generic_patch_are_pinned() -> None:
     module = _module()
     payload = module._lock()
     symjit = payload["symjit"]
 
-    assert payload["patches"] == []
-    assert not tuple((module.DEPENDENCIES / "patches" / "symjit").glob("*.patch"))
-    assert symjit["candidate_revision"] == ("60a9d66fbfb2181d36a5747c389714eccc187244")
+    assert payload["patches"] == [
+        {
+            "name": "symjit-raw-plane-descriptor-v1",
+            "target": "symjit",
+            "path": (
+                "patches/symjit/upstream/"
+                "0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch"
+            ),
+            "sha256": (
+                "087071adaaa92a88265d2112ee54546fb0ce8eb979e559997fffaa260e052918"
+            ),
+            "applies_to_revision": (
+                "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
+            ),
+        }
+    ]
+    assert {
+        path.relative_to(module.DEPENDENCIES).as_posix()
+        for path in (module.DEPENDENCIES / "patches" / "symjit").rglob("*.patch")
+    } == {payload["patches"][0]["path"]}
+    assert symjit["candidate_version"] == "2.22.0"
+    assert symjit["repository"] == "https://github.com/siravan/symjit-crate.git"
+    assert symjit["candidate_revision"] == (
+        "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
+    )
     assert symjit["archive_sha256"] == (
-        "a1db9882368c18e3db349181889304f47a8fb1af186ee5722b06690568f374ba"
+        "ba279d6135d59570c549b5e826f2ce3bd649b20ebb313c694f81a1fac2ddae5d"
     )
     assert symjit["source_tree_sha256"] == (
-        "feb5e65bd48df88dff37ee6e3e981226a9d507e554114b77035fe51951d51387"
+        "b309d103b38920c4414ddfcbd7bebaf1d144048c5408b57bfb0ef2086f13df59"
     )
-    assert symjit["candidate_tree_sha256"] == symjit["source_tree_sha256"]
+    assert symjit["candidate_tree_sha256"] == (
+        "f0cc401d14fd2998845605bb1223f4364e0112e34813080b89a72c02c295be36"
+    )
+    assert symjit["candidate_tree_sha256"] != symjit["source_tree_sha256"]
     assert hashlib.sha256(b"[]").hexdigest() == module._EMPTY_PATCH_CLOSURE_SHA256
-    assert symjit["release_status"] == "fork-pr-candidate"
+    assert (
+        symjit["release_status"]
+        == "upstream-git-candidate-with-generic-raw-plane-patch"
+    )
 
 
-def test_contributor_lock_rejects_any_local_patch_contract() -> None:
+def test_contributor_lock_authenticates_the_ordered_generic_patch_closure() -> None:
     module = _module()
     payload = module._lock()
 
-    module._require_patchless_contributor_lock(payload)
-    for patches in (None, {}, [{"target": "symjit"}]):
-        modified = {**payload, "patches": patches}
-        with pytest.raises(
-            module.SetupError,
-            match="local source patching is unsupported",
-        ):
-            module._require_patchless_contributor_lock(modified)
-
-
-def test_tracked_symjit_direct_patch_lineage_replays_cleanly(tmp_path: Path) -> None:
-    module = _module()
-    target = tmp_path / "symjit"
-    target.mkdir()
-    environment = dict(os.environ)
-    for name in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
-        environment.pop(name, None)
-    environment["GIT_CEILING_DIRECTORIES"] = str(target.parent.resolve())
-
-    applied: list[str] = []
-    patch_paths = sorted(
-        (module.DEPENDENCIES / "patches" / "symjit" / "upstream").glob(
-            "000[2-4]-*.patch"
-        )
-    )
-    for patch_path in patch_paths:
-        if (
-            b"diff --git a/rust/direct.rs b/rust/direct.rs\n"
-            not in patch_path.read_bytes()
-        ):
-            continue
-        command = [
-            "git",
-            "apply",
-            "--whitespace=nowarn",
-            "--include=rust/direct.rs",
-            str(patch_path),
-        ]
-        check = subprocess.run(
-            [*command[:2], "--check", *command[2:]],
-            cwd=target,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert check.returncode == 0, (
-            f"{patch_path.name} does not follow the tracked rust/direct.rs lineage:\n"
-            f"{check.stderr}"
-        )
-        subprocess.run(
-            command,
-            cwd=target,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        applied.append(patch_path.name)
-
-    assert applied == [
-        "0003-Add-generic-direct-plane-applications.patch",
+    patches = module._contributor_patches(payload)
+    assert [patch.name for patch in patches] == [
+        "symjit-raw-plane-descriptor-v1"
     ]
-    direct = target / "rust" / "direct.rs"
-    digest = subprocess.run(
-        ["git", "hash-object", direct],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert digest == "e0575ed72913a692ba2c946fa6a5ec740da458a2"
+    assert module._patch_state(patches) == payload["patches"]
+    assert module._patch_closure_sha256(patches) != hashlib.sha256(b"[]").hexdigest()
+
+
+def test_generic_contributor_patch_is_authenticated_applied_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    dependencies = tmp_path / "dependencies"
+    checkout = dependencies / "checkouts" / "symjit"
+    patch_path = dependencies / "patches" / "symjit" / "generic.patch"
+    checkout.mkdir(parents=True)
+    patch_path.parent.mkdir(parents=True)
+    source = checkout / "input.txt"
+    source.write_text("before\n", encoding="utf-8")
+    patch = (
+        "diff --git a/input.txt b/input.txt\n"
+        "--- a/input.txt\n"
+        "+++ b/input.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    ).encode()
+    patch_path.write_bytes(patch)
+    revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
+    source_tree = module._source_tree_sha256(checkout)
+    source.write_text("after\n", encoding="utf-8")
+    candidate_tree = module._source_tree_sha256(checkout)
+    source.write_text("before\n", encoding="utf-8")
+    payload = {
+        "patches": [
+            {
+                "name": "generic-plane-descriptor",
+                "target": "symjit",
+                "path": "patches/symjit/generic.patch",
+                "sha256": hashlib.sha256(patch).hexdigest(),
+                "applies_to_revision": revision,
+            }
+        ],
+        "symjit": {
+            "candidate_revision": revision,
+            "source_tree_sha256": source_tree,
+            "candidate_tree_sha256": candidate_tree,
+        },
+    }
+    monkeypatch.setattr(module, "DEPENDENCIES", dependencies)
+    monkeypatch.setattr(module, "CHECKOUTS", dependencies / "checkouts")
+
+    patches = module._contributor_patches(payload)
+    assert [item.name for item in patches] == ["generic-plane-descriptor"]
+    assert module._patch_closure_sha256(patches) != module._EMPTY_PATCH_CLOSURE_SHA256
+    runner = module.Runner(dry_run=False)
+    module._apply_contributor_patches(runner, payload)
+    module._apply_contributor_patches(runner, payload)
+
+    assert source.read_text(encoding="utf-8") == "after\n"
+    assert module._verify_symjit_tree(runner, payload) == candidate_tree
 
 
 def test_legacy_checkout_clones_the_named_branch_then_pins_its_commit(
@@ -297,9 +316,11 @@ def test_candidate_dependency_only_build_installs_and_verifies_symbolica(
     assert calls[2][2]["SYMBOLICA_HIDE_BANNER"] == "1"
 
 
-def test_candidate_project_wheel_scopes_prepared_model_bootstrap_to_build(
+@pytest.mark.parametrize("explicit_bootstrap", [None, "1"])
+def test_candidate_project_wheel_does_not_force_asset_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    explicit_bootstrap: str | None,
 ) -> None:
     module = _module()
     venv = tmp_path / ".venv"
@@ -317,7 +338,13 @@ def test_candidate_project_wheel_scopes_prepared_model_bootstrap_to_build(
                 (artifacts / "pyamplicol-test.whl").touch()
             return subprocess.CompletedProcess(rendered, 0, "", "")
 
-    monkeypatch.delenv("PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP", raising=False)
+    if explicit_bootstrap is None:
+        monkeypatch.delenv("PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP", raising=False)
+    else:
+        monkeypatch.setenv(
+            "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP",
+            explicit_bootstrap,
+        )
     monkeypatch.setattr(module, "VENV", venv)
     monkeypatch.setattr(module, "ARTIFACTS", artifacts)
 
@@ -328,12 +355,23 @@ def test_candidate_project_wheel_scopes_prepared_model_bootstrap_to_build(
     assert build_command[1:4] == ["-m", "build", "--wheel"]
     assert build_environment is not None
     assert build_environment["PYAMPLICOL_BUILD_MODE"] == "candidate"
-    assert build_environment["PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP"] == "1"
     install_command, install_environment = calls[1]
     assert install_command[1:4] == ["-m", "pip", "install"]
     assert install_environment is not None
-    assert "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP" not in install_environment
-    assert "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP" not in os.environ
+    if explicit_bootstrap is None:
+        assert "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP" not in build_environment
+        assert "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP" not in install_environment
+        assert "PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP" not in os.environ
+    else:
+        assert (
+            build_environment["PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP"]
+            == explicit_bootstrap
+        )
+        assert (
+            install_environment["PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP"]
+            == explicit_bootstrap
+        )
+        assert os.environ["PYAMPLICOL_PREPARED_MODEL_BOOTSTRAP"] == explicit_bootstrap
 
 
 def test_dependency_only_and_no_build_are_mutually_exclusive() -> None:
@@ -392,22 +430,33 @@ def test_symjit_rlib_manifest_validation_does_not_rewrite_source(
     module = _module()
     manifest = tmp_path / "Cargo.toml"
     pristine = (
-        b'[package]\nname = "symjit"\nversion = "2.21.1"\n\n'
+        b'[package]\nname = "symjit"\nversion = "2.22.0"\n\n'
         b'[lib]\ncrate-type = ["rlib"]\n'
     )
     manifest.write_bytes(pristine)
 
-    module._require_symjit_rlib_manifest(manifest)
+    module._require_symjit_rlib_manifest(manifest, expected_version="2.22.0")
 
     assert manifest.read_bytes() == pristine
 
     manifest.write_text(
-        '[package]\nname = "symjit"\nversion = "2.21.1"\n\n'
+        '[package]\nname = "symjit"\nversion = "2.22.0"\n\n'
         '[lib]\ncrate-type = ["rlib", "cdylib"]\n',
         encoding="utf-8",
     )
     with pytest.raises(module.SetupError, match="rlib-only"):
         module._require_symjit_rlib_manifest(manifest)
+
+    manifest.write_text(
+        '[package]\nname = "symjit"\nversion = "2.21.0"\n\n'
+        '[lib]\ncrate-type = ["rlib"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(module.SetupError, match="wrong package version"):
+        module._require_symjit_rlib_manifest(
+            manifest,
+            expected_version="2.22.0",
+        )
 
 
 def test_symjit_archive_materialization_preserves_the_pristine_tree(
@@ -418,7 +467,7 @@ def test_symjit_archive_materialization_preserves_the_pristine_tree(
     prefix = "symjit-test-revision"
     files = {
         "Cargo.toml": (
-            b'[package]\nname = "symjit"\nversion = "2.21.1"\n\n'
+            b'[package]\nname = "symjit"\nversion = "2.22.0"\n\n'
             b'[lib]\ncrate-type = ["rlib"]\n'
         ),
         "rust/direct.rs": b"pub fn direct() {}\n",
@@ -439,7 +488,7 @@ def test_symjit_archive_materialization_preserves_the_pristine_tree(
     tree_sha256 = module._source_tree_sha256(expected)
     payload = {
         "symjit": {
-            "candidate_version": "2.21.1",
+            "candidate_version": "2.22.0",
             "source_url": "https://example.invalid/symjit.tar.gz",
             "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
             "archive_prefix": prefix,
@@ -597,7 +646,7 @@ def test_candidate_dependency_projection_rewrites_only_the_isolated_manifest(
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
         'symbolica = { version = "=2.1.0", default-features = false }\n'
-        'symjit = { version = "=2.21.1", default-features = false }\n',
+        'symjit = { version = "=2.22.0", default-features = false }\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -608,17 +657,17 @@ def test_candidate_dependency_projection_rewrites_only_the_isolated_manifest(
                 "rust_version": "2.1.0",
                 "candidate_version": "2.2.0",
             },
-            "symjit": {"candidate_version": "2.21.2"},
+            "symjit": {"candidate_version": "2.22.1"},
         },
     )
     monkeypatch.setattr(
         module,
         "_release_lock",
-        lambda: {"symjit": {"version": "2.21.1"}},
+        lambda: {"symjit": {"version": "2.22.0"}},
     )
 
     module._rewrite_candidate_requirements(tmp_path)
 
     projected = manifest.read_text(encoding="utf-8")
     assert 'symbolica = { version = "=2.2.0"' in projected
-    assert 'symjit = { version = "=2.21.2"' in projected
+    assert 'symjit = { version = "=2.22.1"' in projected

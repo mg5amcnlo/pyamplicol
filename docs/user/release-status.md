@@ -66,9 +66,11 @@ gate and a fresh numerical comparison against the pinned independent Fortran
 implementation, retains one source distribution, builds the three target
 wheels from that source distribution, tests installed wheels on CPython 3.11
 and 3.14, and collects the unchanged package files. The
-dependency contract is now patchless and pinned to a verified immutable
-SymJIT fork revision. Exact release-mode prepared-model packs are checked in
-under `release_assets/prepared_models` and projected into release builds. A
+dependency contract pins `siravan/symjit-crate` 2.22.0 to immutable revision
+`4e288ce5f3132b05e2a81eb6452c011b9e2bb936`. Contributor and release builds
+authenticate the same upstream archive and apply the same minimal, generic
+raw-plane-descriptor patch. Exact release-mode prepared-model packs are checked
+in under `release_assets/prepared_models` and projected into release builds. A
 successful exact-main run of this complete three-platform workflow remains the
 final artifact validation gate.
 
@@ -118,9 +120,11 @@ final artifact validation gate.
 
 ## Publication Gates
 
-- The exact Symbolica 2.2.0 Python/Rust combination and immutable SymJIT fork
-  revision are pinned in the release dependency contract, with no local
-  patches or installer source rewrites.
+- The exact Symbolica 2.2.0 Python/Rust combination and immutable
+  `siravan/symjit-crate` 2.22.0 revision are pinned in the release dependency
+  contract. The single authenticated SymJIT patch exposes a generic raw
+  P-kernel plane descriptor; it does not contain pyAmpliCol scheduling or
+  operation policy.
 - The checked-in built-in-SM release packs carry the exact release dependency
   identity and pass the schema, ABI, target, content-integrity, and load checks
   when projected from `release_assets/prepared_models`. Producer source-byte
@@ -136,11 +140,12 @@ final artifact validation gate.
   TestPyPI/PyPI Trusted Publisher or pending-publisher registrations must still
   be confirmed before the first publication.
 
-The SymJIT dependency is an immutable Git source override, not an applied
-source patch. It is valid for Python wheel and source-distribution builds, but
-those source builds require access to the pinned Git revision. Publishing
-pyAmpliCol's internal Rust crates independently through crates.io would still
-require a compatible SymJIT release on crates.io.
+The SymJIT dependency is an authenticated immutable Git archive plus one
+ordered generic patch. Python wheel and source-distribution builds carry the
+patch and reconstruct the verified configured tree locally; they do not depend
+on a moving branch or the retired private fork. Publishing pyAmpliCol's
+internal Rust crates independently through crates.io would still require a
+compatible patched or upstreamed SymJIT release.
 
 Strict release builds fail closed on these conditions. The authoritative
 machine-readable state is `dependencies/release-lock.toml`; contributor-only

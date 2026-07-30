@@ -28,6 +28,7 @@ from .._internal.versions import (
     SYMBOLICA_CPP_RUNTIME_CAPABILITY,
     SYMBOLICA_SERIALIZATION_ABI,
     SYMJIT_APPLICATION_ABI,
+    SYMJIT_PLANE_APPLICATION_ABI,
     package_version,
     verify_native_module,
 )
@@ -282,9 +283,7 @@ def prepare_model_bundle(
         provisional_recurrence_catalog,
         tuple(kernel.kernel_id for kernel in catalog.kernels),
     )
-    recurrence_preflight_seconds = (
-        time.perf_counter() - recurrence_preflight_started
-    )
+    recurrence_preflight_seconds = time.perf_counter() - recurrence_preflight_started
     settings = prepared_symbolica_settings(evaluator)
     backend = cast(PreparedBackend, str(evaluator.backend))
     optimization_metadata = _optimization_metadata(settings)
@@ -347,6 +346,7 @@ def prepare_model_bundle(
             dependency_abis={
                 "symbolica_serialization": SYMBOLICA_SERIALIZATION_ABI,
                 "symjit_application": SYMJIT_APPLICATION_ABI,
+                "symjit_plane_application": SYMJIT_PLANE_APPLICATION_ABI,
                 "symbolica_version": _distribution_version("symbolica"),
             },
             provenance={
@@ -571,10 +571,15 @@ def _prepared_jit_direct_source(
     payload_identity_records: Mapping[str, tuple[int, str]],
 ) -> PreparedJitDirectSourceV1:
     manifest = record.f64_evaluator_manifest
-    application_path = manifest.get("application_path")
+    plane_application = manifest.get("plane_application")
+    if not isinstance(plane_application, Mapping):
+        raise PreparedModelBundleError(
+            f"prepared JIT kernel {record.kernel_id} has no plane application"
+        )
+    application_path = plane_application.get("application_path")
     if not isinstance(application_path, str) or not application_path:
         raise PreparedModelBundleError(
-            f"prepared JIT kernel {record.kernel_id} has no application payload"
+            f"prepared JIT kernel {record.kernel_id} has no plane application payload"
         )
     try:
         _size, application_sha256 = payload_identity_records[application_path]
@@ -583,11 +588,11 @@ def _prepared_jit_direct_source(
             f"prepared JIT kernel {record.kernel_id} application payload "
             f"{application_path!r} has no identity record"
         ) from exc
-    application_abi = manifest.get("application_abi")
-    if application_abi != SYMJIT_APPLICATION_ABI:
+    application_abi = plane_application.get("application_abi")
+    if application_abi != SYMJIT_PLANE_APPLICATION_ABI:
         raise PreparedModelBundleError(
             f"prepared JIT kernel {record.kernel_id} has incompatible "
-            f"application ABI {application_abi!r}"
+            f"plane application ABI {application_abi!r}"
         )
     return PreparedJitDirectSourceV1(
         prepared_kernel_id=record.kernel_id,
@@ -781,11 +786,7 @@ def _native_eager_simd_lane_width(target: Mapping[str, object]) -> int:
     target_triple = str(target["target_triple"])
     raw_features = target.get("cpu_features", ())
     cpu_features = frozenset(str(feature) for feature in raw_features)
-    return (
-        4
-        if target_triple.startswith("x86_64") and "avx2" in cpu_features
-        else 2
-    )
+    return 4 if target_triple.startswith("x86_64") and "avx2" in cpu_features else 2
 
 
 def _compile_native_split_real_kernel(
@@ -936,16 +937,12 @@ def _compile_native_split_real_kernel(
         },
         "direct_table": {
             "capability": EAGER_DIRECT_ARENA_RUNTIME_CAPABILITY,
-            "source_application_abi": (
-                NATIVE_EAGER_DIRECT_TABLE_APPLICATION_ABI
-            ),
+            "source_application_abi": (NATIVE_EAGER_DIRECT_TABLE_APPLICATION_ABI),
             "descriptor_abi": EAGER_DIRECT_TABLE_DESCRIPTOR_ABI,
             "binding_abi": EAGER_DIRECT_TABLE_BINDING_ABI,
             "library_path": str(library_path),
             "function_name": eager_direct.function_name,
-            "evaluator_state_sha256": (
-                eager_direct.evaluator_state_sha256
-            ),
+            "evaluator_state_sha256": (eager_direct.evaluator_state_sha256),
             "input_complex_count": eager_direct.input_complex_count,
             "output_complex_count": eager_direct.output_complex_count,
             "invocation_stride": eager_direct.invocation_stride,
@@ -1000,8 +997,7 @@ def _split_complex_kernel_contract(
         tree.head
         for symbol in split_parameters
         for tree in (symbol.to_atom_tree(),)
-        if tree.atom_type == AtomType.Var
-        and isinstance(tree.head, str)
+        if tree.atom_type == AtomType.Var and isinstance(tree.head, str)
     }
     for output_index, output in enumerate(outputs):
         real, imag = _split_complex_atom_tree(
@@ -1026,8 +1022,7 @@ def _split_complex_kernel_contract(
             for expression in (real, imag)
             for symbol in expression.get_all_symbols(False)
             for tree in (symbol.to_atom_tree(),)
-            if tree.atom_type == AtomType.Var
-            and isinstance(tree.head, str)
+            if tree.atom_type == AtomType.Var and isinstance(tree.head, str)
         }
         if not used_symbols.issubset(admitted_symbols):
             raise PreparedModelBundleError(
@@ -1101,9 +1096,7 @@ def _split_complex_atom_tree(
                 f"prepared native kernel {kernel_id} output {output_index} "
                 "uses a non-numeric exponent"
             )
-        exponent = Expression.parse(
-            _ANSI_ESCAPE_RE.sub("", tree.tail[1].head)
-        )
+        exponent = Expression.parse(_ANSI_ESCAPE_RE.sub("", tree.tail[1].head))
         try:
             exact_exponent = Fraction(exponent.to_canonical_string())
         except ValueError as exc:
@@ -1147,18 +1140,13 @@ def _is_structurally_real_expression(
 
     def visit(tree: object) -> bool:
         if tree.atom_type == AtomType.Var:
+            return isinstance(tree.head, str) and tree.head in admitted_symbols
+        if tree.atom_type == AtomType.Num:
             return (
                 isinstance(tree.head, str)
-                and tree.head in admitted_symbols
+                and Expression.parse(_ANSI_ESCAPE_RE.sub("", tree.head)).is_real()
             )
-        if tree.atom_type == AtomType.Num:
-            return isinstance(tree.head, str) and Expression.parse(
-                _ANSI_ESCAPE_RE.sub("", tree.head)
-            ).is_real()
-        if (
-            tree.atom_type == AtomType.Add
-            or tree.atom_type == AtomType.Mul
-        ):
+        if tree.atom_type == AtomType.Add or tree.atom_type == AtomType.Mul:
             return all(visit(child) for child in tree.tail)
         if tree.atom_type == AtomType.Pow:
             if len(tree.tail) != 2 or not visit(tree.tail[0]):
@@ -1167,9 +1155,7 @@ def _is_structurally_real_expression(
             return (
                 exponent.atom_type == AtomType.Num
                 and isinstance(exponent.head, str)
-                and Expression.parse(
-                    _ANSI_ESCAPE_RE.sub("", exponent.head)
-                ).is_real()
+                and Expression.parse(_ANSI_ESCAPE_RE.sub("", exponent.head)).is_real()
             )
         return False
 
@@ -1523,10 +1509,7 @@ def _native_direct_export(
             "  const unsigned long raw_buffer_len = "
             f"{raw_function_name}_realf64_get_buffer_len();"
         ),
-        (
-            "  if (raw_buffer_len > PAC_DIRECT_MAX_SCRATCH_DOUBLES) "
-            "return 3;"
-        ),
+        ("  if (raw_buffer_len > PAC_DIRECT_MAX_SCRATCH_DOUBLES) return 3;"),
         (
             "  double* storage = static_cast<double*>("
             "__builtin_alloca(sizeof(double) * "
@@ -1629,12 +1612,10 @@ def _native_direct_input_loads(
                     f"native direct {role} input has no recurrence parent"
                 )
             if any(
-                component >= shape[parent]
-                for shape in spec.parent_component_shapes
+                component >= shape[parent] for shape in spec.parent_component_shapes
             ):
                 raise PreparedModelBundleError(
-                    f"native direct {role} component exceeds an admitted parent "
-                    "state"
+                    f"native direct {role} component exceeds an admitted parent state"
                 )
             if spec.role == "finalization":
                 base = "row.component_base"
@@ -1957,12 +1938,47 @@ def _validate_backend_manifest(
         raise PreparedModelBundleError(
             "prepared JIT evaluators must not depend on external functions"
         )
+    plane_application = manifest.get("plane_application")
+    if not isinstance(plane_application, Mapping):
+        raise PreparedModelBundleError(
+            "prepared JIT evaluator has no direct-arena plane application"
+        )
+    expected_plane = {
+        "application_abi": SYMJIT_PLANE_APPLICATION_ABI,
+        "storage_abi": SYMJIT_APPLICATION_ABI,
+        "element_layout": "split-complex-plane-major",
+        "descriptor_order": "inputs-re-im-then-outputs-re-im",
+        "input_complex_count": manifest.get("input_len"),
+        "output_complex_count": manifest.get("output_len"),
+        "input_plane_count": 2 * int(manifest.get("input_len", -1)),
+        "output_plane_count": 2 * int(manifest.get("output_len", -1)),
+        "compiler_type": "native",
+        "translation_mode": "symbolica-structured-instructions",
+        "simd": True,
+        "complex": True,
+        "fast_math": True,
+        "fast_complex": False,
+        "threading": False,
+        "direct_arena": True,
+    }
+    for key, value in expected_plane.items():
+        if plane_application.get(key) != value:
+            raise PreparedModelBundleError(
+                "prepared JIT plane application has incompatible "
+                f"{key}: {plane_application.get(key)!r}"
+            )
     expected_level = PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL
     if manifest.get("optimization_level") != expected_level:
         raise PreparedModelBundleError(
             "prepared JIT evaluator is not portable: expected SymJIT "
             f"optimization level {expected_level}, found "
             f"{manifest.get('optimization_level')!r}"
+        )
+    if plane_application.get("optimization_level") != expected_level:
+        raise PreparedModelBundleError(
+            "prepared JIT plane application is not portable: expected SymJIT "
+            f"optimization level {expected_level}, found "
+            f"{plane_application.get('optimization_level')!r}"
         )
     manifest_settings = manifest.get("settings")
     if not isinstance(manifest_settings, Mapping) or (

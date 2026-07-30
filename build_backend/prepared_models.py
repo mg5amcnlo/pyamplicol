@@ -163,9 +163,7 @@ def stage_packaged_prepared_models(overlay: Path, mode: str) -> None:
         if unexpected:
             details.append("unexpected: " + ", ".join(unexpected))
         raise RuntimeError(
-            "packaged prepared-model asset set is invalid ("
-            + "; ".join(details)
-            + ")"
+            "packaged prepared-model asset set is invalid (" + "; ".join(details) + ")"
         )
 
     contract = _load_prepared_contract(package_root / "models" / "prepared.py")
@@ -178,10 +176,7 @@ def stage_packaged_prepared_models(overlay: Path, mode: str) -> None:
         _require_exact_keys(metadata, _METADATA_KEYS, "prepared-model metadata")
         if metadata.get("schema_version") != 1:
             raise RuntimeError("unsupported packaged prepared-model metadata schema")
-        if (
-            metadata.get("id") != _EXPECTED_ID
-            or metadata.get("model") != "built-in-sm"
-        ):
+        if metadata.get("id") != _EXPECTED_ID or metadata.get("model") != "built-in-sm":
             raise RuntimeError("packaged prepared-model identity is invalid")
         bundle_name = _required_string(metadata.get("bundle"), "metadata.bundle")
         if bundle_name != expected_bundle_name:
@@ -304,9 +299,7 @@ def _write_packaged_prepared_model_asset(
         raise RuntimeError("packaged built-in prepared model must use portable JIT O2")
 
     compiled = dict(bundle.compiled_model)
-    compiled_producer = _mapping(
-        compiled.get("producer"), "compiled_model.producer"
-    )
+    compiled_producer = _mapping(compiled.get("producer"), "compiled_model.producer")
     compiled_source = _mapping(compiled.get("source"), "compiled_model.source")
     package_version = _required_string(
         compiled_producer.get("pyamplicol"), "compiled_model producer version"
@@ -369,15 +362,18 @@ def _write_packaged_prepared_model_asset(
             package_root / "_internal" / "versions.py",
             "SYMJIT_APPLICATION_ABI",
         ),
+        "symjit_plane_application_abi": _literal_assignment(
+            package_root / "_internal" / "versions.py",
+            "SYMJIT_PLANE_APPLICATION_ABI",
+        ),
         "symjit_version": symjit_version,
-        "ufo_model_loader_version": release["ufo_model_loader"][
-            "required_version"
-        ],
+        "ufo_model_loader_version": release["ufo_model_loader"]["required_version"],
     }
     expected_pack_dependencies = {
         "symbolica_serialization": dependencies["symbolica_serialization_abi"],
         "symbolica_version": dependencies["symbolica_version"],
         "symjit_application": dependencies["symjit_application_abi"],
+        "symjit_plane_application": dependencies["symjit_plane_application_abi"],
     }
     for key, expected in expected_pack_dependencies.items():
         if pack.dependency_abis.get(key) != expected:
@@ -494,9 +490,7 @@ def _validate_bundle(
     if bundle.manifest.get("schema_version") != bundle_schema:
         raise RuntimeError("prepared bundle declares an incompatible container schema")
 
-    build_contract = _mapping(
-        metadata.get("build_contract"), "metadata.build_contract"
-    )
+    build_contract = _mapping(metadata.get("build_contract"), "metadata.build_contract")
     _require_exact_keys(
         build_contract,
         frozenset({"candidate_fingerprint", "mode", "sources"}),
@@ -628,6 +622,10 @@ def _validate_dependency_contract(
             package_root / "_internal" / "versions.py",
             "SYMJIT_APPLICATION_ABI",
         ),
+        "symjit_plane_application_abi": _literal_assignment(
+            package_root / "_internal" / "versions.py",
+            "SYMJIT_PLANE_APPLICATION_ABI",
+        ),
     }
     for key, value in expected.items():
         if dependencies.get(key) != value:
@@ -639,12 +637,11 @@ def _validate_dependency_contract(
         "symbolica_version": expected["symbolica_version"],
         "symbolica_serialization": expected["symbolica_serialization_abi"],
         "symjit_application": expected["symjit_application_abi"],
+        "symjit_plane_application": expected["symjit_plane_application_abi"],
     }
     for key, value in pack_expected.items():
         if pack_dependency_abis.get(key) != value:
-            raise RuntimeError(
-                f"prepared kernel-pack dependency ABI {key} is stale"
-            )
+            raise RuntimeError(f"prepared kernel-pack dependency ABI {key} is stale")
 
 
 def _symjit_version(overlay: Path) -> str:
@@ -818,11 +815,16 @@ def _literal_assignment(path: Path, name: str) -> str | int:
 def _load_prepared_contract(path: Path) -> ModuleType:
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
     package_name = f"_pyamplicol_build_prepared_contract_{digest}"
-    module_name = f"{package_name}.prepared"
+    models_package_name = f"{package_name}.models"
+    module_name = f"{models_package_name}.prepared"
     package = ModuleType(package_name)
     package.__package__ = package_name
-    package.__path__ = [str(path.parent)]  # type: ignore[attr-defined]
+    package.__path__ = [str(path.parent.parent)]  # type: ignore[attr-defined]
+    models_package = ModuleType(models_package_name)
+    models_package.__package__ = models_package_name
+    models_package.__path__ = [str(path.parent)]  # type: ignore[attr-defined]
     sys.modules[package_name] = package
+    sys.modules[models_package_name] = models_package
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         sys.modules.pop(package_name, None)

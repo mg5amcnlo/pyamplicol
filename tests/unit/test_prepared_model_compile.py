@@ -42,8 +42,10 @@ class _FakeJitAdapter:
         payload_dir = artifact_dir / "evaluators"
         payload_dir.mkdir(parents=True, exist_ok=True)
         application = payload_dir / "random-application.symjit"
+        plane_application = payload_dir / "random-application.plane.symjit"
         state = payload_dir / "random-state.evaluator.bin"
         application.write_bytes(b"portable-symjit-application")
+        plane_application.write_bytes(b"portable-symjit-plane-application")
         state.write_bytes(b"exact-symbolica-state")
         return {
             "kind": "symjit-application-evaluator",
@@ -54,6 +56,34 @@ class _FakeJitAdapter:
             "output_len": self.output_len,
             "application_path": str(application.relative_to(artifact_dir)),
             "application_abi": "symjit-application-storage-v3",
+            "plane_application": {
+                "application_path": str(
+                    plane_application.relative_to(artifact_dir)
+                ),
+                "application_abi": "pyamplicol-symjit-plane-application-v1",
+                "storage_abi": "symjit-application-storage-v3",
+                "element_layout": "split-complex-plane-major",
+                "descriptor_order": "inputs-re-im-then-outputs-re-im",
+                "input_complex_count": self.input_len,
+                "output_complex_count": self.output_len,
+                "input_plane_count": 2 * self.input_len,
+                "output_plane_count": 2 * self.output_len,
+                "compiler_type": "native",
+                "translation_mode": "symbolica-structured-instructions",
+                "optimization_level": 2,
+                "simd": True,
+                "complex": True,
+                "fast_math": True,
+                "fast_complex": False,
+                "compression": True,
+                "threading": False,
+                "direct_arena": True,
+                "source_digest": hashlib.sha256(b"instructions").hexdigest(),
+                "target": {
+                    "word_bits": 64,
+                    "endianness": "little",
+                },
+            },
             "element_layout": "complex-f64",
             "batch_layout": "row-major",
             "compiler_type": "native",
@@ -121,8 +151,10 @@ def test_prepared_jit_direct_source_reuses_authenticated_application() -> None:
         exact_expressions=("pyamplicol::prepared_test_input",),
         exact_evaluator_state_path="kernels/000000/exact.evaluator.bin",
         f64_evaluator_manifest={
-            "application_path": application_path,
-            "application_abi": "symjit-application-storage-v3",
+            "plane_application": {
+                "application_path": application_path,
+                "application_abi": "pyamplicol-symjit-plane-application-v1",
+            },
         },
     )
 
@@ -140,7 +172,10 @@ def test_prepared_jit_direct_source_reuses_authenticated_application() -> None:
     assert source.prepared_kernel_id == 0
     assert source.source_application_path == application_path
     assert source.source_application_sha256 == application_digest
-    assert source.source_application_abi == "symjit-application-storage-v3"
+    assert (
+        source.source_application_abi
+        == "pyamplicol-symjit-plane-application-v1"
+    )
     assert source.output_arity == 1
     assert source.exact_expressions == record.exact_expressions
     assert json.loads(source.input_contracts[0])["role"] == "current"
@@ -1068,9 +1103,12 @@ def test_prepared_compiler_writes_structured_architecture_kernel_pack(
     payload_binding = direct_catalog.templates[0].payload_binding
     assert payload_binding.kind == "prepared-direct-call"
     assert payload_binding.source_application_path in kernel.referenced_payload_paths
-    assert payload_binding.source_application_abi == "symjit-application-storage-v3"
+    assert (
+        payload_binding.source_application_abi
+        == "pyamplicol-symjit-plane-application-v1"
+    )
     assert payload_binding.direct_application_abi == (
-        "symjit-direct-application-storage-v1"
+        "pyamplicol-symjit-plane-application-v1"
     )
     assert payload_binding.role == "finalization"
     assert payload_binding.destination_operation == "finalize-in-place"

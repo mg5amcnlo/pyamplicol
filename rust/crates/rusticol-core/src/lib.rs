@@ -46,6 +46,8 @@ pub use eager_tables::{
     EagerSelectorDomainIdRow, EagerSelectorDomainRow, EagerSelectorGroupRow, MISSING_U32,
 };
 #[cfg(feature = "f64-symjit")]
+pub use engine::compile_symbolica_program_to_plane_application_bytes;
+#[cfg(feature = "f64-symjit")]
 pub use engine::eager_direct_descriptor_for_source_application_bytes;
 pub use engine::{
     NativeColorComponent, NativeDecimalEvaluation, NativeDecimalResolvedEvaluation,

@@ -41,6 +41,7 @@ REQUIRED_SDIST_MEMBERS = frozenset(
         "justfile",
         "build_backend/_pyamplicol_build.py",
         "build_backend/sdk.py",
+        "dependencies/patches/symjit/upstream/0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch",
         "dependencies/release-lock.toml",
         "docs/arxiv/pyAmpliCol.tex",
         "docs/user/installation.md",

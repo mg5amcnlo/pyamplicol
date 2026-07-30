@@ -9,6 +9,7 @@ use crate::{
 use serde_json::json;
 
 const TEST_SYMJIT_APPLICATION_ABI: &str = "symjit-application-storage-v3";
+const TEST_SYMJIT_PLANE_APPLICATION_ABI: &str = "pyamplicol-symjit-plane-application-v1";
 const TEST_PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL: u64 = 2;
 const TEST_PREPARED_JIT_PORTABLE_TARGET: &str = "symjit-storage-v3-portable";
 
@@ -183,7 +184,10 @@ fn filtered_pack(kernels: Vec<PreparedKernelManifest>) -> PreparedKernelPackMani
             "jit_optimization_level": TEST_PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL,
         }),
         producer: json!({"distribution": "pyamplicol", "version": "test"}),
-        dependency_abis: json!({"symjit_application": TEST_SYMJIT_APPLICATION_ABI}),
+        dependency_abis: json!({
+            "symjit_application": TEST_SYMJIT_APPLICATION_ABI,
+            "symjit_plane_application": TEST_SYMJIT_PLANE_APPLICATION_ABI,
+        }),
         provenance: json!({"compiled_model_digest": "test"}),
         target: PreparedKernelTargetManifest {
             portable: true,
@@ -229,6 +233,25 @@ fn prepared_jit_pack_rejects_nonportable_target_before_loading_payloads() {
         .validate()
         .expect_err("nonportable prepared JIT pack must fail");
     assert!(error.to_string().contains("expected portable target"));
+}
+
+#[test]
+fn prepared_jit_pack_requires_plane_application_dependency_abi() {
+    let mut pack = filtered_pack(vec![kernel(
+        50,
+        "closure",
+        vec![input("left-current", 0)],
+        "kernels/50/missing.symjit",
+    )]);
+    pack.dependency_abis
+        .as_object_mut()
+        .expect("test dependency ABI object")
+        .remove("symjit_plane_application");
+
+    let error = pack
+        .validate()
+        .expect_err("prepared JIT pack without plane application ABI must fail");
+    assert!(error.to_string().contains("plane-application ABI"));
 }
 
 fn compiled_pack(backend: &str, runtime_capability: &str) -> PreparedKernelPackManifest {
@@ -582,8 +605,6 @@ fn retained_ddbar_z3g_multistage_invocations_match_packet_execution() {
         EagerDirectPreparedKernel, EagerPlanV3Sections, run_retained_multistage_oracle,
         select_retained_multistage_candidate,
     };
-    use symjit::{Application, Config, Defuns, Storage};
-
     const ARTIFACT_ENV: &str = "PYAMPLICOL_EAGER_DIRECT_REAL_ARTIFACT";
     const PROCESS_ID: &str = "d_dbar_to_z_g_g_g";
     const POINTS: u32 = 129;
@@ -663,11 +684,15 @@ fn retained_ddbar_z3g_multistage_invocations_match_packet_execution() {
         .iter()
         .find(|kernel| kernel.kernel_id == candidate.kernel_id)
         .expect("candidate prepared kernel manifest");
-    let application_path = kernel_manifest
+    let plane_application = kernel_manifest
         .f64_evaluator_manifest
+        .get("plane_application")
+        .and_then(Value::as_object)
+        .expect("candidate SymJIT plane application metadata");
+    let application_path = plane_application
         .get("application_path")
         .and_then(Value::as_str)
-        .expect("candidate SymJIT application path");
+        .expect("candidate SymJIT plane application path");
     let application_source = payloads
         .source(application_path)
         .expect("resolve candidate SymJIT application");
@@ -675,21 +700,12 @@ fn retained_ddbar_z3g_multistage_invocations_match_packet_execution() {
         .read()
         .expect("read candidate SymJIT application")
         .into_owned();
-    let mut config = Config::default();
-    config.set_defuns(Defuns::new());
-    let mut input = source_bytes.as_slice();
-    let source_application =
-        Application::load(&mut input, &config).expect("decode candidate SymJIT application");
-    assert!(
-        input.is_empty(),
-        "candidate SymJIT application has trailing bytes"
-    );
-    let descriptor = symjit_eager_direct::eager_direct_table_metadata(
+    let descriptor = symjit_eager_direct::eager_direct_descriptor_for_source_application_bytes(
+        &source_bytes,
         u32::try_from(kernel.inputs.len()).expect("candidate input width fits u32"),
         kernel.output_component_count,
+        Path::new(&application_source.display_name()),
     )
-    .expect("construct retained eager table metadata")
-    .encode_descriptor(&source_application)
     .expect("encode retained eager table descriptor");
     let prepared = EagerDirectPreparedKernel {
         kernel_id: candidate.kernel_id,
@@ -699,6 +715,7 @@ fn retained_ddbar_z3g_multistage_invocations_match_packet_execution() {
         application: crate::eager_runtime::EagerDirectPreparedApplication::Symjit {
             source_application: &source_bytes,
             descriptor: &descriptor,
+            expected_optimization_level: 2,
         },
         display_path: PathBuf::from(application_source.display_name()),
     };

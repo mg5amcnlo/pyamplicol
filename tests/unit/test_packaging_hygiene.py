@@ -83,6 +83,25 @@ def test_contributor_and_release_locks_share_compatibility_abi(
         package_version.check_contributor_lock_consistency(root)
 
 
+def test_contributor_and_release_locks_share_patched_symjit_source(
+    tmp_path: Path,
+) -> None:
+    root = _copy_version_contract(tmp_path)
+    package_version.check_contributor_lock_consistency(root)
+    lock = root / "dependencies" / "contributor-lock.toml"
+    lock.write_text(
+        lock.read_text(encoding="utf-8").replace(
+            "f0cc401d14fd2998845605bb1223f4364e0112e34813080b89a72c02c295be36",
+            "0" * 64,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="authenticated SymJIT source"):
+        package_version.check_contributor_lock_consistency(root)
+
+
 def test_nix_shell_provides_python_build_frontend() -> None:
     flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
     match = re.search(

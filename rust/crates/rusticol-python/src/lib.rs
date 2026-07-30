@@ -20,8 +20,9 @@ use rusticol_core::{
     ColorAccuracy, ColorComponent as CoreColorComponent, ModelParameter as CoreModelParameter,
     NativeResolvedEvaluation, NativeRuntime, NativeRuntimeProfile, ParameterKind, ParticleRole,
     ProcessPhysics as CoreProcessPhysics, ReductionKind, RusticolError as CoreError,
-    RusticolErrorKind, eager_direct_descriptor_for_source_application_bytes,
-    preflight_prepared_kernel_pack, runtime_target_info,
+    RusticolErrorKind, compile_symbolica_program_to_plane_application_bytes,
+    eager_direct_descriptor_for_source_application_bytes, preflight_prepared_kernel_pack,
+    runtime_target_info,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -1116,6 +1117,14 @@ fn runtime_profile_to_python<'py>(
     payload.set_item("eager_reduction_time_s", profile.eager_reduction_s)?;
     payload.set_item("eager_copy_out_time_s", profile.eager_copy_out_s)?;
     payload.set_item(
+        "eager_internal_scratch_bytes",
+        profile.eager_internal_scratch_bytes,
+    )?;
+    payload.set_item(
+        "eager_internal_broadcast_bytes",
+        profile.eager_internal_broadcast_bytes,
+    )?;
+    payload.set_item(
         "recurrence_momentum_fill_time_s",
         profile.recurrence_momentum_fill_s,
     )?;
@@ -1196,6 +1205,14 @@ fn runtime_profile_to_python<'py>(
     payload.set_item(
         "recurrence_closure_row_count",
         profile.recurrence_closure_row_count,
+    )?;
+    payload.set_item(
+        "recurrence_internal_scratch_bytes",
+        profile.recurrence_internal_scratch_bytes,
+    )?;
+    payload.set_item(
+        "recurrence_internal_broadcast_bytes",
+        profile.recurrence_internal_broadcast_bytes,
     )?;
     payload.set_item("selector_planner_time_s", profile.selector_planner_s)?;
     payload.set_item("selector_gather_time_s", profile.selector_gather_s)?;
@@ -1309,6 +1326,10 @@ fn runtime_profile_to_python<'py>(
         profile.compiled_direct_arena_boundary_amplitude_output_bytes,
     )?;
     payload.set_item(
+        "compiled_direct_arena_internal_broadcast_bytes",
+        profile.compiled_direct_arena_internal_broadcast_bytes,
+    )?;
+    payload.set_item(
         "reduction_input_component_count",
         profile.reduction_input_component_count,
     )?;
@@ -1388,6 +1409,26 @@ fn _eager_direct_descriptor_v1(
     )
     .map_err(python_error)?;
     Ok(PyBytes::new(py, &descriptor).unbind())
+}
+
+#[pyfunction]
+fn _compile_symjit_plane_application_v1(
+    py: Python<'_>,
+    program_repr: &str,
+    input_complex_count: usize,
+    output_complex_count: usize,
+    optimization_level: u8,
+    compress: bool,
+) -> PyResult<Py<PyBytes>> {
+    let application = compile_symbolica_program_to_plane_application_bytes(
+        program_repr,
+        input_complex_count,
+        output_complex_count,
+        optimization_level,
+        compress,
+    )
+    .map_err(python_error)?;
+    Ok(PyBytes::new(py, &application).unbind())
 }
 
 #[pyfunction]
@@ -1960,6 +2001,10 @@ fn _rusticol(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(native_build_inputs_sha256, module)?)?;
     module.add_function(wrap_pyfunction!(target_info, module)?)?;
     module.add_function(wrap_pyfunction!(_preflight_eager_kernel_pack, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _compile_symjit_plane_application_v1,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(_eager_direct_descriptor_v1, module)?)?;
     module.add_function(wrap_pyfunction!(_load_eager_reduction_groups_v1, module)?)?;
     module.add_function(wrap_pyfunction!(_load_eager_exact_sections_v1, module)?)?;

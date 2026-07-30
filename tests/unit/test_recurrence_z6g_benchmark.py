@@ -78,6 +78,41 @@ def test_default_batches_cover_milestone_zero_and_explicit_values_replace() -> N
         benchmark._normalize_batch_sizes(duplicate)
 
 
+def test_migration_process_request_expands_without_changing_default_route() -> None:
+    default = benchmark.parser().parse_args([])
+    assert benchmark._selected_process(default) == "u u~ > Z g g g g g g"
+    assert benchmark._selected_process_name(default) == "uubar_Z_6g"
+    assert benchmark._authoritative_process_family(default)
+
+    migration = benchmark.parser().parse_args(
+        ["--process-expression", "d d~ > z + 6*g"]
+    )
+    assert benchmark._selected_process(migration) == "d d~ > Z g g g g g g"
+    assert benchmark._selected_process_name(migration) == "ddbar_Z_6g"
+    assert benchmark._authoritative_process_family(migration)
+
+    custom = benchmark.parser().parse_args(
+        ["--process-expression", "g g > t t~"]
+    )
+    assert benchmark._selected_process_name(custom) == "custom_process"
+    assert not benchmark._authoritative_process_family(custom)
+
+
+def test_benchmark_source_root_can_select_an_immutable_external_checkout(
+    tmp_path: Path,
+) -> None:
+    assert (
+        benchmark._resolve_benchmark_source_root(str(ROOT), script_path=SCRIPT) == ROOT
+    )
+    with pytest.raises(RuntimeError, match="must be an absolute path"):
+        benchmark._resolve_benchmark_source_root(
+            "relative/checkout",
+            script_path=SCRIPT,
+        )
+    with pytest.raises(RuntimeError, match="not a pyAmpliCol source checkout"):
+        benchmark._resolve_benchmark_source_root(str(tmp_path), script_path=SCRIPT)
+
+
 def test_incomplete_capture_requires_explicit_diagnostic_success() -> None:
     assert (
         benchmark._result_exit_code(
@@ -626,6 +661,21 @@ def _profile(
                     "expected_artifact_id": "a" * 64,
                     "loaded_artifact_id": "a" * 64,
                     "passes": True,
+                },
+                "cold_load_seconds": 0.01 + 0.001 * int(entry["round"]),
+                "peak_rss_after_cold_load": {
+                    "source": "resource.getrusage",
+                    "self_peak_bytes": 1024,
+                    "maximum_child_peak_bytes": 0,
+                    "observed_lower_bound_bytes": 1024,
+                    "semantics": "test high-water mark",
+                },
+                "peak_rss_after_profile": {
+                    "source": "resource.getrusage",
+                    "self_peak_bytes": 2048,
+                    "maximum_child_peak_bytes": 0,
+                    "observed_lower_bound_bytes": 2048,
+                    "semantics": "test high-water mark",
                 },
                 "lane_contract_sha256": lane_contract_sha256,
                 "timing_configuration": {

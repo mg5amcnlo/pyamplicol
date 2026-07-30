@@ -50,8 +50,27 @@ def test_release_contract_is_lean_exact_and_schema_8() -> None:
         "version",
         "repository",
         "revision",
+        "source_url",
+        "archive_prefix",
+        "archive_sha256",
+        "source_tree_sha256",
+        "configured_tree_sha256",
+        "release_cargo_lock_sha256",
+        "patches",
     }
-    assert len(lock["symjit"]["revision"]) == 40
+    assert lock["symjit"]["version"] == "2.22.0"
+    assert (
+        lock["symjit"]["repository"]
+        == "https://github.com/siravan/symjit-crate.git"
+    )
+    assert (
+        lock["symjit"]["revision"]
+        == "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
+    )
+    assert lock["symjit"]["configured_tree_sha256"] == (
+        "f0cc401d14fd2998845605bb1223f4364e0112e34813080b89a72c02c295be36"
+    )
+    assert len(lock["symjit"]["patches"]) == 1
     assert set(lock["ufo_model_loader"]) == {
         "python_distribution",
         "required_version",
@@ -86,7 +105,70 @@ def test_release_cargo_lock_rejects_candidate_path_resolution(
     codes = {
         issue.code for issue in module._release_cargo_lock_issues(module._load_lock())
     }
-    assert codes == {"release-cargo-nonregistry", "release-cargo-pin"}
+    assert codes == {
+        "release-cargo-lock-projection",
+        "release-cargo-nonregistry",
+        "release-cargo-pin",
+    }
+
+
+def test_release_gate_accepts_authenticated_local_symjit_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    lock = module._load_lock()
+    source = module.CARGO_LOCK_PATH.read_text(encoding="utf-8")
+    symjit = lock["symjit"]
+    git_source = (
+        f"git+{symjit['repository']}?rev={symjit['revision']}#{symjit['revision']}"
+    )
+    marker = (
+        "[[package]]\n"
+        'name = "symjit"\n'
+        f'version = "{symjit["version"]}"\n'
+        f'source = "{git_source}"\n'
+    )
+    replacement = (
+        "[[package]]\n"
+        'name = "symjit"\n'
+        f'version = "{symjit["version"]}"\n'
+    )
+    assert source.count(marker) == 1
+    local_lock = tmp_path / "Cargo.lock"
+    local_lock.write_text(source.replace(marker, replacement, 1), encoding="utf-8")
+    assert hashlib.sha256(local_lock.read_bytes()).hexdigest() == (
+        symjit["release_cargo_lock_sha256"]
+    )
+    monkeypatch.setattr(module, "CARGO_LOCK_PATH", local_lock)
+
+    assert module._release_cargo_lock_issues(lock) == []
+
+
+def test_release_gate_authenticates_its_generic_symjit_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    release = copy.deepcopy(module._load_lock())
+    dependencies = tmp_path / "dependencies"
+    patch = dependencies / release["symjit"]["patches"][0]["path"]
+    patch.parent.mkdir(parents=True)
+    patch.write_bytes(
+        (
+            ROOT
+            / "dependencies"
+            / release["symjit"]["patches"][0]["path"]
+        ).read_bytes()
+        + b"\ntampered\n"
+    )
+    lock_path = dependencies / "release-lock.toml"
+    lock_path.write_text("schema_version = 1\n", encoding="utf-8")
+    monkeypatch.setattr(module, "LOCK_PATH", lock_path)
+
+    assert {
+        issue.code for issue in module._release_symjit_source_issues(release)
+    } == {"release-symjit-patch"}
 
 
 def test_candidate_gate_fails_closed_before_contributor_install(
@@ -109,6 +191,8 @@ def test_candidate_gate_uses_revisions_and_pinned_symjit_tree_fingerprint(
     module = _module()
     contributor = module._load_contributor_lock()
     revisions = module._candidate_revisions(contributor)
+    patch_state, patch_issues = module._candidate_patch_contract(contributor)
+    assert patch_issues == []
     state_path = tmp_path / "install-state.json"
     candidate_lock = tmp_path / "candidate-Cargo.lock"
     cargo_config = tmp_path / "candidate-cargo-config.toml"
@@ -124,7 +208,7 @@ def test_candidate_gate_uses_revisions_and_pinned_symjit_tree_fingerprint(
         {
             "version": contributor["symjit"]["candidate_version"],
             "archive_sha256": contributor["symjit"]["archive_sha256"],
-            "patch_sha256": module._EMPTY_PATCH_CLOSURE_SHA256,
+            "patch_sha256": module._patch_closure_sha256(patch_state),
             "worktree_sha256": contributor["symjit"]["candidate_tree_sha256"],
         }
     )
@@ -137,7 +221,7 @@ def test_candidate_gate_uses_revisions_and_pinned_symjit_tree_fingerprint(
                     module.CONTRIBUTOR_LOCK_PATH.read_bytes()
                 ).hexdigest(),
                 "sources": source_state,
-                "patches": [],
+                "patches": patch_state,
             }
         ),
         encoding="utf-8",
@@ -172,13 +256,13 @@ def test_candidate_gate_uses_revisions_and_pinned_symjit_tree_fingerprint(
     assert module._candidate_issues(module._load_lock()) == []
 
 
-def test_candidate_contract_rejects_any_local_patch_contract() -> None:
+def test_candidate_contract_rejects_malformed_patch_contract() -> None:
     module = _module()
     contributor = copy.deepcopy(module._load_contributor_lock())
     contributor["patches"] = [
         {
             "name": "synthetic",
-            "target": "symjit",
+            "target": "pyamplicol",
             "path": "patches/symjit/change.patch",
             "sha256": "0" * 64,
             "applies_to_revision": contributor["symjit"]["candidate_revision"],
@@ -187,17 +271,47 @@ def test_candidate_contract_rejects_any_local_patch_contract() -> None:
 
     issues = module._candidate_contributor_contract_issues(contributor)
 
-    assert [issue.code for issue in issues] == ["candidate-patch-contract"]
+    assert {issue.code for issue in issues} == {
+        "candidate-patch-contract",
+        "candidate-source-tree",
+    }
 
 
-def test_candidate_contributor_contract_pins_arena_abis_and_both_tree_states() -> None:
+def test_candidate_contract_accepts_authenticated_generic_symjit_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    contributor = copy.deepcopy(module._load_contributor_lock())
+    dependencies = tmp_path / "dependencies"
+    patch = dependencies / "patches" / "symjit" / "generic.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("generic patch fixture\n", encoding="utf-8")
+    lock_path = dependencies / "contributor-lock.toml"
+    lock_path.write_text("schema_version = 1\n", encoding="utf-8")
+    monkeypatch.setattr(module, "CONTRIBUTOR_LOCK_PATH", lock_path)
+    contributor["patches"] = [
+        {
+            "name": "generic-plane-descriptor",
+            "target": "symjit",
+            "path": "patches/symjit/generic.patch",
+            "sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+            "applies_to_revision": contributor["symjit"]["candidate_revision"],
+        }
+    ]
+    contributor["symjit"]["candidate_tree_sha256"] = "0" * 64
+
+    assert module._candidate_contributor_contract_issues(contributor) == []
+
+
+def test_candidate_contributor_contract_pins_plane_abi_and_both_tree_states() -> None:
     module = _module()
     contributor = module._load_contributor_lock()
 
     assert module._candidate_contributor_contract_issues(contributor) == []
 
     wrong_abi = copy.deepcopy(contributor)
-    wrong_abi["abis"]["symjit_direct_table_binding"] = "wrong"
+    wrong_abi["abis"]["symjit_plane_application"] = "wrong"
     assert {
         issue.code for issue in module._candidate_contributor_contract_issues(wrong_abi)
     } == {"candidate-abi-contract"}
@@ -209,11 +323,13 @@ def test_candidate_contributor_contract_pins_arena_abis_and_both_tree_states() -
         for issue in module._candidate_contributor_contract_issues(wrong_tree)
     } == {"candidate-source-tree"}
 
-    divergent_tree = copy.deepcopy(contributor)
-    divergent_tree["symjit"]["source_tree_sha256"] = "0" * 64
+    patchless_divergence = copy.deepcopy(contributor)
+    patchless_divergence["patches"] = []
     assert {
         issue.code
-        for issue in module._candidate_contributor_contract_issues(divergent_tree)
+        for issue in module._candidate_contributor_contract_issues(
+            patchless_divergence
+        )
     } == {"candidate-source-tree"}
 
 

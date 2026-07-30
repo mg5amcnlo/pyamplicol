@@ -15,6 +15,12 @@ all-flow-union captures with pinned legacy AmpliCol evidence.
 Authoritative lane timing is the median and raw MAD of seven independently
 warmed, identity-verified subprocess measurements per mode/batch cell.
 
+For an immutable baseline recapture, the harness itself may live outside the
+source tree under test. Set ``PYAMPLICOL_BENCHMARK_SOURCE_ROOT`` to the
+absolute path of that clean checkout; command provenance still authenticates
+the external harness while source/build provenance is read from the selected
+checkout.
+
 Example::
 
     .venv/bin/python tools/ci/memory_watchdog.py --limit-gib 30 -- \
@@ -46,7 +52,39 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, cast
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def _resolve_benchmark_source_root(
+    requested: str | None,
+    *,
+    script_path: Path = Path(__file__),
+) -> Path:
+    default = script_path.resolve().parents[2]
+    if requested is None or not requested.strip():
+        return default
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        raise RuntimeError(
+            "PYAMPLICOL_BENCHMARK_SOURCE_ROOT must be an absolute path"
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(
+            "PYAMPLICOL_BENCHMARK_SOURCE_ROOT does not resolve to a source checkout"
+        ) from error
+    required = ("Cargo.toml", "pyproject.toml")
+    if not resolved.is_dir() or any(
+        not (resolved / relative).is_file() for relative in required
+    ):
+        raise RuntimeError(
+            "PYAMPLICOL_BENCHMARK_SOURCE_ROOT is not a pyAmpliCol source checkout"
+        )
+    return resolved
+
+
+ROOT = _resolve_benchmark_source_root(
+    os.environ.get("PYAMPLICOL_BENCHMARK_SOURCE_ROOT")
+)
 PREPARED_MODEL_ID = "built-in-sm-jit-o2"
 PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL = 2
 DEFAULT_BATCH_SIZES = (1, 128, 1024)
@@ -74,6 +112,9 @@ M0_ACCEPTANCE_SCHEMA = 4
 _WORKER_MARKER = "PYAMPLICOL_RECURRENCE_Z6G_WORKER_RESULT="
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+MIGRATION_PROCESS_REQUEST = "d d~ > z + 6*g"
+MIGRATION_PROCESS_CANONICAL = "d d~ > Z g g g g g g"
+MIGRATION_PROCESS_NAME = "ddbar_Z_6g"
 
 
 class HarnessError(RuntimeError):
@@ -88,19 +129,35 @@ def _process_name(gluon_count: int) -> str:
     return f"uubar_Z_{gluon_count}g"
 
 
+def _canonical_process_expression(expression: str) -> str:
+    normalized = " ".join(expression.split())
+    if normalized.casefold() == MIGRATION_PROCESS_REQUEST.casefold():
+        return MIGRATION_PROCESS_CANONICAL
+    return normalized
+
+
 def _selected_process(arguments: argparse.Namespace) -> str:
     return (
         _process(arguments.gluon_count)
         if arguments.process_expression is None
-        else arguments.process_expression
+        else _canonical_process_expression(arguments.process_expression)
     )
 
 
 def _selected_process_name(arguments: argparse.Namespace) -> str:
+    if arguments.process_expression is None:
+        return _process_name(arguments.gluon_count)
+    if _selected_process(arguments) == MIGRATION_PROCESS_CANONICAL:
+        return MIGRATION_PROCESS_NAME
+    return "custom_process"
+
+
+def _authoritative_process_family(arguments: argparse.Namespace) -> bool:
+    """Return whether the selected process belongs to an acceptance campaign."""
+
     return (
-        _process_name(arguments.gluon_count)
-        if arguments.process_expression is None
-        else "custom_process"
+        arguments.process_expression is None
+        or _selected_process(arguments) == MIGRATION_PROCESS_CANONICAL
     )
 
 
@@ -140,6 +197,28 @@ def _resource_peak() -> dict[str, object]:
             "not an aggregate process-tree sample"
         ),
     }
+
+
+def _valid_resource_peak(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    self_bytes = value.get("self_peak_bytes")
+    child_bytes = value.get("maximum_child_peak_bytes")
+    observed_bytes = value.get("observed_lower_bound_bytes")
+    return (
+        value.get("source") == "resource.getrusage"
+        and not isinstance(self_bytes, bool)
+        and isinstance(self_bytes, int)
+        and self_bytes >= 0
+        and not isinstance(child_bytes, bool)
+        and isinstance(child_bytes, int)
+        and child_bytes >= 0
+        and not isinstance(observed_bytes, bool)
+        and isinstance(observed_bytes, int)
+        and observed_bytes == max(self_bytes, child_bytes)
+        and isinstance(value.get("semantics"), str)
+        and bool(value["semantics"])
+    )
 
 
 def _artifact_stats(path: Path) -> dict[str, int]:
@@ -2793,6 +2872,7 @@ def _statistics_payload(value: Any) -> dict[str, float]:
 
 def _benchmark_payload(result: Any) -> dict[str, object]:
     evaluator_uncertainty = result.evaluator_uncertainty
+    timing_breakdown = getattr(result, "timing_breakdown", None)
     return {
         "batch_size": int(result.effective_config.batch_size),
         "sample_count": int(result.sample_count),
@@ -2810,6 +2890,11 @@ def _benchmark_payload(result: Any) -> dict[str, object]:
             None
             if evaluator_uncertainty is None
             else _statistics_payload(evaluator_uncertainty)
+        ),
+        "timing_breakdown": (
+            None
+            if timing_breakdown is None
+            else _plain(dataclasses.asdict(timing_breakdown))
         ),
         "timing_sources": {
             "wall": result.environment.get("wall_time_source"),
@@ -4818,6 +4903,9 @@ def _aggregate_profile_workers(
             "post_timing_loaded_runtime_artifact": worker.get(
                 "post_timing_loaded_runtime_artifact"
             ),
+            "cold_load_seconds": worker.get("cold_load_seconds"),
+            "peak_rss_after_cold_load": worker.get("peak_rss_after_cold_load"),
+            "peak_rss_after_profile": worker.get("peak_rss_after_profile"),
             "lane_contract_sha256": _canonical_sha256(contract),
             "timing_configuration": worker.get("timing_configuration"),
             "worker_measurement": dict(measurement),
@@ -4848,6 +4936,9 @@ def _aggregate_profile_workers(
         aggregated_measurements: list[dict[str, object]] = []
         for batch_size, samples in sorted(lane_samples[mode].items()):
             values: list[float] = []
+            cold_load_values: list[float] = []
+            cold_load_rss_values: list[int] = []
+            profiled_rss_values: list[int] = []
             for sample in samples:
                 value = sample.get("wall_seconds_per_point")
                 if (
@@ -4860,8 +4951,36 @@ def _aggregate_profile_workers(
                         f"{mode}/{batch_size} worker returned invalid wall timing"
                     )
                 values.append(float(value))
+                cold_load = sample.get("cold_load_seconds")
+                peak_after_load = sample.get("peak_rss_after_cold_load")
+                peak_after_profile = sample.get("peak_rss_after_profile")
+                if (
+                    isinstance(cold_load, bool)
+                    or not isinstance(cold_load, (float, int))
+                    or not math.isfinite(float(cold_load))
+                    or float(cold_load) <= 0.0
+                    or not _valid_resource_peak(peak_after_load)
+                    or not _valid_resource_peak(peak_after_profile)
+                ):
+                    raise HarnessError(
+                        f"{mode}/{batch_size} worker returned invalid cold-load "
+                        "resource evidence"
+                    )
+                assert isinstance(peak_after_load, Mapping)
+                assert isinstance(peak_after_profile, Mapping)
+                cold_load_values.append(float(cold_load))
+                cold_load_rss_values.append(
+                    int(peak_after_load["observed_lower_bound_bytes"])
+                )
+                profiled_rss_values.append(
+                    int(peak_after_profile["observed_lower_bound_bytes"])
+                )
             median = statistics.median(values)
             mad = statistics.median(abs(value - median) for value in values)
+            cold_load_median = statistics.median(cold_load_values)
+            cold_load_mad = statistics.median(
+                abs(value - cold_load_median) for value in cold_load_values
+            )
             aggregated_measurements.append(
                 {
                     "batch_size": batch_size,
@@ -4871,6 +4990,17 @@ def _aggregate_profile_workers(
                     "wall_seconds_per_point_median": median,
                     "wall_seconds_per_point_mad": mad,
                     "statistics_contract": "subprocess-median-and-raw-mad-v1",
+                    "cold_load_seconds_median": cold_load_median,
+                    "cold_load_seconds_mad": cold_load_mad,
+                    "cold_load_peak_rss_bytes_median": statistics.median(
+                        cold_load_rss_values
+                    ),
+                    "profiled_peak_rss_bytes_median": statistics.median(
+                        profiled_rss_values
+                    ),
+                    "resource_statistics_contract": (
+                        "subprocess-median-and-raw-mad-v1"
+                    ),
                     "subprocess_samples": samples,
                     "interrupted": any(
                         sample.get("interrupted") is not False for sample in samples
@@ -5105,6 +5235,9 @@ def _profile_measurement_contract(
                 sources = sample.get("timing_sources")
                 environment = sample.get("environment")
                 timing_configuration = sample.get("timing_configuration")
+                cold_load_seconds = sample.get("cold_load_seconds")
+                peak_rss_after_cold_load = sample.get("peak_rss_after_cold_load")
+                peak_rss_after_profile = sample.get("peak_rss_after_profile")
                 schedule_index = sample.get("schedule_index")
                 verification = sample.get("pre_timing_verification")
                 post_timing_loaded_artifact = sample.get(
@@ -5113,6 +5246,18 @@ def _profile_measurement_contract(
                 sample_round = sample.get("round")
                 invocation = sample.get("worker_invocation")
                 worker_command = sample.get("worker_command")
+                if (
+                    isinstance(cold_load_seconds, bool)
+                    or not isinstance(cold_load_seconds, (float, int))
+                    or not math.isfinite(float(cold_load_seconds))
+                    or float(cold_load_seconds) <= 0.0
+                    or not _valid_resource_peak(peak_rss_after_cold_load)
+                    or not _valid_resource_peak(peak_rss_after_profile)
+                ):
+                    errors.append(
+                        f"profile batch {batch_size} subprocess sample "
+                        f"{sample_index} lacks cold-load/resource evidence"
+                    )
                 if (
                     isinstance(sample_round, bool)
                     or not isinstance(sample_round, int)
@@ -5986,9 +6131,10 @@ def _capture_acceptance(
         ):
             incomplete_physical_axes.append(mode)
     ineligibility_reasons: list[str] = []
-    if arguments.process_expression is not None:
+    if not _authoritative_process_family(arguments):
         ineligibility_reasons.append(
-            "a custom process expression is diagnostic-only for milestone 0"
+            "the custom process expression is outside the authoritative "
+            "u u~ or d d~ Z+6g campaigns"
         )
     if arguments.gluon_count != 6:
         ineligibility_reasons.append(

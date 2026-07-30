@@ -224,8 +224,11 @@ _FORBIDDEN_SDIST_MEMBERS = {
 }
 _FORBIDDEN_SDIST_PREFIXES = (
     "dependencies/checkouts/",
-    "dependencies/patches/",
     "release_assets/",
+)
+_RELEASE_SYMJIT_PATCH = (
+    "dependencies/patches/symjit/upstream/"
+    "0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch"
 )
 
 
@@ -480,13 +483,97 @@ def _locked_python_dependencies(lock: dict[str, Any]) -> dict[str, str]:
     return dependencies
 
 
+def _authenticated_candidate_patches(
+    contributor: dict[str, Any],
+    contributor_path: Path,
+) -> list[dict[str, str]]:
+    raw_patches = contributor.get("patches")
+    if not isinstance(raw_patches, list):
+        raise ArtifactError("candidate dependency provenance has an invalid patch list")
+    allowed_keys = {
+        "name",
+        "target",
+        "path",
+        "sha256",
+        "applies_to_revision",
+    }
+    symjit = contributor.get("symjit")
+    revision = symjit.get("candidate_revision") if isinstance(symjit, dict) else None
+    dependency_root = contributor_path.parent.resolve()
+    state: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    seen_paths: set[str] = set()
+    for index, entry in enumerate(raw_patches):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != allowed_keys
+            or not all(
+                isinstance(entry[key], str) and entry[key] for key in allowed_keys
+            )
+        ):
+            raise ArtifactError(
+                f"candidate dependency patch {index} has an invalid schema"
+            )
+        normalized = {key: str(entry[key]) for key in allowed_keys}
+        name = normalized["name"]
+        relative = normalized["path"]
+        pure = PurePosixPath(relative)
+        if (
+            name in seen_names
+            or relative in seen_paths
+            or normalized["target"] != "symjit"
+            or normalized["applies_to_revision"] != revision
+            or re.fullmatch(r"[0-9a-f]{64}", normalized["sha256"]) is None
+            or pure.is_absolute()
+            or not pure.parts
+            or pure.parts[0] != "patches"
+            or pure.suffix != ".patch"
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ArtifactError(
+                f"candidate dependency patch {name!r} has an invalid identity"
+            )
+        patch_path = dependency_root.joinpath(*pure.parts)
+        try:
+            resolved = patch_path.resolve(strict=True)
+            resolved.relative_to(dependency_root)
+        except (OSError, ValueError) as error:
+            raise ArtifactError(
+                f"candidate dependency patch {name!r} is missing or unsafe"
+            ) from error
+        current = dependency_root
+        for part in pure.parts:
+            current /= part
+            if current.is_symlink():
+                raise ArtifactError(
+                    f"candidate dependency patch {name!r} may not use symlinks"
+                )
+        if (
+            not resolved.is_file()
+            or hashlib.sha256(resolved.read_bytes()).hexdigest() != normalized["sha256"]
+        ):
+            raise ArtifactError(
+                f"candidate dependency patch {name!r} failed authentication"
+            )
+        seen_names.add(name)
+        seen_paths.add(relative)
+        state.append(
+            {
+                "name": name,
+                "target": normalized["target"],
+                "path": pure.as_posix(),
+                "sha256": normalized["sha256"],
+                "applies_to_revision": normalized["applies_to_revision"],
+            }
+        )
+    return state
+
+
 def _candidate_dependency_overrides() -> dict[str, str]:
     release_path = ROOT / _CANONICAL_DEPENDENCY_LOCK
     contributor_path = ROOT / _CONTRIBUTOR_DEPENDENCY_LOCK
     state_path = ROOT / _CANDIDATE_INSTALL_STATE
-    missing = [
-        path for path in (contributor_path, state_path) if not path.is_file()
-    ]
+    missing = [path for path in (contributor_path, state_path) if not path.is_file()]
     if missing:
         raise ArtifactError(
             "candidate dependency provenance is incomplete: "
@@ -504,19 +591,16 @@ def _candidate_dependency_overrides() -> dict[str, str]:
         raise ArtifactError(
             "candidate dependency provenance has an unsupported contributor lock"
         )
-    if contributor.get("patches") != []:
-        raise ArtifactError(
-            "candidate dependency provenance must disable local source patches"
-        )
+    patches = _authenticated_candidate_patches(contributor, contributor_path)
     if (
         not isinstance(state, dict)
         or state.get("schema_version") != 1
         or state.get("publishable") is not False
-        or state.get("patches") != []
+        or state.get("patches") != patches
     ):
         raise ArtifactError(
-            "candidate dependency provenance requires patchless, non-publishable "
-            "schema-v1 installer state"
+            "candidate dependency provenance requires a non-publishable schema-v1 "
+            "installer state matching the authenticated patch contract"
         )
     expected_digests = {
         "release_lock_sha256": hashlib.sha256(release_path.read_bytes()).hexdigest(),
@@ -536,9 +620,7 @@ def _candidate_dependency_overrides() -> dict[str, str]:
     if not isinstance(release_symbolica, dict) or not isinstance(
         candidate_symbolica, dict
     ):
-        raise ArtifactError(
-            "candidate dependency provenance has no Symbolica contract"
-        )
+        raise ArtifactError("candidate dependency provenance has no Symbolica contract")
     distribution = release_symbolica.get("python_distribution")
     release_version = release_symbolica.get("python_version")
     candidate_version = candidate_symbolica.get("candidate_version")
@@ -742,8 +824,7 @@ def _validate_prepared_model_assets(
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
         raise ArtifactError(
-            "prepared-model asset inventory mismatch; "
-            f"missing={missing}, extra={extra}"
+            f"prepared-model asset inventory mismatch; missing={missing}, extra={extra}"
         )
 
     for architecture in PREPARED_MODEL_ARCHITECTURES:
@@ -771,6 +852,8 @@ def _validate_prepared_model_assets(
             not isinstance(dependencies, dict)
             or dependencies.get("symjit_application_abi")
             != abis.get("symjit_application")
+            or dependencies.get("symjit_plane_application_abi")
+            != abis.get("symjit_plane_application")
             or dependencies.get("symbolica_serialization_abi")
             != abis.get("symbolica_serialization")
         ):
@@ -779,10 +862,7 @@ def _validate_prepared_model_assets(
             )
 
         build_contract = metadata.get("build_contract")
-        if (
-            not isinstance(build_contract, dict)
-            or build_contract.get("mode") != mode
-        ):
+        if not isinstance(build_contract, dict) or build_contract.get("mode") != mode:
             raise ArtifactError(
                 f"prepared-model build mode is invalid: {metadata_name}"
             )
@@ -1197,13 +1277,7 @@ def _validate_selftest_fixture(
 def _evaluator_container_codec() -> Any:
     """Load the source-tree pacbin codec without importing an installed package."""
 
-    source = (
-        ROOT
-        / "src"
-        / "pyamplicol"
-        / "generation"
-        / "evaluator_container.py"
-    )
+    source = ROOT / "src" / "pyamplicol" / "generation" / "evaluator_container.py"
     name = "_pyamplicol_release_evaluator_container"
     spec = importlib.util.spec_from_file_location(name, source)
     if spec is None or spec.loader is None:
@@ -1239,9 +1313,7 @@ def _validate_selftest_evaluator_container(
             index = reader.index
             expected = {
                 "member_count": len(index.members),
-                "unpacked_size_bytes": sum(
-                    member.length for member in index.members
-                ),
+                "unpacked_size_bytes": sum(member.length for member in index.members),
                 "index_sha256": index.index_sha256,
             }
             if any(container.get(key) != value for key, value in expected.items()):
@@ -1742,6 +1814,10 @@ def _validate_sdist_inventory(members: set[str]) -> None:
         for name in members
         if name in _FORBIDDEN_SDIST_MEMBERS
         or name.startswith(_FORBIDDEN_SDIST_PREFIXES)
+        or (
+            name.startswith("dependencies/patches/")
+            and name != _RELEASE_SYMJIT_PATCH
+        )
     )
     if forbidden:
         raise ArtifactError(
@@ -1768,6 +1844,43 @@ def audit_sdist(path: Path, *, mode: str) -> SdistReport:
             prefix=_PREPARED_MODEL_SDIST_PREFIX,
             mode="release",
         )
+        try:
+            with relative_files[
+                "dependencies/release-lock.toml"
+            ].open("rb") as stream:
+                release_lock = tomllib.load(stream)
+            symjit = release_lock["symjit"]
+            patches = symjit["patches"]
+        except (KeyError, OSError, TypeError, tomllib.TOMLDecodeError) as error:
+            raise ArtifactError(
+                f"sdist has an invalid release SymJIT source contract: {error}"
+            ) from error
+        if not isinstance(patches, list) or not patches:
+            raise ArtifactError("sdist has no authenticated release SymJIT patch")
+        for patch in patches:
+            if not isinstance(patch, dict):
+                raise ArtifactError("sdist SymJIT patch contract is malformed")
+            relative = patch.get("path")
+            expected_sha256 = patch.get("sha256")
+            if (
+                not isinstance(relative, str)
+                or not isinstance(expected_sha256, str)
+                or f"dependencies/{relative}" not in relative_files
+            ):
+                raise ArtifactError("sdist is missing a locked SymJIT patch")
+            actual_sha256 = hashlib.sha256(
+                relative_files[f"dependencies/{relative}"].read_bytes()
+            ).hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise ArtifactError("sdist SymJIT patch digest does not match its lock")
+        cargo_lock_sha256 = hashlib.sha256(
+            relative_files["Cargo.lock"].read_bytes()
+        ).hexdigest()
+        if cargo_lock_sha256 != symjit.get("release_cargo_lock_sha256"):
+            raise ArtifactError(
+                "sdist Cargo.lock does not use the authenticated patched SymJIT "
+                "resolution"
+            )
         cargo = relative_files["Cargo.toml"].read_text(encoding="utf-8")
         match = re.search(r'(?m)^version = "([^"]+)"$', cargo)
         if match is None:
