@@ -814,10 +814,42 @@ def verify_consumer_artifact(
         for context, raw_kernel in filtered_records:
             kernel = _object(raw_kernel, context)
             f64 = _object(kernel.get("f64_evaluator_manifest"), f"{context} f64")
-            for field in ("application_path", "evaluator_state_path"):
-                source_path = _canonical_member_path(
-                    f64.get(field), f"{context} {field}"
+            plane = _object(
+                f64.get("plane_application"),
+                f"{context} f64 plane_application",
+            )
+            if (
+                plane.get("application_abi")
+                != contracts.symjit_plane_application_abi
+                or plane.get("storage_abi") != contracts.symjit_application_abi
+            ):
+                raise PortabilityError(
+                    f"{context} has an incompatible plane-application ABI"
                 )
+            referenced_payloads = (
+                (
+                    "application_path",
+                    f64.get("application_path"),
+                ),
+                (
+                    "evaluator_state_path",
+                    f64.get("evaluator_state_path"),
+                ),
+                (
+                    "plane_application.application_path",
+                    plane.get("application_path"),
+                ),
+            )
+            for field, raw_source_path in referenced_payloads:
+                source_path = _canonical_member_path(
+                    raw_source_path, f"{context} {field}"
+                )
+                if field == "plane_application.application_path" and not (
+                    source_path.endswith(".plane.symjit")
+                ):
+                    raise PortabilityError(
+                        f"{context} has a noncanonical plane-application path"
+                    )
                 destination_path = f"model/eager-kernels/{source_path}"
                 source_record = bundle_members.get(source_path)
                 destination_record = artifact_payloads.get(destination_path)

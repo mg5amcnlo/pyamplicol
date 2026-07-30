@@ -99,7 +99,7 @@ source_tree_sha256 = "b309d103b38920c4414ddfcbd7bebaf1d144048c5408b57bfb0ef2086f
 configured_tree_sha256 = "f0cc401d14fd2998845605bb1223f4364e0112e34813080b89a72c02c295be36"
 release_cargo_lock_sha256 = "acc74268440a3913efcbfdff031d23abc2fc956b522b054996543a4576f9edd3"
 patches = [
-  { name = "symjit-raw-plane-descriptor-v1", target = "symjit", path = "patches/symjit/upstream/0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch", sha256 = "087071adaaa92a88265d2112ee54546fb0ce8eb979e559997fffaa260e052918", applies_to_revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936" },
+  { name = "symjit-raw-plane-descriptor-v1", target = "symjit", path = "patches/symjit/upstream/0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch", sha256 = "2e356e7bfb8ed741aede18718ed093fe0003960b8f20247a5f5b4009b2514408", applies_to_revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936" },
 ]
 
 [ufo_model_loader]

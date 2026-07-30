@@ -418,6 +418,7 @@ def audit_architecture_jit_bundle(
         for index, raw in enumerate(variants)
     )
     application_paths: set[str] = set()
+    plane_application_paths: set[str] = set()
     exact_state_paths: set[str] = set()
     for context, kernel in evaluator_records:
         f64 = object_value(
@@ -491,12 +492,93 @@ def audit_architecture_jit_bundle(
             or exact_state_path not in recorded_members
         ):
             raise PortabilityError(f"prepared {context} omits referenced payloads")
+
+        plane = object_value(
+            f64.get("plane_application"),
+            f"{context}.f64_evaluator_manifest.plane_application",
+        )
+        input_complex_count = integer_value(
+            f64.get("input_len"),
+            f"{context}.f64_evaluator_manifest.input_len",
+        )
+        output_complex_count = integer_value(
+            f64.get("output_len"),
+            f"{context}.f64_evaluator_manifest.output_len",
+        )
+        if input_complex_count < 0 or output_complex_count < 1:
+            raise PortabilityError(
+                f"prepared {context} has invalid evaluator input/output counts"
+            )
+        plane_required = {
+            "application_abi": contracts.symjit_plane_application_abi,
+            "storage_abi": contracts.symjit_application_abi,
+            "element_layout": "split-complex-plane-major",
+            "descriptor_order": "inputs-re-im-then-outputs-re-im",
+            "input_complex_count": input_complex_count,
+            "output_complex_count": output_complex_count,
+            "input_plane_count": 2 * input_complex_count,
+            "output_plane_count": 2 * output_complex_count,
+            "compiler_type": "native",
+            "translation_mode": "symbolica-structured-instructions",
+            "optimization_level": 2,
+            "simd": True,
+            "complex": True,
+            "fast_math": True,
+            "fast_complex": False,
+            "threading": False,
+            "direct_arena": True,
+        }
+        for key, expected in plane_required.items():
+            if plane.get(key) != expected:
+                raise PortabilityError(
+                    f"prepared {context} has incompatible plane-application {key!r}"
+                )
+        if not isinstance(plane.get("compression"), bool):
+            raise PortabilityError(
+                f"prepared {context} has invalid plane-application compression"
+            )
+        source_digest = plane.get("source_digest")
+        if (
+            not isinstance(source_digest, str)
+            or len(source_digest) != 64
+            or any(character not in "0123456789abcdef" for character in source_digest)
+        ):
+            raise PortabilityError(
+                f"prepared {context} has invalid plane-application source digest"
+            )
+        plane_target = object_value(
+            plane.get("target"),
+            f"{context}.f64_evaluator_manifest.plane_application.target",
+        )
+        if (
+            plane_target.get("word_bits") != 64
+            or plane_target.get("endianness") != "little"
+        ):
+            raise PortabilityError(
+                f"prepared {context} has incompatible plane-application target"
+            )
+        plane_application_path = canonical_member_path(
+            plane.get("application_path"),
+            f"{context} plane-application path",
+        )
+        if not plane_application_path.endswith(".plane.symjit"):
+            raise PortabilityError(
+                f"prepared {context} plane application is not canonical SymJIT storage"
+            )
+        if plane_application_path not in recorded_members:
+            raise PortabilityError(
+                f"prepared {context} omits referenced plane-application payload"
+            )
         application_paths.add(application_path)
+        plane_application_paths.add(plane_application_path)
         exact_state_paths.add(exact_state_path)
 
     compiled_model_path = "model/model.pyAmplicol-model.json"
     expected_payload_members = (
-        application_paths | exact_state_paths | {compiled_model_path}
+        application_paths
+        | plane_application_paths
+        | exact_state_paths
+        | {compiled_model_path}
     )
     if set(recorded_members) != expected_payload_members:
         unexpected = sorted(set(recorded_members) - expected_payload_members)
@@ -535,6 +617,7 @@ def audit_architecture_jit_bundle(
         "producer_version": producer_version,
         "symjit_application_count": len(application_paths),
         "symjit_application_abi": contracts.symjit_application_abi,
+        "symjit_plane_application_count": len(plane_application_paths),
         "symjit_plane_application_abi": contracts.symjit_plane_application_abi,
         "target": expected_target,
     }

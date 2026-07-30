@@ -2,7 +2,7 @@
 # Source-checkout-only dependency inputs for non-publishable contributor builds.
 schema_version = 1
 patches = [
-  { name = "symjit-raw-plane-descriptor-v1", target = "symjit", path = "patches/symjit/upstream/0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch", sha256 = "087071adaaa92a88265d2112ee54546fb0ce8eb979e559997fffaa260e052918", applies_to_revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936" },
+  { name = "symjit-raw-plane-descriptor-v1", target = "symjit", path = "patches/symjit/upstream/0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch", sha256 = "2e356e7bfb8ed741aede18718ed093fe0003960b8f20247a5f5b4009b2514408", applies_to_revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936" },
 ]
 
 [abis]

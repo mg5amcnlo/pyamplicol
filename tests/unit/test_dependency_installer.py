@@ -96,7 +96,7 @@ def test_upstream_symjit_revision_archive_and_generic_patch_are_pinned() -> None
                 "0001-Expose-a-stable-raw-P-kernel-plane-descriptor.patch"
             ),
             "sha256": (
-                "087071adaaa92a88265d2112ee54546fb0ce8eb979e559997fffaa260e052918"
+                "2e356e7bfb8ed741aede18718ed093fe0003960b8f20247a5f5b4009b2514408"
             ),
             "applies_to_revision": (
                 "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
@@ -154,13 +154,13 @@ def test_generic_contributor_patch_is_authenticated_applied_and_idempotent(
     source = checkout / "input.txt"
     source.write_text("before\n", encoding="utf-8")
     patch = (
-        "diff --git a/input.txt b/input.txt\n"
-        "--- a/input.txt\n"
-        "+++ b/input.txt\n"
-        "@@ -1 +1 @@\n"
-        "-before\n"
-        "+after\n"
-    ).encode()
+        b"diff --git a/input.txt b/input.txt\n"
+        b"--- a/input.txt\n"
+        b"+++ b/input.txt\n"
+        b"@@ -1 +1 @@\n"
+        b"-before\n"
+        b"+after\n"
+    )
     patch_path.write_bytes(patch)
     revision = "4e288ce5f3132b05e2a81eb6452c011b9e2bb936"
     source_tree = module._source_tree_sha256(checkout)
