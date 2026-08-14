@@ -21,11 +21,14 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
     RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
+    VECTOR_PAIR_TO_SCALAR_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     CertifiedChiralDiracVectorIntrinsic,
@@ -429,6 +432,51 @@ def test_weyl_pair_graph_contract_keeps_prepared_component_execution() -> None:
         RecurrenceDirectPayloadBindingV1.from_dict(tampered)
 
 
+def test_vector_pair_to_scalar_graph_contract_keeps_prepared_execution() -> None:
+    contract_digest = RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+        VECTOR_PAIR_TO_SCALAR_TEMPLATE
+    ]
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceIntrinsic(
+            runtime_template=VECTOR_PAIR_TO_SCALAR_TEMPLATE,
+            contract_digest=contract_digest,
+            constant_scale=0.0 + 0.707106781186547j,
+            model_parameter_index=131,
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic)
+    payload = binding.to_dict()
+
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["contribution_parent_permutation"] == [0, 1]
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": (
+            "261b7f122671c1afc5ce3e430c82eb907cbc9873c91da3dfcbcb2bbaea048ad9"
+        ),
+        "contribution_parent_permutation": [0, 1],
+        "runtime_template": VECTOR_PAIR_TO_SCALAR_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 4604544271217802184,
+            "constant_real_bits": 0,
+            "kind": "intrinsic-scale-v1",
+            "parameter_index": 131,
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["contract_digest"] = _DIGEST_A
+    with pytest.raises(RecurrenceDirectTemplateError, match="not authenticated"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    malformed = binding.to_dict()
+    malformed["graph_intrinsic"]["scalar_projection"]["orientation"] = "scalar"
+    with pytest.raises(RecurrenceDirectTemplateError, match="unsupported fields"):
+        RecurrenceDirectPayloadBindingV1.from_dict(malformed)
+
+
 def test_chiral_dirac_vector_graph_contract_authenticates_both_scale_owners() -> None:
     contract_digest = RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
         CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE
@@ -677,6 +725,67 @@ def test_massive_vector_finalizer_graph_contract_keeps_prepared_execution() -> N
     tampered = binding.to_dict()
     tampered["graph_intrinsic"]["runtime_template"] = MASSIVE_DIRAC_PARTICLE_TEMPLATE
     with pytest.raises(RecurrenceDirectTemplateError, match="unitary-gauge"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["contract_digest"] = _DIGEST_A
+    with pytest.raises(RecurrenceDirectTemplateError, match="not authenticated"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+
+def test_massive_scalar_finalizer_graph_contract_keeps_prepared_execution() -> None:
+    contract_digest = RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[
+        MASSIVE_SCALAR_TEMPLATE
+    ]
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceFinalizationIntrinsic(
+            runtime_template=MASSIVE_SCALAR_TEMPLATE,
+            contract_digest=contract_digest,
+            constant_scale=1.0j,
+            mass_parameter_index=4,
+            width_parameter_index=5,
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic, role="finalization")
+    payload = binding.to_dict()
+
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": (
+            "d90a205a4542718e1f253057502ccc3e4e3eab33030323490bbea128a6a81c38"
+        ),
+        "contribution_parent_permutation": [0, 1],
+        "runtime_template": MASSIVE_SCALAR_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 4607182418800017408,
+            "constant_real_bits": 0,
+            "kind": RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
+            "mass_parameter_index": 4,
+            "width_parameter_index": 5,
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["width_parameter_index"] = 4
+    with pytest.raises(RecurrenceDirectTemplateError, match="must be distinct"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["constant_imag_bits"] = 0
+    with pytest.raises(RecurrenceDirectTemplateError, match=r"certified \+i"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["orientation"] = "particle"
+    with pytest.raises(RecurrenceDirectTemplateError, match="unsupported fields"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["runtime_template"] = MASSIVE_VECTOR_UNITARY_TEMPLATE
+    with pytest.raises(RecurrenceDirectTemplateError, match="requires its runtime"):
         RecurrenceDirectPayloadBindingV1.from_dict(tampered)
 
     tampered = binding.to_dict()
@@ -998,6 +1107,7 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1",
             "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1",
             "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1",
+            VECTOR_PAIR_TO_SCALAR_TEMPLATE,
             WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
             WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
         }.issubset(
@@ -1051,6 +1161,23 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             and item.payload_binding.graph_intrinsic.projection["parameter_index"]
             is not None
             for item in weyl_pair_currents
+        )
+        vector_pair_scalars = tuple(
+            item
+            for item in graph_contributions
+            if item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            == VECTOR_PAIR_TO_SCALAR_TEMPLATE
+        )
+        assert vector_pair_scalars
+        assert all(
+            item.parent_component_counts == (4, 4)
+            and item.destination_component_count == 1
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection["parameter_index"]
+            is not None
+            for item in vector_pair_scalars
         )
         massive_finalizers = tuple(
             item
@@ -1113,6 +1240,35 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             for item in massive_vector_finalizers
             if item.payload_binding.graph_intrinsic is not None
         } == {(0, 1), (2, 3)}
+        massive_scalar_finalizers = tuple(
+            item
+            for item in direct.templates
+            if item.role == "finalization"
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection.get("kind")
+            == RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND
+        )
+        assert {
+            item.payload_binding.graph_intrinsic.runtime_template
+            for item in massive_scalar_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {MASSIVE_SCALAR_TEMPLATE}
+        assert all(
+            item.parent_component_counts == (1,)
+            and item.destination_component_count == 1
+            and item.payload_binding.kind == "prepared-direct-call"
+            for item in massive_scalar_finalizers
+        )
+        assert {
+            (
+                item.payload_binding.graph_intrinsic.projection["mass_parameter_index"],
+                item.payload_binding.graph_intrinsic.projection[
+                    "width_parameter_index"
+                ],
+            )
+            for item in massive_scalar_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {(4, 5)}
     if model_source == "ufo-sm":
         assert any(
             (

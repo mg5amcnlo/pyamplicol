@@ -16,10 +16,15 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     DIRAC_VECTOR_PARTICLE_TEMPLATE,
     MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
+    RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
     RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
+    VECTOR_PAIR_TO_SCALAR_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     CertifiedChiralDiracVectorIntrinsic,
@@ -298,8 +303,10 @@ def _substitute_finalization(expression: str, components: int) -> str:
 def _massive_finalization_contracts(
     first_parameter_index: int,
     second_parameter_index: int,
+    *,
+    components: int = 4,
 ) -> tuple[str, ...]:
-    values = [json.loads(item) for item in _finalization_contracts(4)]
+    values = [json.loads(item) for item in _finalization_contracts(components)]
     values.extend(
         (
             {
@@ -381,6 +388,19 @@ def _massive_vector_finalization_expressions(
         )
         for component in range(4)
     )
+
+
+def _massive_scalar_finalization_expression(
+    *,
+    mass_symbol: str = "model::prepared::alpha",
+    width_symbol: str = "model::prepared::beta",
+) -> tuple[str]:
+    denominator = (
+        "(p0^2-p1^2-p2^2-p3^2"
+        f"-{mass_symbol}^2+1.00000000000000\U0001d456*"
+        f"{mass_symbol}*{width_symbol})^(-1)"
+    )
+    return (_substitute_finalization(f"1\U0001d456*{denominator}*l0", 1),)
 
 
 @pytest.mark.parametrize(
@@ -741,6 +761,75 @@ def test_certifies_scalar_product_with_exact_prepared_parameter_owner(
     assert result.constant_scale == 1.0 + 0.0j
     assert result.model_parameter_index == parameter_index
     assert result.parent_permutation == (0, 1)
+
+
+def test_certifies_vector_pair_to_scalar_with_factored_live_coupling() -> None:
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=(
+            _substitute("7.07106781186547e-1\U0001d456*(l0*r0-l1*r1-l2*r2-l3*r3)"),
+        ),
+        input_contracts=_contracts(4, 4),
+        parent_component_counts=(4, 4),
+        destination_component_count=1,
+        binding_coupling=None,
+        factored_output_parameter_index=131,
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert result is not None
+    assert result.runtime_template == VECTOR_PAIR_TO_SCALAR_TEMPLATE
+    assert result.contract_digest == (
+        "261b7f122671c1afc5ce3e430c82eb907cbc9873c91da3dfcbcb2bbaea048ad9"
+    )
+    assert (
+        result.contract_digest
+        == RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[VECTOR_PAIR_TO_SCALAR_TEMPLATE]
+    )
+    assert result.constant_scale == 0.0 + 0.707106781186547j
+    assert result.model_parameter_index == 131
+    assert result.parent_permutation == (0, 1)
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4604544271217802184,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": 131,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("metric", "coefficient", "extra-term", "shape", "residual-parameter"),
+)
+def test_vector_pair_to_scalar_fails_closed_on_contract_drift(mutation: str) -> None:
+    expression = "l0*r0-l1*r1-l2*r2-l3*r3"
+    contracts = _contracts(4, 4)
+    shape = (4, 4)
+    factored_slot: int | None = 131
+    if mutation == "metric":
+        expression = expression.replace("-l1*r1", "+l1*r1")
+    elif mutation == "coefficient":
+        expression = expression.replace("-l2*r2", "-2*l2*r2")
+    elif mutation == "extra-term":
+        expression = f"{expression}+l0*r1"
+    elif mutation == "shape":
+        contracts = _contracts(4, 3)
+        shape = (4, 3)
+    else:
+        contracts = _contracts(4, 4, parameter_index=17)
+        expression = f"model::prepared::parameter*({expression})"
+
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=(_substitute(expression),),
+            input_contracts=contracts,
+            parent_component_counts=shape,
+            destination_component_count=1,
+            binding_coupling=None,
+            factored_output_parameter_index=factored_slot,
+            allow_nontrivial_parent_permutation=True,
+        )
+        is None
+    )
 
 
 def test_certifies_color_ordered_three_vector_with_momentum_operands() -> None:
@@ -1375,6 +1464,116 @@ def test_massive_dirac_finalizer_rejects_wrong_orientation_formula() -> None:
             exact_expressions=tuple(mixed),
             input_contracts=_massive_finalization_contracts(3, 8),
             component_count=4,
+        )
+        is None
+    )
+
+
+def test_certifies_massive_scalar_finalizer_and_discovers_parameter_roles() -> None:
+    contracts = list(_massive_finalization_contracts(41, 9, components=1))
+    contracts[-2:] = reversed(contracts[-2:])
+    result = certify_recurrence_finalization_intrinsic(
+        exact_expressions=_massive_scalar_finalization_expression(),
+        input_contracts=tuple(contracts),
+        component_count=1,
+    )
+
+    assert result is not None
+    assert result.runtime_template == MASSIVE_SCALAR_TEMPLATE
+    assert result.contract_digest == (
+        "d90a205a4542718e1f253057502ccc3e4e3eab33030323490bbea128a6a81c38"
+    )
+    assert (
+        result.contract_digest
+        == RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[MASSIVE_SCALAR_TEMPLATE]
+    )
+    assert result.constant_scale == 1.0j
+    assert result.orientation is None
+    assert result.mass_parameter_index == 41
+    assert result.width_parameter_index == 9
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4607182418800017408,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
+        "mass_parameter_index": 41,
+        "width_parameter_index": 9,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "numerator-scale",
+        "mass-sign",
+        "width-sign",
+        "momentum-sign",
+        "missing-parameter",
+        "extra-parameter",
+        "duplicate-parameter-index",
+        "current-shape",
+    ),
+)
+def test_massive_scalar_finalizer_fails_closed_on_contract_drift(
+    mutation: str,
+) -> None:
+    expressions = list(_massive_scalar_finalization_expression())
+    contracts = list(_massive_finalization_contracts(41, 9, components=1))
+    if mutation == "numerator-scale":
+        expressions[0] = expressions[0].replace("1\U0001d456*", "-1\U0001d456*", 1)
+    elif mutation == "mass-sign":
+        expressions[0] = expressions[0].replace(
+            "-model::prepared::alpha^2",
+            "+model::prepared::alpha^2",
+        )
+    elif mutation == "width-sign":
+        expressions[0] = expressions[0].replace(
+            "+1.00000000000000\U0001d456*model::prepared::alpha*model::prepared::beta",
+            "-1.00000000000000\U0001d456*model::prepared::alpha*model::prepared::beta",
+        )
+    elif mutation == "momentum-sign":
+        expressions[0] = expressions[0].replace(
+            "-model::prepared::momentum_1^2",
+            "+model::prepared::momentum_1^2",
+        )
+    elif mutation == "missing-parameter":
+        contracts.pop()
+    elif mutation == "extra-parameter":
+        contracts.append(
+            json.dumps(
+                {
+                    "component": 0,
+                    "model_parameter_index": 77,
+                    "model_parameter_name": "opaque.gamma",
+                    "role": "model-parameter",
+                    "symbol": "model::prepared::gamma",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    elif mutation == "duplicate-parameter-index":
+        second = json.loads(contracts[-1])
+        second["model_parameter_index"] = 41
+        contracts[-1] = json.dumps(second, separators=(",", ":"), sort_keys=True)
+    else:
+        contracts.insert(
+            1,
+            json.dumps(
+                {
+                    "component": 1,
+                    "role": "current",
+                    "symbol": "model::prepared::current_1",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=tuple(expressions),
+            input_contracts=tuple(contracts),
+            component_count=1,
         )
         is None
     )

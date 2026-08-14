@@ -152,6 +152,51 @@ pub struct PreparedDirectMassiveVectorFinalizer {
     width_prepared_parameter_slot: u32,
 }
 
+/// Authenticated runtime inputs for one massive-scalar propagator intrinsic.
+///
+/// This is deliberately distinct from the massive-vector finalizer even
+/// though both retain mass and width slots: their authenticated numerator
+/// scales have opposite signs and their sparse runtime actions differ.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedDirectMassiveScalarFinalizer {
+    constant_real_bits: u64,
+    constant_imag_bits: u64,
+    mass_prepared_parameter_slot: u32,
+    width_prepared_parameter_slot: u32,
+}
+
+impl PreparedDirectMassiveScalarFinalizer {
+    pub const fn new(
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_prepared_parameter_slot: u32,
+        width_prepared_parameter_slot: u32,
+    ) -> Self {
+        Self {
+            constant_real_bits,
+            constant_imag_bits,
+            mass_prepared_parameter_slot,
+            width_prepared_parameter_slot,
+        }
+    }
+
+    pub const fn constant_real_bits(self) -> u64 {
+        self.constant_real_bits
+    }
+
+    pub const fn constant_imag_bits(self) -> u64 {
+        self.constant_imag_bits
+    }
+
+    pub const fn mass_prepared_parameter_slot(self) -> u32 {
+        self.mass_prepared_parameter_slot
+    }
+
+    pub const fn width_prepared_parameter_slot(self) -> u32 {
+        self.width_prepared_parameter_slot
+    }
+}
+
 impl PreparedDirectMassiveVectorFinalizer {
     pub const fn new(
         constant_real_bits: u64,
@@ -283,6 +328,7 @@ pub struct PreparedDirectIntrinsicDescriptor {
     scale: Option<PreparedDirectIntrinsicScale>,
     chiral_dirac_vector: Option<PreparedDirectChiralDiracVectorIntrinsic>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    massive_scalar_finalizer: Option<PreparedDirectMassiveScalarFinalizer>,
     massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
     parent_permutation: [u8; 2],
 }
@@ -301,6 +347,7 @@ impl PreparedDirectIntrinsicDescriptor {
             scale,
             chiral_dirac_vector: None,
             massive_dirac_finalizer: None,
+            massive_scalar_finalizer: None,
             massive_vector_finalizer: None,
             parent_permutation: [0, 1],
         }
@@ -319,6 +366,26 @@ impl PreparedDirectIntrinsicDescriptor {
             scale: None,
             chiral_dirac_vector: None,
             massive_dirac_finalizer: Some(finalizer),
+            massive_scalar_finalizer: None,
+            massive_vector_finalizer: None,
+            parent_permutation: [0, 1],
+        }
+    }
+
+    pub fn new_with_massive_scalar_finalizer(
+        key: PreparedDirectExecutorKey,
+        runtime_template: String,
+        contract_digest: SemanticDigest,
+        finalizer: PreparedDirectMassiveScalarFinalizer,
+    ) -> Self {
+        Self {
+            key,
+            runtime_template: runtime_template.into_boxed_str(),
+            contract_digest: Some(contract_digest),
+            scale: None,
+            chiral_dirac_vector: None,
+            massive_dirac_finalizer: None,
+            massive_scalar_finalizer: Some(finalizer),
             massive_vector_finalizer: None,
             parent_permutation: [0, 1],
         }
@@ -337,6 +404,7 @@ impl PreparedDirectIntrinsicDescriptor {
             scale: None,
             chiral_dirac_vector: None,
             massive_dirac_finalizer: None,
+            massive_scalar_finalizer: None,
             massive_vector_finalizer: Some(finalizer),
             parent_permutation: [0, 1],
         }
@@ -361,6 +429,7 @@ impl PreparedDirectIntrinsicDescriptor {
                 right_scale,
             )),
             massive_dirac_finalizer: None,
+            massive_scalar_finalizer: None,
             massive_vector_finalizer: None,
             parent_permutation: [0, 1],
         }
@@ -393,6 +462,10 @@ impl PreparedDirectIntrinsicDescriptor {
 
     pub const fn massive_dirac_finalizer(&self) -> Option<PreparedDirectMassiveDiracFinalizer> {
         self.massive_dirac_finalizer
+    }
+
+    pub const fn massive_scalar_finalizer(&self) -> Option<PreparedDirectMassiveScalarFinalizer> {
+        self.massive_scalar_finalizer
     }
 
     pub const fn massive_vector_finalizer(&self) -> Option<PreparedDirectMassiveVectorFinalizer> {
@@ -552,6 +625,7 @@ impl PreparedDirectExecutorCatalog {
                         && descriptor.scale.is_none()
                         && descriptor.chiral_dirac_vector.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_scalar_finalizer.is_none()
                         && descriptor.massive_vector_finalizer.is_none()
                 }
                 PreparedDirectExecutorKey::Evaluator {
@@ -563,6 +637,7 @@ impl PreparedDirectExecutorCatalog {
                             + usize::from(descriptor.chiral_dirac_vector.is_some())
                             == 1
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_scalar_finalizer.is_none()
                         && descriptor.massive_vector_finalizer.is_none()
                 }
                 PreparedDirectExecutorKey::Evaluator {
@@ -573,6 +648,7 @@ impl PreparedDirectExecutorCatalog {
                         && descriptor.chiral_dirac_vector.is_none()
                         && usize::from(descriptor.scale.is_some())
                             + usize::from(descriptor.massive_dirac_finalizer.is_some())
+                            + usize::from(descriptor.massive_scalar_finalizer.is_some())
                             + usize::from(descriptor.massive_vector_finalizer.is_some())
                             == 1
                 }
@@ -581,6 +657,7 @@ impl PreparedDirectExecutorCatalog {
                         && descriptor.scale.is_none()
                         && descriptor.chiral_dirac_vector.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_scalar_finalizer.is_none()
                         && descriptor.massive_vector_finalizer.is_none()
                 }
             };
@@ -643,6 +720,20 @@ impl PreparedDirectExecutorCatalog {
                 {
                     return Err(invalid(format!(
                         "prepared massive-Dirac finalizer for key {key:?} has invalid typed metadata"
+                    )));
+                }
+            }
+            if let Some(finalizer) = descriptor.massive_scalar_finalizer {
+                if key.role() != DirectExecutorRole::Finalization
+                    || descriptor.runtime_template.as_ref()
+                        != "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1"
+                    || (finalizer.constant_real_bits, finalizer.constant_imag_bits)
+                        != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+                    || finalizer.mass_prepared_parameter_slot
+                        == finalizer.width_prepared_parameter_slot
+                {
+                    return Err(invalid(format!(
+                        "prepared massive-scalar finalizer for key {key:?} has invalid typed metadata"
                     )));
                 }
             }
@@ -3668,5 +3759,84 @@ mod chiral_intrinsic_metadata_tests {
             .to_string()
             .contains("invalid typed metadata")
         );
+    }
+
+    #[test]
+    fn massive_scalar_finalizer_metadata_is_typed_and_closed() {
+        let key = PreparedDirectExecutorKey::Evaluator {
+            role: DirectExecutorRole::Finalization,
+            evaluator_binding_id: 45,
+        };
+        let typed =
+            PreparedDirectMassiveScalarFinalizer::new(0.0_f64.to_bits(), 1.0_f64.to_bits(), 4, 5);
+        let descriptor = PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
+            key,
+            "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1".to_owned(),
+            digest(23),
+            typed,
+        );
+        let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![PreparedDirectExecutorBinding::evaluator(
+                DirectExecutorRole::Finalization,
+                45,
+                0,
+            )],
+            vec![descriptor],
+        )
+        .unwrap();
+        assert_eq!(
+            catalog
+                .intrinsic_descriptor(DirectExecutorRole::Finalization, 45)
+                .unwrap()
+                .massive_scalar_finalizer(),
+            Some(typed)
+        );
+
+        for invalid in [
+            PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
+                key,
+                "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1".to_owned(),
+                digest(23),
+                typed,
+            ),
+            PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
+                key,
+                "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1".to_owned(),
+                digest(23),
+                PreparedDirectMassiveScalarFinalizer::new(
+                    0.0_f64.to_bits(),
+                    (-1.0_f64).to_bits(),
+                    4,
+                    5,
+                ),
+            ),
+            PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
+                key,
+                "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1".to_owned(),
+                digest(23),
+                PreparedDirectMassiveScalarFinalizer::new(
+                    0.0_f64.to_bits(),
+                    1.0_f64.to_bits(),
+                    4,
+                    4,
+                ),
+            ),
+        ] {
+            assert!(
+                PreparedDirectExecutorCatalog::new_with_intrinsics(
+                    digest(3),
+                    vec![PreparedDirectExecutorBinding::evaluator(
+                        DirectExecutorRole::Finalization,
+                        45,
+                        0,
+                    )],
+                    vec![invalid],
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("invalid typed metadata")
+            );
+        }
     }
 }

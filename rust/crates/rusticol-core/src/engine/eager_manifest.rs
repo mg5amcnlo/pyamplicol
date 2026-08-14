@@ -28,6 +28,7 @@ const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
 const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
+const MASSIVE_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1";
 const DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1";
 const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
@@ -37,6 +38,8 @@ const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
+const VECTOR_PAIR_TO_SCALAR_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1";
 const RECURRENCE_DIRECT_TEMPLATE_ABI_V1: &str = "pyamplicol-recurrence-direct-template-v1";
 const RECURRENCE_DIRECT_BACKEND_ABI_V1: &str = "rusticol.recurrence-direct-backend.v1";
 const RECURRENCE_DIRECT_CANONICALIZATION_ABI_V1: &str = "pyamplicol-canonical-json-v1";
@@ -412,6 +415,13 @@ pub(super) enum RecurrenceDirectScalarProjectionManifest {
         constant_imag_bits: u64,
         mass_parameter_index: u32,
         orientation: RecurrenceDirectDiracOrientationManifest,
+        width_parameter_index: u32,
+    },
+    #[serde(rename = "massive-scalar-propagator-v1")]
+    MassiveScalarPropagator {
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_parameter_index: u32,
         width_parameter_index: u32,
     },
     #[serde(rename = "massive-vector-propagator-v1")]
@@ -1388,6 +1398,7 @@ impl RecurrenceDirectPayloadBindingManifest {
                         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
                             | RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales { .. }
                             | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
+                            | RecurrenceDirectScalarProjectionManifest::MassiveScalarPropagator { .. }
                             | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. }
                     )
                 }) {
@@ -1652,6 +1663,7 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                 DIRAC_VECTOR_PARTICLE_TEMPLATE
                     | DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
                     | DIRAC_SCALAR_TEMPLATE
+                    | VECTOR_PAIR_TO_SCALAR_TEMPLATE
             ) =>
             {
                 let real = f64::from_bits(*constant_real_bits);
@@ -1688,6 +1700,25 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                 {
                     return Err(RusticolError::integrity(
                         "prepared massive-Dirac graph intrinsic disagrees with its runtime primitive",
+                    ));
+                }
+            }
+            (
+                "finalization",
+                RecurrenceDirectScalarProjectionManifest::MassiveScalarPropagator {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    mass_parameter_index,
+                    width_parameter_index,
+                },
+            ) => {
+                if self.runtime_template != MASSIVE_SCALAR_TEMPLATE
+                    || (*constant_real_bits, *constant_imag_bits)
+                        != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+                    || mass_parameter_index == width_parameter_index
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared massive-scalar graph intrinsic disagrees with its runtime primitive",
                     ));
                 }
             }
@@ -2807,6 +2838,92 @@ mod typed_finalizer_tests {
                 },
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn vector_pair_to_scalar_projection_is_an_authenticated_graph_sidecar() {
+        let graph: RecurrenceDirectGraphIntrinsicManifest = serde_json::from_value(json!({
+            "contract_digest": "261b7f122671c1afc5ce3e430c82eb907cbc9873c91da3dfcbcb2bbaea048ad9",
+            "contribution_parent_permutation": [1, 0],
+            "runtime_template": VECTOR_PAIR_TO_SCALAR_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": 0.707106781186547_f64.to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "intrinsic-scale-v1",
+                "parameter_index": 131,
+            },
+        }))
+        .unwrap();
+        graph.validate("contribution").unwrap();
+
+        let wrong_template: RecurrenceDirectGraphIntrinsicManifest =
+            serde_json::from_value(json!({
+                "contract_digest": "261b7f122671c1afc5ce3e430c82eb907cbc9873c91da3dfcbcb2bbaea048ad9",
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": "rusticol.recurrence-intrinsic.scalar-product.v1",
+                "scalar_projection": {
+                    "constant_imag_bits": 1.0_f64.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": null,
+                },
+            }))
+            .unwrap();
+        assert!(wrong_template.validate("contribution").is_err());
+    }
+
+    #[test]
+    fn massive_scalar_projection_deserializes_to_closed_typed_metadata() {
+        let projection: RecurrenceDirectScalarProjectionManifest = serde_json::from_value(json!({
+            "constant_imag_bits": 1.0_f64.to_bits(),
+            "constant_real_bits": 0.0_f64.to_bits(),
+            "kind": "massive-scalar-propagator-v1",
+            "mass_parameter_index": 4,
+            "width_parameter_index": 5,
+        }))
+        .unwrap();
+        assert!(matches!(
+            projection,
+            RecurrenceDirectScalarProjectionManifest::MassiveScalarPropagator {
+                mass_parameter_index: 4,
+                width_parameter_index: 5,
+                ..
+            }
+        ));
+
+        let graph = |runtime_template: &str, imaginary: f64, width: u32| {
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": "d90a205a4542718e1f253057502ccc3e4e3eab33030323490bbea128a6a81c38",
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "massive-scalar-propagator-v1",
+                    "mass_parameter_index": 4,
+                    "width_parameter_index": width,
+                },
+            }))
+            .unwrap()
+        };
+        graph(MASSIVE_SCALAR_TEMPLATE, 1.0, 5)
+            .validate("finalization")
+            .unwrap();
+        assert!(
+            graph(MASSIVE_SCALAR_TEMPLATE, -1.0, 5)
+                .validate("finalization")
+                .is_err()
+        );
+        assert!(
+            graph(MASSIVE_VECTOR_UNITARY_TEMPLATE, 1.0, 5)
+                .validate("finalization")
+                .is_err()
+        );
+        assert!(
+            graph(MASSIVE_SCALAR_TEMPLATE, 1.0, 4)
+                .validate("finalization")
+                .is_err()
         );
     }
 

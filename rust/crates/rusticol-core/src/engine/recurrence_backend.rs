@@ -1104,6 +1104,7 @@ fn scalar_projection(
         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
         | RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
+        | RecurrenceDirectScalarProjectionManifest::MassiveScalarPropagator { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. } => {
             return Err(RusticolError::integrity(
                 "runtime intrinsic scalar projection cannot be used by a prepared SymJIT callable",

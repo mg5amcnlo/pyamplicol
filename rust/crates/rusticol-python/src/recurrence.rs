@@ -18,14 +18,15 @@ use rusticol_core::recurrence::{
     DirectRecurrencePlan, DirectRecurrenceRuntimeOptions, DirectSelectorWorkSummary,
     PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog, PreparedDirectExecutorKey,
     PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale,
-    PreparedDirectMassiveDiracFinalizer, PreparedDirectMassiveVectorFinalizer,
-    RECURRENCE_BUILDER_INPUT_ABI, RECURRENCE_CONTRACTED_COLOR_CAPABILITY,
-    RECURRENCE_DIRECT_PLAN_ABI, RECURRENCE_DIRECT_RUNTIME_CAPABILITY,
-    RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI, RECURRENCE_DIRECT_SCHEDULE_MEMBER,
-    RECURRENCE_DIRECT_TEMPLATE_ABI, RECURRENCE_LC_COLOR_CAPABILITY, RecurrenceBuildProgress,
-    RecurrenceGenerationTelemetry, RecurrenceRelationDiscoveryMode,
-    RecurrenceRelationDiscoveryOptions, RecurrenceRelationDiscoveryReport, RecurrenceStrategy,
-    SemanticDigest, authenticate_recurrence_numerical_relation_provenance,
+    PreparedDirectMassiveDiracFinalizer, PreparedDirectMassiveScalarFinalizer,
+    PreparedDirectMassiveVectorFinalizer, RECURRENCE_BUILDER_INPUT_ABI,
+    RECURRENCE_CONTRACTED_COLOR_CAPABILITY, RECURRENCE_DIRECT_PLAN_ABI,
+    RECURRENCE_DIRECT_RUNTIME_CAPABILITY, RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI,
+    RECURRENCE_DIRECT_SCHEDULE_MEMBER, RECURRENCE_DIRECT_TEMPLATE_ABI,
+    RECURRENCE_LC_COLOR_CAPABILITY, RecurrenceBuildProgress, RecurrenceGenerationTelemetry,
+    RecurrenceRelationDiscoveryMode, RecurrenceRelationDiscoveryOptions,
+    RecurrenceRelationDiscoveryReport, RecurrenceStrategy, SemanticDigest,
+    authenticate_recurrence_numerical_relation_provenance,
     bind_recurrence_color_projection_certificate, checked_usize, lower_recurrence_direct_plan_v2,
     lower_recurrence_direct_plan_v2_with_relation_discovery,
     write_recurrence_direct_plan_pacbin_with_projection_certificate,
@@ -68,6 +69,7 @@ const DIRECT_PAYLOAD_BINDING_ABI: &str = "pyamplicol-recurrence-plane-binding-v2
 const DIRECT_IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1";
 const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
+const MASSIVE_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1";
 const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
@@ -83,6 +85,7 @@ struct ParsedGraphIntrinsic {
         PreparedDirectIntrinsicScale,
     )>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    massive_scalar_finalizer: Option<PreparedDirectMassiveScalarFinalizer>,
     massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
     parent_permutation: [u8; 2],
 }
@@ -2777,6 +2780,7 @@ fn parse_direct_template_catalog(
             intrinsic_scale,
             chiral_dirac_vector,
             massive_dirac_finalizer,
+            massive_scalar_finalizer,
             massive_vector_finalizer,
         ) = if payload_kind == "rusticol-intrinsic"
             && matches!(
@@ -2801,7 +2805,7 @@ fn parse_direct_template_catalog(
                     "{context} non-scalar intrinsic carries scalar projections"
                 )));
             }
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
         if payload_kind == "rusticol-intrinsic" && chiral_dirac_vector.is_some() {
             return Err(RusticolError::compatibility(format!(
@@ -2811,6 +2815,11 @@ fn parse_direct_template_catalog(
         if payload_kind == "rusticol-intrinsic" && massive_dirac_finalizer.is_some() {
             return Err(RusticolError::compatibility(format!(
                 "{context} massive Dirac algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
+            )));
+        }
+        if payload_kind == "rusticol-intrinsic" && massive_scalar_finalizer.is_some() {
+            return Err(RusticolError::compatibility(format!(
+                "{context} massive scalar algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
             )));
         }
         if payload_kind == "rusticol-intrinsic" && massive_vector_finalizer.is_some() {
@@ -2882,6 +2891,17 @@ fn parse_direct_template_catalog(
                             })?,
                             finalizer,
                         )
+                    } else if let Some(finalizer) = massive_scalar_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
+                            key,
+                            runtime_template,
+                            contract_digest.ok_or_else(|| {
+                                invalid(format!(
+                                    "{context} massive scalar intrinsic has no contract digest"
+                                ))
+                            })?,
+                            finalizer,
+                        )
                     } else if let Some(finalizer) = massive_vector_finalizer {
                         PreparedDirectIntrinsicDescriptor::new_with_massive_vector_finalizer(
                             key,
@@ -2921,6 +2941,13 @@ fn parse_direct_template_catalog(
                         )
                     } else if let Some(finalizer) = graph.massive_dirac_finalizer {
                         PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+                            key,
+                            graph.runtime_template,
+                            graph.contract_digest,
+                            finalizer,
+                        )
+                    } else if let Some(finalizer) = graph.massive_scalar_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_scalar_finalizer(
                             key,
                             graph.runtime_template,
                             graph.contract_digest,
@@ -3132,12 +3159,14 @@ fn parse_intrinsic_scalar_projection(
         PreparedDirectIntrinsicScale,
     )>,
     Option<PreparedDirectMassiveDiracFinalizer>,
+    Option<PreparedDirectMassiveScalarFinalizer>,
     Option<PreparedDirectMassiveVectorFinalizer>,
 )> {
     let projection = json_object(value, context)?;
     match json_string(projection, "kind", &format!("{context} kind"))? {
         "intrinsic-scale-v1" => Ok((
             Some(parse_intrinsic_scale_projection(value, context)?),
+            None,
             None,
             None,
             None,
@@ -3163,6 +3192,7 @@ fn parse_intrinsic_scalar_projection(
             Ok((
                 None,
                 Some((orientation, left_scale, right_scale)),
+                None,
                 None,
                 None,
             ))
@@ -3195,6 +3225,32 @@ fn parse_intrinsic_scalar_projection(
                     json_u32(projection, "width_parameter_index", context)?,
                 )),
                 None,
+                None,
+            ))
+        }
+        "massive-scalar-propagator-v1" if role == DirectExecutorRole::Finalization => {
+            require_json_fields(
+                projection,
+                &[
+                    "constant_imag_bits",
+                    "constant_real_bits",
+                    "kind",
+                    "mass_parameter_index",
+                    "width_parameter_index",
+                ],
+                context,
+            )?;
+            Ok((
+                None,
+                None,
+                None,
+                Some(PreparedDirectMassiveScalarFinalizer::new(
+                    json_u64(projection, "constant_real_bits", context)?,
+                    json_u64(projection, "constant_imag_bits", context)?,
+                    json_u32(projection, "mass_parameter_index", context)?,
+                    json_u32(projection, "width_parameter_index", context)?,
+                )),
+                None,
             ))
         }
         "massive-vector-propagator-v1" if role == DirectExecutorRole::Finalization => {
@@ -3210,6 +3266,7 @@ fn parse_intrinsic_scalar_projection(
                 context,
             )?;
             Ok((
+                None,
                 None,
                 None,
                 None,
@@ -3288,12 +3345,17 @@ fn parse_graph_intrinsic(
         role,
         context,
     )?;
-    let (scale, chiral_dirac_vector, massive_dirac_finalizer, massive_vector_finalizer) =
-        parse_intrinsic_scalar_projection(
-            json_field(graph, "scalar_projection", context)?,
-            role,
-            &format!("{context} scalar projection"),
-        )?;
+    let (
+        scale,
+        chiral_dirac_vector,
+        massive_dirac_finalizer,
+        massive_scalar_finalizer,
+        massive_vector_finalizer,
+    ) = parse_intrinsic_scalar_projection(
+        json_field(graph, "scalar_projection", context)?,
+        role,
+        &format!("{context} scalar projection"),
+    )?;
     let runtime_template = json_nonempty_string(
         graph,
         "runtime_template",
@@ -3342,6 +3404,19 @@ fn parse_graph_intrinsic(
             )));
         }
     }
+    if let Some(finalizer) = massive_scalar_finalizer {
+        if runtime_template != MASSIVE_SCALAR_TEMPLATE
+            || (
+                finalizer.constant_real_bits(),
+                finalizer.constant_imag_bits(),
+            ) != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+            || finalizer.mass_prepared_parameter_slot() == finalizer.width_prepared_parameter_slot()
+        {
+            return Err(invalid(format!(
+                "{context} massive-scalar projection disagrees with its runtime primitive"
+            )));
+        }
+    }
     Ok(ParsedGraphIntrinsic {
         runtime_template,
         contract_digest: json_sha256(
@@ -3352,6 +3427,7 @@ fn parse_graph_intrinsic(
         scale,
         chiral_dirac_vector,
         massive_dirac_finalizer,
+        massive_scalar_finalizer,
         massive_vector_finalizer,
         parent_permutation,
     })
@@ -6154,6 +6230,89 @@ mod direct_binding_tests {
             0
         );
         assert_eq!(parsed.prepared_kernel_count, 0);
+    }
+
+    #[test]
+    fn massive_scalar_graph_intrinsic_parser_is_typed_and_closed() {
+        let graph = json!({
+            "contract_digest": "d90a205a4542718e1f253057502ccc3e4e3eab33030323490bbea128a6a81c38",
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": MASSIVE_SCALAR_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": 1.0_f64.to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-scalar-propagator-v1",
+                "mass_parameter_index": 4,
+                "width_parameter_index": 5,
+            },
+        });
+        let parsed = parse_graph_intrinsic(
+            &graph,
+            DirectExecutorRole::Finalization,
+            "test massive-scalar graph intrinsic",
+        )
+        .unwrap();
+        let finalizer = parsed.massive_scalar_finalizer.unwrap();
+        assert_eq!(parsed.runtime_template, MASSIVE_SCALAR_TEMPLATE);
+        assert_eq!(finalizer.constant_real_bits(), 0.0_f64.to_bits());
+        assert_eq!(finalizer.constant_imag_bits(), 1.0_f64.to_bits());
+        assert_eq!(finalizer.mass_prepared_parameter_slot(), 4);
+        assert_eq!(finalizer.width_prepared_parameter_slot(), 5);
+
+        let mut wrong_template = graph.clone();
+        wrong_template["runtime_template"] = json!(MASSIVE_VECTOR_UNITARY_TEMPLATE);
+        assert!(
+            parse_graph_intrinsic(
+                &wrong_template,
+                DirectExecutorRole::Finalization,
+                "test massive-scalar graph intrinsic",
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disagrees with its runtime primitive")
+        );
+
+        let mut wrong_sign = graph.clone();
+        wrong_sign["scalar_projection"]["constant_imag_bits"] = json!((-1.0_f64).to_bits());
+        assert!(
+            parse_graph_intrinsic(
+                &wrong_sign,
+                DirectExecutorRole::Finalization,
+                "test massive-scalar graph intrinsic",
+            )
+            .is_err()
+        );
+
+        let mut aliased_slots = graph.clone();
+        aliased_slots["scalar_projection"]["width_parameter_index"] = json!(4);
+        assert!(
+            parse_graph_intrinsic(
+                &aliased_slots,
+                DirectExecutorRole::Finalization,
+                "test massive-scalar graph intrinsic",
+            )
+            .is_err()
+        );
+
+        let mut open_projection = graph.clone();
+        open_projection["scalar_projection"]["unexpected"] = json!(true);
+        assert!(
+            parse_graph_intrinsic(
+                &open_projection,
+                DirectExecutorRole::Finalization,
+                "test massive-scalar graph intrinsic",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_graph_intrinsic(
+                &graph,
+                DirectExecutorRole::Contribution,
+                "test massive-scalar graph intrinsic",
+            )
+            .is_err()
+        );
     }
 
     #[test]

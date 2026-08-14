@@ -32,6 +32,7 @@ _sym = _LazyCompilerSymbolica()
 RECURRENCE_INTRINSIC_SCALE_KIND = "intrinsic-scale-v1"
 RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND = "chiral-dirac-vector-scales-v1"
 RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND = "massive-dirac-propagator-v1"
+RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND = "massive-scalar-propagator-v1"
 RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND = "massive-vector-propagator-v1"
 WEYL_PROPAGATOR_POSITIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-a.v1"
 WEYL_PROPAGATOR_NEGATIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-b.v1"
@@ -65,8 +66,12 @@ MASSIVE_DIRAC_PARTICLE_TEMPLATE = (
 MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1"
 )
+MASSIVE_SCALAR_TEMPLATE = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1"
 MASSIVE_VECTOR_UNITARY_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1"
+)
+VECTOR_PAIR_TO_SCALAR_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1"
 )
 
 DiracOrientation: TypeAlias = Literal["particle", "antiparticle"]
@@ -77,6 +82,7 @@ def _f64_bits(value: float) -> int:
 
 
 MASSIVE_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
+MASSIVE_SCALAR_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
 MASSIVE_VECTOR_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(-1.0))
 
 
@@ -223,7 +229,11 @@ class CertifiedRecurrenceFinalizationIntrinsic:
                 "kind": (
                     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND
                     if self.orientation is not None
-                    else RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND
+                    else (
+                        RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND
+                        if self.runtime_template == MASSIVE_SCALAR_TEMPLATE
+                        else RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND
+                    )
                 ),
                 "mass_parameter_index": self.mass_parameter_index,
                 "width_parameter_index": self.width_parameter_index,
@@ -277,6 +287,14 @@ _WITNESSES = (
         anchor_monomial="l0*r0",
         inverse_anchor_coefficient="1",
         parent_component_counts=(1, 1),
+        destination_component_count=1,
+    ),
+    _IntrinsicWitness(
+        runtime_template=VECTOR_PAIR_TO_SCALAR_TEMPLATE,
+        expressions=("l0*r0-l1*r1-l2*r2-l3*r3",),
+        anchor_monomial="l0*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(4, 4),
         destination_component_count=1,
     ),
     _IntrinsicWitness(
@@ -690,15 +708,51 @@ class _MassiveVectorFinalizationWitness:
         object.__setattr__(self, "contract_digest", digest)
 
 
-_MASSIVE_VECTOR_DENOMINATOR = (
+@dataclass(frozen=True, slots=True)
+class _MassiveScalarFinalizationWitness:
+    runtime_template: str
+    expressions: tuple[str]
+    runtime_owned_scale: complex = 0.0 + 1.0j
+    contract_digest: str = ""
+
+    def __post_init__(self) -> None:
+        payload = {
+            "component_count": 1,
+            "expressions": list(self.expressions),
+            "parameter_roles": ["mass", "width"],
+            "runtime_owned_scale_bits": [
+                _f64_bits(self.runtime_owned_scale.real),
+                _f64_bits(self.runtime_owned_scale.imag),
+            ],
+            "runtime_template": self.runtime_template,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        object.__setattr__(self, "contract_digest", digest)
+
+
+_MASSIVE_PROPAGATOR_DENOMINATOR = (
     "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+)
+_MASSIVE_SCALAR_FINALIZATION_WITNESSES = (
+    _MassiveScalarFinalizationWitness(
+        runtime_template=MASSIVE_SCALAR_TEMPLATE,
+        expressions=(f"{_MASSIVE_PROPAGATOR_DENOMINATOR}*l0",),
+    ),
 )
 _MASSIVE_VECTOR_CURRENT_DOT_MOMENTUM = "(l0*p0-l1*p1-l2*p2-l3*p3)"
 _MASSIVE_VECTOR_FINALIZATION_WITNESSES = (
     _MassiveVectorFinalizationWitness(
         runtime_template=MASSIVE_VECTOR_UNITARY_TEMPLATE,
         expressions=tuple(
-            f"{_MASSIVE_VECTOR_DENOMINATOR}*"
+            f"{_MASSIVE_PROPAGATOR_DENOMINATOR}*"
             f"(l{component}-p{component}*m^(-2)*"
             f"{_MASSIVE_VECTOR_CURRENT_DOT_MOMENTUM})"
             for component in range(4)
@@ -712,6 +766,7 @@ RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS = {
     for witness in (
         *_FINALIZATION_WITNESSES,
         *_MASSIVE_DIRAC_FINALIZATION_WITNESSES,
+        *_MASSIVE_SCALAR_FINALIZATION_WITNESSES,
         *_MASSIVE_VECTOR_FINALIZATION_WITNESSES,
     )
 }
@@ -914,7 +969,10 @@ def certify_recurrence_finalization_intrinsic(
         return None
     if parameter_symbols:
         try:
-            parameter_indices = _massive_dirac_parameter_indices(input_contracts)
+            parameter_indices = _massive_finalization_parameter_indices(
+                input_contracts,
+                component_count=component_count,
+            )
         except (TypeError, ValueError):
             return None
         if set(parameter_symbols.values()) != set(parameter_indices):
@@ -926,6 +984,13 @@ def certify_recurrence_finalization_intrinsic(
         )
         if massive_dirac is not None:
             return massive_dirac
+        massive_scalar = _certify_massive_scalar_finalization(
+            normalized,
+            parameter_indices=parameter_indices,
+            component_count=component_count,
+        )
+        if massive_scalar is not None:
+            return massive_scalar
         return _certify_massive_vector_finalization(
             normalized,
             parameter_indices=parameter_indices,
@@ -1066,10 +1131,59 @@ def _certify_massive_vector_finalization(
     return None
 
 
-def _massive_dirac_parameter_indices(
+def _certify_massive_scalar_finalization(
+    normalized: Sequence[object],
+    *,
+    parameter_indices: tuple[int, int],
+    component_count: int,
+) -> CertifiedRecurrenceFinalizationIntrinsic | None:
+    if component_count != 1:
+        return None
+    _sym._ensure_symbolica()
+    generic_mass = _sym.E("m")
+    generic_width = _sym.E("w")
+    for witness in _MASSIVE_SCALAR_FINALIZATION_WITNESSES:
+        for mass_index, width_index in (
+            parameter_indices,
+            tuple(reversed(parameter_indices)),
+        ):
+            mass = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{mass_index}"
+            )
+            width = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{width_index}"
+            )
+            replacements = (
+                _sym.Replacement(generic_mass, mass),
+                _sym.Replacement(generic_width, width),
+            )
+            reference = (
+                _sym.E(witness.expressions[0]).replace_multiple(replacements).expand()
+            )
+            if not _symbolically_equal(
+                normalized[0],
+                witness.runtime_owned_scale * reference,
+            ):
+                continue
+            return CertifiedRecurrenceFinalizationIntrinsic(
+                runtime_template=witness.runtime_template,
+                contract_digest=witness.contract_digest,
+                constant_scale=witness.runtime_owned_scale,
+                mass_parameter_index=mass_index,
+                width_parameter_index=width_index,
+            )
+    return None
+
+
+def _massive_finalization_parameter_indices(
     input_contracts: Sequence[str],
+    *,
+    component_count: int,
 ) -> tuple[int, int]:
-    """Validate the unary Dirac input shape and return its unnamed parameters."""
+    """Validate one massive unary input and return its unnamed parameters."""
+
+    if type(component_count) is not int or component_count <= 0:
+        raise ValueError("massive finalization component count must be positive")
 
     components: dict[str, set[int]] = {
         "current": set(),
@@ -1092,26 +1206,28 @@ def _massive_dirac_parameter_indices(
             or not symbol
             or symbol in declared_symbols
         ):
-            raise ValueError("massive Dirac input contract is malformed")
+            raise ValueError("massive finalization input contract is malformed")
         declared_symbols.add(symbol)
         if role in components:
             if component in components[role]:
-                raise ValueError("massive Dirac input component is duplicated")
+                raise ValueError("massive finalization input component is duplicated")
             components[role].add(component)
         elif role == "model-parameter":
             parameter_index = contract.get("model_parameter_index")
             if type(parameter_index) is not int or parameter_index < 0:
-                raise ValueError("massive Dirac parameter has no stable index")
+                raise ValueError("massive finalization parameter has no stable index")
             parameter_indices.append(parameter_index)
         else:
-            raise ValueError("massive Dirac input has an unsupported role")
+            raise ValueError("massive finalization input has an unsupported role")
     if components != {
-        "current": {0, 1, 2, 3},
+        "current": set(range(component_count)),
         "momentum": {0, 1, 2, 3},
     }:
-        raise ValueError("massive Dirac input has the wrong current/momentum shape")
+        raise ValueError(
+            "massive finalization input has the wrong current/momentum shape"
+        )
     if len(parameter_indices) != 2 or parameter_indices[0] == parameter_indices[1]:
-        raise ValueError("massive Dirac input requires two distinct parameters")
+        raise ValueError("massive finalization input requires two distinct parameters")
     return parameter_indices[0], parameter_indices[1]
 
 
@@ -1354,6 +1470,8 @@ __all__ = [
     "MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_PARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_RUNTIME_SCALE_BITS",
+    "MASSIVE_SCALAR_RUNTIME_SCALE_BITS",
+    "MASSIVE_SCALAR_TEMPLATE",
     "MASSIVE_VECTOR_RUNTIME_SCALE_BITS",
     "MASSIVE_VECTOR_UNITARY_TEMPLATE",
     "RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND",
@@ -1362,7 +1480,9 @@ __all__ = [
     "RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES",
     "RECURRENCE_INTRINSIC_SCALE_KIND",
     "RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND",
+    "RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND",
     "RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND",
+    "VECTOR_PAIR_TO_SCALAR_TEMPLATE",
     "WEYL_PAIR_TO_VECTOR_A_TEMPLATE",
     "WEYL_PAIR_TO_VECTOR_B_TEMPLATE",
     "CertifiedChiralDiracVectorIntrinsic",

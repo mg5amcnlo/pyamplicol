@@ -92,6 +92,9 @@ const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT: &str =
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const DIRAC_SCALAR_CONTRACT: &str =
     "d9c7dbc51561cdc2b2a7daf3d97ea24283d6c690ae5da2d775e86c80a3b4886f";
+const VECTOR_PAIR_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1";
+const VECTOR_PAIR_SCALAR_CONTRACT: &str =
+    "261b7f122671c1afc5ce3e430c82eb907cbc9873c91da3dfcbcb2bbaea048ad9";
 const MASSIVE_DIRAC_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1";
 const MASSIVE_DIRAC_PARTICLE_CONTRACT: &str =
@@ -104,6 +107,9 @@ const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
 const MASSIVE_VECTOR_UNITARY_CONTRACT: &str =
     "4293b6a7a8a7433fc598e2031a031c353491ba76404fa984f9a803daad9cfb40";
+const MASSIVE_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1";
+const MASSIVE_SCALAR_CONTRACT: &str =
+    "d90a205a4542718e1f253057502ccc3e4e3eab33030323490bbea128a6a81c38";
 // SHA-256 of the canonical exact parameter expression `0`.
 const ZERO_PARAMETER_EXPRESSION_DIGEST: [u8; 32] = [
     0x5f, 0xec, 0xeb, 0x66, 0xff, 0xc8, 0x6f, 0x38, 0xd9, 0x52, 0x78, 0x6c, 0x6d, 0x69, 0x6c, 0x79,
@@ -156,7 +162,12 @@ pub fn lower_authenticated_recurrence_to_spinor_payload_v3(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdStateKind {
-    Scalar,
+    Scalar {
+        mass_parameter_id: u32,
+        mass_prepared_slot: Option<u32>,
+        width_parameter_id: u32,
+        width_prepared_slot: Option<u32>,
+    },
     Vector,
     U1SubtractionVector,
     MassiveVector {
@@ -208,6 +219,7 @@ enum QcdContributionKind {
     DiracVector(CurrentOrientation),
     ChiralDiracVector(CurrentOrientation),
     DiracScalar,
+    VectorPairScalar,
 }
 
 #[derive(Clone, Debug)]
@@ -429,10 +441,28 @@ fn qcd_state_kind(
                 0,
                 CurrentOrientation::SelfConjugate,
                 None,
-            ) if state.particle_id == state.anti_particle_id
-                && state.width_parameter_id == MISSING_U32 =>
-            {
-                QcdStateKind::Scalar
+            ) if state.particle_id == state.anti_particle_id => {
+                let mass_prepared_slot = optional_prepared_real_parameter_slot(
+                    templates,
+                    state.mass_parameter_id,
+                    "scalar state mass",
+                )?;
+                let width_prepared_slot = optional_prepared_real_parameter_slot(
+                    templates,
+                    state.width_parameter_id,
+                    "scalar state width",
+                )?;
+                if width_prepared_slot.is_some() && mass_prepared_slot.is_none() {
+                    return Err(invalid(format!(
+                        "scalar current-state template {state_id} owns a width without a mass"
+                    )));
+                }
+                QcdStateKind::Scalar {
+                    mass_parameter_id: state.mass_parameter_id,
+                    mass_prepared_slot,
+                    width_parameter_id: state.width_parameter_id,
+                    width_prepared_slot,
+                }
             }
             (
                 ParticleStatistics::Boson,
@@ -737,10 +767,16 @@ fn qcd_source_layout(
             .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
         let source = qcd_source_row(current, templates)?;
         let (kind, endpoint) = match qcd_state_kind(templates, state_id)? {
-            QcdStateKind::Scalar => {
-                if state.mass_parameter_id == MISSING_U32
-                    || source.mass_parameter_id != state.mass_parameter_id
-                    || source.width_parameter_id != state.width_parameter_id
+            QcdStateKind::Scalar {
+                mass_parameter_id,
+                mass_prepared_slot,
+                width_parameter_id,
+                width_prepared_slot,
+            } => {
+                if mass_parameter_id == MISSING_U32
+                    || mass_prepared_slot.is_none()
+                    || source.mass_parameter_id != mass_parameter_id
+                    || source.width_parameter_id != width_parameter_id
                 {
                     return Err(invalid(format!(
                         "massive scalar source template {} does not own its current-state mass binding",
@@ -751,11 +787,20 @@ fn qcd_source_layout(
                 // scalar wavefunction itself is the unit expression.  Its
                 // momentum must be decomposed when it enters a Dirac
                 // propagator's signed support.
-                let _ = prepared_real_parameter_slot(
-                    templates,
-                    state.mass_parameter_id,
-                    "scalar source mass",
-                )?;
+                let source_state = qcd_state_kind(templates, source.state_template_id)?;
+                if source_state
+                    != (QcdStateKind::Scalar {
+                        mass_parameter_id,
+                        mass_prepared_slot,
+                        width_parameter_id,
+                        width_prepared_slot,
+                    })
+                {
+                    return Err(invalid(format!(
+                        "scalar source template {} disagrees with its authenticated state",
+                        source.id
+                    )));
+                }
                 massive_sources.insert(
                     u16::try_from(*source_slot)
                         .map_err(|_| invalid("massive scalar source slot exceeds u16"))?,
@@ -1170,6 +1215,7 @@ fn lower_qcd_source(
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid("QCD source intrinsic descriptor is malformed"));
     }
@@ -1183,13 +1229,19 @@ fn lower_qcd_source(
             .ok_or_else(|| invalid("QCD source current has no exact source factor"))?,
     )?;
     match state {
-        QcdStateKind::Scalar => {
+        QcdStateKind::Scalar {
+            mass_parameter_id,
+            width_parameter_id,
+            ..
+        } => {
             if family != "scalar"
                 || !descriptor
                     .runtime_template()
                     .starts_with(SCALAR_SOURCE_PREFIX)
                 || source.helicity != 0
                 || source.spin_state != 0
+                || source.mass_parameter_id != mass_parameter_id
+                || source.width_parameter_id != width_parameter_id
             {
                 return Err(invalid(format!(
                     "source template {source_template_id} is not a scalar source"
@@ -1389,6 +1441,30 @@ fn qcd_parameter_slots(
             continue;
         }
         match qcd_state_kind(templates, current.key().current_state_template_id())? {
+            QcdStateKind::Scalar {
+                mass_parameter_id,
+                mass_prepared_slot: Some(mass_prepared_slot),
+                ..
+            } => {
+                let finalizer = qcd_massive_scalar_finalizer_contract(
+                    current,
+                    mass_parameter_id,
+                    mass_prepared_slot,
+                    program,
+                    templates,
+                    direct,
+                )?;
+                slots.insert(finalizer.mass_prepared_parameter_slot());
+                slots.insert(finalizer.width_prepared_parameter_slot());
+            }
+            QcdStateKind::Scalar {
+                mass_prepared_slot: None,
+                ..
+            } => {
+                return Err(invalid(
+                    "active scalar finalization has no authenticated mass owner",
+                ));
+            }
             QcdStateKind::Dirac { orientation, .. } => {
                 let source_mass = dirac_mass_prepared_slot.ok_or_else(|| {
                     invalid("massive Dirac finalization has no authenticated source-mass owner")
@@ -1443,6 +1519,7 @@ fn qcd_contribution_kind(
         CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_PARTICLE_CONTRACT,
         CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
         DIRAC_SCALAR_TEMPLATE => DIRAC_SCALAR_CONTRACT,
+        VECTOR_PAIR_SCALAR_TEMPLATE => VECTOR_PAIR_SCALAR_CONTRACT,
         other => {
             return Err(invalid(format!(
                 "unsupported QCD contribution primitive {other:?}"
@@ -1455,6 +1532,7 @@ fn qcd_contribution_kind(
     );
     if descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
         || descriptor
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != expected_digest)
@@ -1494,6 +1572,7 @@ fn qcd_contribution_kind(
             QcdContributionKind::ChiralDiracVector(CurrentOrientation::Antiparticle)
         }
         DIRAC_SCALAR_TEMPLATE => QcdContributionKind::DiracScalar,
+        VECTOR_PAIR_SCALAR_TEMPLATE => QcdContributionKind::VectorPairScalar,
         _ => unreachable!("runtime template checked above"),
     })
 }
@@ -1687,6 +1766,7 @@ fn qcd_massive_finalizer_contract(
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
         || typed.orientation() != orientation
     {
         return Err(invalid(format!(
@@ -1793,6 +1873,7 @@ fn qcd_massive_vector_finalizer_contract(
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
         || typed.constant_real_bits() != 0.0_f64.to_bits()
         || typed.constant_imag_bits() != (-1.0_f64).to_bits()
     {
@@ -1838,6 +1919,111 @@ fn qcd_massive_vector_finalizer_contract(
     Ok(typed)
 }
 
+fn qcd_massive_scalar_finalizer_contract(
+    current: &super::RecurrenceCurrent,
+    state_mass_parameter_id: u32,
+    state_mass_prepared_slot: u32,
+    program: &RecurrenceProgram,
+    templates: &ValidatedRecurrenceTemplateInput,
+    direct: &PreparedDirectExecutorCatalog,
+) -> RusticolResult<super::PreparedDirectMassiveScalarFinalizer> {
+    let finalization = qcd_finalization(current, program)?;
+    let propagator_id = finalization
+        .propagator_template_id()
+        .ok_or_else(|| invalid("active massive-scalar current has an identity finalization"))?;
+    let propagator = templates
+        .input()
+        .propagators
+        .get(propagator_id as usize)
+        .ok_or_else(|| invalid(format!("propagator template {propagator_id} is absent")))?;
+    let state_id = current.key().current_state_template_id();
+    let state = templates
+        .input()
+        .current_states
+        .get(state_id as usize)
+        .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
+    if propagator.id != propagator_id
+        || propagator.applies_propagator != 1
+        || propagator.state_template_id != state_id
+        || state.mass_parameter_id != state_mass_parameter_id
+    {
+        return Err(invalid(format!(
+            "propagator template {propagator_id} is not the current's authenticated massive-scalar propagator"
+        )));
+    }
+    let evaluator = evaluator_row(
+        templates,
+        propagator.evaluator_binding_id,
+        EvaluatorContractKind::Propagator,
+    )?;
+    direct.resolve_evaluator(DirectExecutorRole::Finalization, evaluator.id)?;
+    let descriptor = direct
+        .intrinsic_descriptor(DirectExecutorRole::Finalization, evaluator.id)
+        .ok_or_else(|| {
+            invalid("massive-scalar propagator has no authenticated intrinsic descriptor")
+        })?;
+    validate_intrinsic_runtime_binding(
+        templates,
+        evaluator,
+        descriptor,
+        "massive-scalar finalization",
+    )?;
+    let typed = descriptor.massive_scalar_finalizer().ok_or_else(|| {
+        invalid("massive-scalar finalization has no authenticated typed operands")
+    })?;
+    if descriptor.runtime_template() != MASSIVE_SCALAR_TEMPLATE
+        || descriptor
+            .contract_digest()
+            .is_none_or(|digest| digest.to_string() != MASSIVE_SCALAR_CONTRACT)
+        || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
+        || typed.constant_real_bits() != 0.0_f64.to_bits()
+        || typed.constant_imag_bits() != 1.0_f64.to_bits()
+    {
+        return Err(invalid(format!(
+            "unsupported massive-scalar finalization primitive {:?}",
+            descriptor.runtime_template()
+        )));
+    }
+    if typed.mass_prepared_parameter_slot() != state_mass_prepared_slot {
+        return Err(invalid(
+            "massive-scalar finalizer mass disagrees with authenticated state ownership",
+        ));
+    }
+    if propagator.mass_parameter_id != MISSING_U32 {
+        let propagator_mass = prepared_real_parameter_slot(
+            templates,
+            propagator.mass_parameter_id,
+            "massive-scalar propagator mass",
+        )?;
+        if propagator.mass_parameter_id != state_mass_parameter_id
+            || propagator_mass != typed.mass_prepared_parameter_slot()
+        {
+            return Err(invalid(
+                "massive-scalar propagator mass disagrees with state/finalizer ownership",
+            ));
+        }
+    }
+    let width_owner = prepared_real_parameter_owner(
+        templates,
+        typed.width_prepared_parameter_slot(),
+        "massive-scalar finalizer width",
+    )?;
+    validate_optional_width_owner(
+        state.width_parameter_id,
+        width_owner,
+        "massive-scalar state",
+    )?;
+    validate_optional_width_owner(
+        propagator.width_parameter_id,
+        width_owner,
+        "massive-scalar propagator",
+    )?;
+    Ok(typed)
+}
+
 fn validate_optional_width_owner(
     parameter_id: u32,
     authenticated_owner: u32,
@@ -1862,6 +2048,7 @@ fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> Rustico
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid(
             "authenticated identity-finalizer descriptor is malformed",
@@ -1918,7 +2105,7 @@ fn qcd_finalization_scale(
         .intrinsic_descriptor(DirectExecutorRole::Finalization, evaluator.id)
         .ok_or_else(|| invalid("QCD propagator has no authenticated intrinsic descriptor"))?;
     let (runtime_template, contract_digest, negate) = match state {
-        QcdStateKind::Scalar => {
+        QcdStateKind::Scalar { .. } => {
             return Err(invalid("a scalar insertion cannot have a QCD finalizer"));
         }
         QcdStateKind::Vector | QcdStateKind::U1SubtractionVector => (
@@ -1960,6 +2147,7 @@ fn qcd_finalization_scale(
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid(format!(
             "unsupported QCD finalization primitive {:?}",
@@ -2073,9 +2261,88 @@ fn lower_qcd_current(
     }
     let finalization = qcd_optional_finalization(current, program)?;
     match state {
-        QcdStateKind::Scalar => Err(invalid(
-            "the mixed QCD slice supports scalar insertions only as authenticated sources",
-        )),
+        QcdStateKind::Scalar {
+            mass_parameter_id,
+            mass_prepared_slot,
+            ..
+        } => {
+            let mut terms = Vec::new();
+            for contribution in &program.contributions()[range] {
+                if contribution.result_current_id() != current.id() {
+                    return Err(invalid("scalar contribution belongs to the wrong current"));
+                }
+                let (kind, parents, descriptor) =
+                    qcd_contribution_contract(contribution, program, templates, direct)?;
+                if kind != QcdContributionKind::VectorPairScalar {
+                    return Err(invalid(
+                        "scalar current uses a primitive other than vector-pair-to-scalar",
+                    ));
+                }
+                let left = required_qcd_vector(current_values, parents[0])?;
+                let right = required_qcd_vector(current_values, parents[1])?;
+                let contraction = bispinor_dot_expression(builder, left, right)?;
+                // Both sparse vector expressions represent V/sqrt(2), so
+                // their dot product is half the authenticated component
+                // contraction.
+                let two = builder.constant(ExactComplexRational::new(
+                    ExactRational::new(2, 1)?,
+                    ExactRational::ZERO,
+                ))?;
+                let intrinsic = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
+                let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
+                terms.push(builder.product([two, contraction, intrinsic, exact])?);
+            }
+            let numerator = builder.sum(terms)?;
+            let value = if finalization
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_some()
+            {
+                let mass_prepared_slot = mass_prepared_slot.ok_or_else(|| {
+                    invalid("massive-scalar finalization has no authenticated state mass")
+                })?;
+                let typed = qcd_massive_scalar_finalizer_contract(
+                    current,
+                    mass_parameter_id,
+                    mass_prepared_slot,
+                    program,
+                    templates,
+                    direct,
+                )?;
+                let dense_mass = dense_parameter_slots
+                    .get(&typed.mass_prepared_parameter_slot())
+                    .copied()
+                    .ok_or_else(|| invalid("massive-scalar mass has no graph binding"))?;
+                let dense_width = dense_parameter_slots
+                    .get(&typed.width_prepared_parameter_slot())
+                    .copied()
+                    .ok_or_else(|| invalid("massive-scalar width has no graph binding"))?;
+                let mass = builder.parameter(dense_mass)?;
+                let width = builder.parameter(dense_width)?;
+                let (momentum, _) = qcd_current_momentum(current, representative_signs, builder)?;
+                let denominator =
+                    massive_dirac_propagator_denominator(builder, &momentum, mass, width)?;
+                let inverse = builder.reciprocal(denominator)?;
+                let runtime_scale = builder.constant(exact_binary64_scale(
+                    typed.constant_real_bits(),
+                    typed.constant_imag_bits(),
+                )?)?;
+                let final_exact = builder.constant(
+                    finalization
+                        .ok_or_else(|| invalid("massive-scalar finalization is absent"))?
+                        .exact_factor(),
+                )?;
+                builder.product([numerator, runtime_scale, final_exact, inverse])?
+            } else {
+                require_identity_finalizer(direct)?;
+                let final_exact = builder.constant(
+                    finalization
+                        .map(super::RecurrenceFinalization::exact_factor)
+                        .unwrap_or(ExactComplexRational::ONE),
+                )?;
+                builder.product([numerator, final_exact])?
+            };
+            Ok(QcdCurrent::Scalar(value))
+        }
         state @ (QcdStateKind::Vector
         | QcdStateKind::U1SubtractionVector
         | QcdStateKind::MassiveVector { .. }) => {
@@ -2679,6 +2946,7 @@ fn lower_qcd_closures(
             || descriptor.chiral_dirac_vector().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
             || descriptor.massive_vector_finalizer().is_some()
+            || descriptor.massive_scalar_finalizer().is_some()
         {
             return Err(invalid("QCD closure intrinsic descriptor is malformed"));
         }
@@ -3403,6 +3671,7 @@ fn validate_identity_finalizations(
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid("scalar identity-finalizer descriptor is malformed"));
     }
@@ -3472,6 +3741,7 @@ fn lower_scalar_source(
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid(format!(
             "source evaluator {} is not the authenticated scalar source primitive",
@@ -3634,6 +3904,7 @@ fn lower_scalar_closures(
             || descriptor.chiral_dirac_vector().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
             || descriptor.massive_vector_finalizer().is_some()
+            || descriptor.massive_scalar_finalizer().is_some()
         {
             return Err(invalid(format!(
                 "closure evaluator {} is not the authenticated scalar reduction primitive",
@@ -3909,6 +4180,7 @@ fn require_scalar_product_descriptor(
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
+        || descriptor.massive_scalar_finalizer().is_some()
     {
         return Err(invalid(format!(
             "unsupported contribution primitive {:?}",

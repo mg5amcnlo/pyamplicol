@@ -30,6 +30,8 @@ from .recurrence_direct_intrinsics import (
     MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_DIRAC_RUNTIME_SCALE_BITS,
+    MASSIVE_SCALAR_RUNTIME_SCALE_BITS,
+    MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_RUNTIME_SCALE_BITS,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
     RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND,
@@ -37,7 +39,9 @@ from .recurrence_direct_intrinsics import (
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
     RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
+    VECTOR_PAIR_TO_SCALAR_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     CertifiedChiralDiracVectorIntrinsic,
@@ -101,6 +105,7 @@ _PREPARED_GRAPH_CONTRIBUTION_TEMPLATES = frozenset(
         DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
         DIRAC_VECTOR_PARTICLE_TEMPLATE,
+        VECTOR_PAIR_TO_SCALAR_TEMPLATE,
         WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
         WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     }
@@ -109,6 +114,7 @@ _PREPARED_GRAPH_FINALIZATION_TEMPLATES = frozenset(
     {
         MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
         MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+        MASSIVE_SCALAR_TEMPLATE,
         MASSIVE_VECTOR_UNITARY_TEMPLATE,
     }
 )
@@ -359,6 +365,62 @@ def _validate_massive_vector_finalizer_projection(
         )
 
 
+def _validate_massive_scalar_finalizer_projection(
+    projection: Mapping[str, object],
+    *,
+    runtime_template: str,
+    contract_digest: str,
+) -> None:
+    expected_fields = {
+        "constant_imag_bits",
+        "constant_real_bits",
+        "kind",
+        "mass_parameter_index",
+        "width_parameter_index",
+    }
+    if set(projection) != expected_fields:
+        raise RecurrenceDirectTemplateError(
+            "massive scalar finalizer projection has unsupported fields"
+        )
+    mass_index = _require_nonnegative_int(
+        "massive scalar mass parameter index",
+        projection.get("mass_parameter_index"),
+    )
+    width_index = _require_nonnegative_int(
+        "massive scalar width parameter index",
+        projection.get("width_parameter_index"),
+    )
+    if mass_index == width_index:
+        raise RecurrenceDirectTemplateError(
+            "massive scalar mass and width parameter indices must be distinct"
+        )
+    scale_bits = (
+        _require_f64_bits(
+            "massive scalar real scale bits",
+            projection.get("constant_real_bits"),
+        ),
+        _require_f64_bits(
+            "massive scalar imaginary scale bits",
+            projection.get("constant_imag_bits"),
+        ),
+    )
+    if scale_bits != MASSIVE_SCALAR_RUNTIME_SCALE_BITS:
+        raise RecurrenceDirectTemplateError(
+            "massive scalar finalizer must retain the certified +i scale"
+        )
+    if runtime_template != MASSIVE_SCALAR_TEMPLATE:
+        raise RecurrenceDirectTemplateError(
+            "massive scalar finalizer requires its runtime template"
+        )
+    if (
+        RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS.get(runtime_template)
+        != contract_digest
+    ):
+        raise RecurrenceDirectTemplateError(
+            "massive scalar finalizer contract digest is not authenticated"
+        )
+
+
 def _validate_intrinsic_scale_projection(
     projection: Mapping[str, object],
     *,
@@ -594,6 +656,12 @@ def _validate_graph_intrinsic_for_role(
             _validate_intrinsic_scale_projection(projection, allow_parameter=False)
         elif projection_kind == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND:
             _validate_massive_dirac_finalizer_projection(
+                projection,
+                runtime_template=intrinsic.runtime_template,
+                contract_digest=intrinsic.contract_digest,
+            )
+        elif projection_kind == RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND:
+            _validate_massive_scalar_finalizer_projection(
                 projection,
                 runtime_template=intrinsic.runtime_template,
                 contract_digest=intrinsic.contract_digest,

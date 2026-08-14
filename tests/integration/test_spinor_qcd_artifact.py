@@ -16,6 +16,7 @@ from pyamplicol.config import (
     EvaluatorConfig,
     EvaluatorOptimizationConfig,
     GenerationConfig,
+    GenerationRelationDiscoveryConfig,
     GenerationValidationConfig,
     JITConfig,
     ProcessConfig,
@@ -86,6 +87,15 @@ _GZTT_POINT = (
 _GZTT_PROCESS_ID = "g_z_to_t_tbar"
 _GZTT_FLOW = "flow:3,1,4"
 _GZTT_ORDER = (3, 1, 4)
+_ZZTT_POINT = (
+    (200.0, 0.0, 0.0, 178.0021029538696),
+    (200.0, 0.0, 0.0, -178.0021029538696),
+    (200.0, 98.32680204298318, 0.0, 20.07087442041328),
+    (200.0, -98.32680204298318, 0.0, -20.07087442041328),
+)
+_ZZTT_PROCESS_ID = "z_z_to_t_tbar"
+_ZZTT_FLOW = "flow:3,4"
+_ZZTT_ORDER = (3, 4)
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,7 @@ def _config(qcd_order: int, qed_order: int = 0) -> RunConfig:
         generation=GenerationConfig(
             workers=1,
             emit_api_bundle=False,
+            relation_discovery=GenerationRelationDiscoveryConfig(mode="off"),
             validation=GenerationValidationConfig(
                 enabled=False,
                 post_build_validation=False,
@@ -264,3 +275,78 @@ def test_graph_spinor_chiral_dirac_vector_recurrence(
     baseline = value(reference)
     assert baseline.real > 0.0
     assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+
+def test_graph_spinor_massive_scalar_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # The Higgs s-channel in ZZ -> ttbar exercises the authenticated
+    # vector-pair scalar current and massive scalar propagator without a
+    # process-specific lowering path.  Moving the internal Higgs close to its
+    # timelike pole makes this branch an unambiguous numerical discriminator.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_ZZTT_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("z z > t t~", name=_ZZTT_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                reference_color_order=_ZZTT_ORDER,
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(0, 2),
+            model=prepared_model,
+        )
+        runtimes[mode] = Runtime.load(artifact, process=_ZZTT_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate((_ZZTT_POINT,), color_flows=(_ZZTT_FLOW,))[0]
+        )
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"particle.25.mass": 390.0})
+    shifted_mass_reference = value(reference)
+    assert shifted_mass_reference != pytest.approx(baseline, rel=1.0e-9)
+    assert value(candidate) == pytest.approx(
+        shifted_mass_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"particle.25.width": 20.0})
+    shifted_width_reference = value(reference)
+    assert shifted_width_reference != pytest.approx(
+        shifted_mass_reference,
+        rel=1.0e-9,
+    )
+    assert value(candidate) == pytest.approx(
+        shifted_width_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"coupling.17.23_23_25.component_0": 0.0})
+    zeroed_vertex_reference = value(reference)
+    assert zeroed_vertex_reference != pytest.approx(
+        shifted_width_reference,
+        rel=1.0e-9,
+    )
+    assert value(candidate) == pytest.approx(
+        zeroed_vertex_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
