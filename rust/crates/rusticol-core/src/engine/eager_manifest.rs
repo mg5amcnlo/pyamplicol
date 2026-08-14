@@ -32,6 +32,10 @@ const DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1";
 const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1";
+const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
+const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const RECURRENCE_DIRECT_TEMPLATE_ABI_V1: &str = "pyamplicol-recurrence-direct-template-v1";
 const RECURRENCE_DIRECT_BACKEND_ABI_V1: &str = "rusticol.recurrence-direct-backend.v1";
@@ -396,6 +400,12 @@ pub(super) enum RecurrenceDirectScalarProjectionManifest {
         constant_imag_bits: u64,
         parameter_index: Option<u32>,
     },
+    #[serde(rename = "chiral-dirac-vector-scales-v1")]
+    ChiralDiracVectorScales {
+        orientation: RecurrenceDirectDiracOrientationManifest,
+        left_scale: RecurrenceDirectIntrinsicScaleManifest,
+        right_scale: RecurrenceDirectIntrinsicScaleManifest,
+    },
     #[serde(rename = "massive-dirac-propagator-v1")]
     MassiveDiracPropagator {
         constant_real_bits: u64,
@@ -411,6 +421,29 @@ pub(super) enum RecurrenceDirectScalarProjectionManifest {
         mass_parameter_index: u32,
         width_parameter_index: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub(super) enum RecurrenceDirectIntrinsicScaleManifest {
+    #[serde(rename = "intrinsic-scale-v1")]
+    IntrinsicScale {
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        parameter_index: Option<u32>,
+    },
+}
+
+impl RecurrenceDirectIntrinsicScaleManifest {
+    const fn parts(self) -> (u64, u64, Option<u32>) {
+        match self {
+            Self::IntrinsicScale {
+                constant_real_bits,
+                constant_imag_bits,
+                parameter_index,
+            } => (constant_real_bits, constant_imag_bits, parameter_index),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -1353,6 +1386,7 @@ impl RecurrenceDirectPayloadBindingManifest {
                     matches!(
                         projection,
                         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
+                            | RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales { .. }
                             | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
                             | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. }
                     )
@@ -1565,6 +1599,47 @@ impl RecurrenceDirectGraphIntrinsicManifest {
             "prepared graph-intrinsic contract digest",
         )?;
         match (role, &self.scalar_projection) {
+            (
+                "contribution",
+                RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales {
+                    orientation,
+                    left_scale,
+                    right_scale,
+                },
+            ) => {
+                let expected_template = match orientation {
+                    RecurrenceDirectDiracOrientationManifest::Particle => {
+                        CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE
+                    }
+                    RecurrenceDirectDiracOrientationManifest::Antiparticle => {
+                        CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
+                    }
+                };
+                let finite_scale = |scale: RecurrenceDirectIntrinsicScaleManifest| {
+                    let (real_bits, imaginary_bits, _) = scale.parts();
+                    let real = f64::from_bits(real_bits);
+                    let imaginary = f64::from_bits(imaginary_bits);
+                    real.is_finite() && imaginary.is_finite()
+                };
+                let nonzero_scale = |scale: RecurrenceDirectIntrinsicScaleManifest| {
+                    let (real_bits, imaginary_bits, _) = scale.parts();
+                    f64::from_bits(real_bits) != 0.0 || f64::from_bits(imaginary_bits) != 0.0
+                };
+                let zero_scale_has_no_owner = |scale: RecurrenceDirectIntrinsicScaleManifest| {
+                    nonzero_scale(scale) || scale.parts().2.is_none()
+                };
+                if self.runtime_template != expected_template
+                    || !finite_scale(*left_scale)
+                    || !finite_scale(*right_scale)
+                    || !zero_scale_has_no_owner(*left_scale)
+                    || !zero_scale_has_no_owner(*right_scale)
+                    || !(nonzero_scale(*left_scale) || nonzero_scale(*right_scale))
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared chiral Dirac-vector graph intrinsic disagrees with its runtime primitive",
+                    ));
+                }
+            }
             (
                 "contribution",
                 RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
@@ -2655,6 +2730,84 @@ mod typed_finalizer_tests {
         }))
         .unwrap();
         graph.validate("finalization").unwrap();
+    }
+
+    #[test]
+    fn chiral_dirac_vector_projection_deserializes_to_closed_typed_metadata() {
+        let graph: RecurrenceDirectGraphIntrinsicManifest = serde_json::from_value(json!({
+            "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+            "scalar_projection": {
+                "kind": "chiral-dirac-vector-scales-v1",
+                "left_scale": {
+                    "constant_imag_bits": 0.0_f64.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": null,
+                },
+                "orientation": "antiparticle",
+                "right_scale": {
+                    "constant_imag_bits": 1.0_f64.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": null,
+                },
+            },
+        }))
+        .unwrap();
+        graph.validate("contribution").unwrap();
+
+        let wrong_template: RecurrenceDirectGraphIntrinsicManifest =
+            serde_json::from_value(json!({
+                "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
+                "scalar_projection": {
+                    "kind": "chiral-dirac-vector-scales-v1",
+                    "left_scale": {
+                        "constant_imag_bits": 0.0_f64.to_bits(),
+                        "constant_real_bits": 2.0_f64.to_bits(),
+                        "kind": "intrinsic-scale-v1",
+                        "parameter_index": 3,
+                    },
+                    "orientation": "antiparticle",
+                    "right_scale": {
+                        "constant_imag_bits": 1.0_f64.to_bits(),
+                        "constant_real_bits": 0.0_f64.to_bits(),
+                        "kind": "intrinsic-scale-v1",
+                        "parameter_index": null,
+                    },
+                },
+            }))
+            .unwrap();
+        assert!(wrong_template.validate("contribution").is_err());
+
+        assert!(
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
+                "scalar_projection": {
+                    "kind": "chiral-dirac-vector-scales-v1",
+                    "left_scale": {
+                        "constant_imag_bits": 0.0_f64.to_bits(),
+                        "constant_real_bits": 1.0_f64.to_bits(),
+                        "kind": "intrinsic-scale-v1",
+                        "parameter_index": null,
+                        "unexpected": true,
+                    },
+                    "orientation": "particle",
+                    "right_scale": {
+                        "constant_imag_bits": 0.0_f64.to_bits(),
+                        "constant_real_bits": 1.0_f64.to_bits(),
+                        "kind": "intrinsic-scale-v1",
+                        "parameter_index": null,
+                    },
+                },
+            }))
+            .is_err()
+        );
     }
 
     #[test]

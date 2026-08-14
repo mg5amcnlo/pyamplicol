@@ -9,6 +9,8 @@ from fractions import Fraction
 import pytest
 
 from pyamplicol.models.recurrence_direct_intrinsics import (
+    CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+    CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
     DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     DIRAC_VECTOR_PARTICLE_TEMPLATE,
@@ -20,6 +22,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
+    CertifiedChiralDiracVectorIntrinsic,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
 )
@@ -80,6 +83,27 @@ def _contracts(
         )
         for item in values
     )
+
+
+def _dirac_vector_contracts_with_parameters(
+    *parameter_indexes: int,
+) -> tuple[str, ...]:
+    parameters = tuple(
+        json.dumps(
+            {
+                "component": 0,
+                "model_parameter_index": parameter_index,
+                "role": "model-parameter",
+                "symbol": f"model::prepared::parameter_{parameter_index}",
+            },
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for parameter_index in parameter_indexes
+    )
+    return (*_contracts(4, 4), *parameters)
 
 
 def _substitute(expression: str) -> str:
@@ -870,6 +894,123 @@ def test_certifies_both_oriented_dirac_vector_transitions(
     assert result.constant_scale == 0.0 + 0.707106781186547j
     assert result.model_parameter_index is None
     assert result.parent_permutation == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expressions", "expected_template"),
+    (
+        (
+            "particle",
+            (
+                "(r0+r3)*l2+(r1+1\U0001d456*r2)*l3",
+                "(r0-r3)*l3+(r1-1\U0001d456*r2)*l2",
+                "(r0-r3)*l0-(r1+1\U0001d456*r2)*l1",
+                "(r0+r3)*l1-(r1-1\U0001d456*r2)*l0",
+            ),
+            CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
+        ),
+        (
+            "antiparticle",
+            (
+                "(-r0+r3)*l2+(r1-1\U0001d456*r2)*l3",
+                "(-r0-r3)*l3+(r1+1\U0001d456*r2)*l2",
+                "(-r0-r3)*l0+(-r1+1\U0001d456*r2)*l1",
+                "(-r0+r3)*l1+(-r1-1\U0001d456*r2)*l0",
+            ),
+            CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+        ),
+    ),
+)
+def test_certifies_independent_chiral_dirac_vector_scale_owners(
+    orientation: str,
+    expressions: tuple[str, ...],
+    expected_template: str,
+) -> None:
+    left_scale = "2\U0001d456*model::prepared::parameter_17"
+    right_scale = "-3\U0001d456*model::prepared::parameter_19"
+    # Coupling component ownership is part of the orientation witness:
+    # particle left/right own upper/lower, while antiparticle swaps them.
+    upper_scale, lower_scale = (
+        (left_scale, right_scale)
+        if orientation == "particle"
+        else (right_scale, left_scale)
+    )
+    exact = tuple(
+        _substitute(f"{upper_scale if component < 2 else lower_scale}*({value})")
+        for component, value in enumerate(expressions)
+    )
+
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=exact,
+        input_contracts=_dirac_vector_contracts_with_parameters(17, 19),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+    )
+
+    assert isinstance(result, CertifiedChiralDiracVectorIntrinsic)
+    assert result.runtime_template == expected_template
+    assert result.orientation == orientation
+    assert result.left_constant_scale == 0.0 + 2.0j
+    assert result.left_model_parameter_index == 17
+    assert result.right_constant_scale == 0.0 - 3.0j
+    assert result.right_model_parameter_index == 19
+    assert result.scale_projection() == {
+        "kind": "chiral-dirac-vector-scales-v1",
+        "left_scale": {
+            "constant_imag_bits": 4611686018427387904,
+            "constant_real_bits": 0,
+            "kind": "intrinsic-scale-v1",
+            "parameter_index": 17,
+        },
+        "orientation": orientation,
+        "right_scale": {
+            "constant_imag_bits": 13837309855095848960,
+            "constant_real_bits": 0,
+            "kind": "intrinsic-scale-v1",
+            "parameter_index": 19,
+        },
+    }
+
+
+def test_chiral_dirac_vector_allows_one_exact_zero_half_and_rejects_drift() -> None:
+    particle = (
+        "(r0+r3)*l2+(r1+1\U0001d456*r2)*l3",
+        "(r0-r3)*l3+(r1-1\U0001d456*r2)*l2",
+        "(r0-r3)*l0-(r1+1\U0001d456*r2)*l1",
+        "(r0+r3)*l1-(r1-1\U0001d456*r2)*l0",
+    )
+    pure_left = tuple(
+        _substitute(f"2\U0001d456*({value})") if component < 2 else "0"
+        for component, value in enumerate(particle)
+    )
+    certified = certify_recurrence_contribution_intrinsic(
+        exact_expressions=pure_left,
+        input_contracts=_contracts(4, 4),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+    )
+
+    assert isinstance(certified, CertifiedChiralDiracVectorIntrinsic)
+    assert certified.left_constant_scale == 2.0j
+    assert certified.right_constant_scale == 0.0
+    assert certified.right_model_parameter_index is None
+
+    drifted = (
+        f"{pure_left[0]}+model::prepared::left_0*model::prepared::right_0",
+        *pure_left[1:],
+    )
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=drifted,
+            input_contracts=_contracts(4, 4),
+            parent_component_counts=(4, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
 
 
 def test_dirac_vector_transition_accepts_only_authenticated_parent_permutation() -> (

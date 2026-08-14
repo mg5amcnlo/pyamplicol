@@ -3219,6 +3219,22 @@ pub(crate) fn dirac_scale(
     })
 }
 
+/// Scale the two output halves of a Dirac current independently.
+///
+/// Mapping physical left/right couplings to these halves depends on the
+/// fermion-line orientation and remains the caller's authenticated contract.
+pub(crate) fn dirac_half_scale(
+    builder: &mut SpinorDagBuilder,
+    undotted_scale: SpinorNodeId,
+    dotted_scale: SpinorNodeId,
+    current: &DiracExpression,
+) -> RusticolResult<DiracExpression> {
+    Ok(DiracExpression {
+        undotted: linear_weyl_scale(builder, undotted_scale, &current.undotted)?,
+        dotted: linear_weyl_scale(builder, dotted_scale, &current.dotted)?,
+    })
+}
+
 fn massive_dirac_vector_closure(
     builder: &mut SpinorDagBuilder,
     quark: &DiracExpression,
@@ -4710,6 +4726,33 @@ mod tests {
         let fused_closure =
             massive_dirac_vector_closure(&mut builder, &particle, &vector, &antiparticle).unwrap();
         assert_eq!(direct, fused_closure);
+    }
+
+    #[test]
+    fn dirac_output_halves_can_be_scaled_independently() {
+        let mut builder = SpinorDagBuilder::new(2).unwrap();
+        let right = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(2, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let left = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(3, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let one = builder.one();
+        let current = DiracExpression {
+            undotted: LinearWeylExpression::atom(0, one),
+            dotted: LinearWeylExpression::atom(1, one),
+        };
+
+        let scaled = dirac_half_scale(&mut builder, right, left, &current).unwrap();
+
+        assert_eq!(scaled.undotted.terms, BTreeMap::from([(0, right)]));
+        assert_eq!(scaled.dotted.terms, BTreeMap::from([(1, left)]));
     }
 
     #[test]

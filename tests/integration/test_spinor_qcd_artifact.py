@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from pyamplicol import ModelSource, ProcessRequest, Runtime
+from pyamplicol import CompiledModel, ModelSource, ProcessRequest, Runtime
 from pyamplicol.config import (
     ColorConfig,
     EvaluatorConfig,
@@ -77,6 +77,15 @@ _GGGG_POINT = (
         -206.07683690598216,
     ),
 )
+_GZTT_POINT = (
+    (495.842374328, 0.0, 0.0, 495.842374328),
+    (504.157625672, 0.0, 0.0, -495.842374328),
+    (500.0, 459.6391628223165, 0.0, 93.82345122622596),
+    (500.0, -459.6391628223165, 0.0, -93.82345122622596),
+)
+_GZTT_PROCESS_ID = "g_z_to_t_tbar"
+_GZTT_FLOW = "flow:3,1,4"
+_GZTT_ORDER = (3, 1, 4)
 
 
 @dataclass(frozen=True)
@@ -120,13 +129,13 @@ _CASES = (
 )
 
 
-def _config(qcd_order: int) -> RunConfig:
+def _config(qcd_order: int, qed_order: int = 0) -> RunConfig:
     return RunConfig(
         action="generate",
         color=ColorConfig(accuracy="lc", lc_flow_layout="topology-replay"),
         process=ProcessConfig(
             coupling_order_policy="explicit",
-            max_coupling_orders={"QCD": qcd_order, "QED": 0},
+            max_coupling_orders={"QCD": qcd_order, "QED": qed_order},
         ),
         generation=GenerationConfig(
             workers=1,
@@ -144,19 +153,26 @@ def _config(qcd_order: int) -> RunConfig:
     )
 
 
-def test_graph_spinor_qcd_recurrences(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def prepared_model(tmp_path_factory: pytest.TempPathFactory) -> CompiledModel:
     if importlib.util.find_spec("pyamplicol._rusticol") is None:
         pytest.skip("the Rusticol extension has not been built")
     if importlib.util.find_spec("symbolica") is None:
         pytest.skip("Symbolica is unavailable")
-
+    root = tmp_path_factory.mktemp("spinor-qcd-built-in-sm")
     compile_config = _config(max(case.qcd_order for case in _CASES))
-    prepared = ModelSource.built_in_sm().compile(
-        cache_dir=tmp_path / "model-cache",
+    return ModelSource.built_in_sm().compile(
+        cache_dir=root / "model-cache",
         use_cache=False,
-        prepared_output=tmp_path / "built-in-sm-jit-o2.pyamplicol-model",
+        prepared_output=root / "built-in-sm-jit-o2.pyamplicol-model",
         evaluator=compile_config.evaluator,
     )
+
+
+def test_graph_spinor_qcd_recurrences(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
     for case in _CASES:
         artifact = tmp_path / f"{case.process_id}-spinor"
         generate_slice(
@@ -168,7 +184,7 @@ def test_graph_spinor_qcd_recurrences(tmp_path: Path) -> None:
                 experimental_spinor_dag=True,
             ),
             config=_config(case.qcd_order),
-            model=prepared,
+            model=prepared_model,
         )
 
         execution = json.loads(
@@ -196,3 +212,55 @@ def test_graph_spinor_qcd_recurrences(tmp_path: Path) -> None:
             2.0**case.qcd_order * case.component_recurrence_oracle,
             rel=2.0e-12,
         )
+
+
+def test_graph_spinor_chiral_dirac_vector_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # This mixed electroweak/QCD process is the smallest topology that uses
+    # the authenticated two-scale Ztt primitive while reusing the same
+    # prepared model compile as the QCD cases above.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_GZTT_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("g z > t t~", name=_GZTT_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                reference_color_order=_GZTT_ORDER,
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(1, 1),
+            model=prepared_model,
+        )
+        if mode == "spinor":
+            execution = json.loads(
+                (
+                    artifact
+                    / "processes"
+                    / _GZTT_PROCESS_ID
+                    / "execution.json"
+                ).read_text(encoding="utf-8")
+            )
+            assert execution["graph_payload"] == {
+                "abi": "pyamplicol-spinor-dag-binary-v3",
+                "path": "spinor-dag-v3.bin",
+            }
+            assert "process_family" not in execution
+        runtimes[mode] = Runtime.load(artifact, process=_GZTT_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate((_GZTT_POINT,), color_flows=(_GZTT_FLOW,))[0]
+        )
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)

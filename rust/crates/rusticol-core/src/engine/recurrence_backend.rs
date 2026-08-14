@@ -1102,6 +1102,7 @@ fn scalar_projection(
             SymjitDirectScalarProjection::Literal(value)
         }
         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
+        | RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. } => {
             return Err(RusticolError::integrity(

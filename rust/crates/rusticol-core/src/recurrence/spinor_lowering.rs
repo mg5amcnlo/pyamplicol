@@ -19,14 +19,14 @@ use crate::spinor::{
     SpinorDagBuilder, SpinorDagPayloadV3, SpinorKinematicScalar, SpinorPreparedParameterBinding,
     SpinorSourceInputBinding, SpinorSourceInputKind, bispinor_dot_expression, bispinor_scale,
     bispinor_sum, bivector_scale, bivector_sum, bivector_vector_expression,
-    bivector_wedge_expression, dirac_bilinear, dirac_propagator_numerator, dirac_scalar_expression,
-    dirac_scale, dirac_sum, dirac_vector_expression, external_polarization_expression,
-    external_polarization_expression_with_reference, linear_weyl_scale, linear_weyl_sum,
-    massive_dirac_propagator_denominator, massive_dirac_source_expression,
-    massive_vector_longitudinal_polarization_expression, massive_vector_polarization_expression,
-    massive_vector_propagator_expression, quark_vector_weyl_bilinear,
-    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
-    three_vector_bispinor_expression, weyl_pair_vector_expression,
+    bivector_wedge_expression, dirac_bilinear, dirac_half_scale, dirac_propagator_numerator,
+    dirac_scalar_expression, dirac_scale, dirac_sum, dirac_vector_expression,
+    external_polarization_expression, external_polarization_expression_with_reference,
+    linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
+    massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
+    massive_vector_polarization_expression, massive_vector_propagator_expression,
+    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
+    signed_momentum_expression, three_vector_bispinor_expression, weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -81,6 +81,14 @@ const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1";
 const DIRAC_VECTOR_ANTIPARTICLE_CONTRACT: &str =
     "46391ed42113ed52b1960215b03fad8470f6542fbc928e56b9d7b426e66ab9ab";
+const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
+const CHIRAL_DIRAC_VECTOR_PARTICLE_CONTRACT: &str =
+    "2287796f888111348c3eda616eb98e3a69c116a1449c29546c89ed871f43a517";
+const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
+const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT: &str =
+    "ff5d75dc8549684287b9eb9c801ead3e60d031ea841754e59c3ee3c841050975";
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const DIRAC_SCALAR_CONTRACT: &str =
     "d9c7dbc51561cdc2b2a7daf3d97ea24283d6c690ae5da2d775e86c80a3b4886f";
@@ -198,6 +206,7 @@ enum QcdContributionKind {
     WeylVector(SpinorChirality),
     WeylPairVector(SpinorChirality),
     DiracVector(CurrentOrientation),
+    ChiralDiracVector(CurrentOrientation),
     DiracScalar,
 }
 
@@ -1158,6 +1167,7 @@ fn lower_qcd_source(
     validate_intrinsic_runtime_binding(templates, evaluator, descriptor, "source")?;
     if descriptor.contract_digest().is_none()
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
     {
@@ -1359,6 +1369,13 @@ fn qcd_parameter_slots(
         {
             slots.insert(slot);
         }
+        if let Some(chiral) = descriptor.chiral_dirac_vector() {
+            for scale in [chiral.left_scale(), chiral.right_scale()] {
+                if let Some(slot) = scale.prepared_parameter_slot() {
+                    slots.insert(slot);
+                }
+            }
+        }
     }
     for current in program
         .currents()
@@ -1423,6 +1440,8 @@ fn qcd_contribution_kind(
         WEYL_PAIR_VECTOR_B_TEMPLATE => WEYL_PAIR_VECTOR_B_CONTRACT,
         DIRAC_VECTOR_PARTICLE_TEMPLATE => DIRAC_VECTOR_PARTICLE_CONTRACT,
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
+        CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_PARTICLE_CONTRACT,
+        CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
         DIRAC_SCALAR_TEMPLATE => DIRAC_SCALAR_CONTRACT,
         other => {
             return Err(invalid(format!(
@@ -1430,12 +1449,20 @@ fn qcd_contribution_kind(
             )));
         }
     };
-    if descriptor.scale().is_none()
-        || descriptor.massive_dirac_finalizer().is_some()
+    let chiral = matches!(
+        descriptor.runtime_template(),
+        CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE | CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
+    );
+    if descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != expected_digest)
+        || if chiral {
+            descriptor.scale().is_some() || descriptor.chiral_dirac_vector().is_none()
+        } else {
+            descriptor.scale().is_none() || descriptor.chiral_dirac_vector().is_some()
+        }
     {
         return Err(invalid(format!(
             "QCD contribution descriptor {:?} has the wrong authenticated contract",
@@ -1460,6 +1487,12 @@ fn qcd_contribution_kind(
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => {
             QcdContributionKind::DiracVector(CurrentOrientation::Antiparticle)
         }
+        CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE => {
+            QcdContributionKind::ChiralDiracVector(CurrentOrientation::Particle)
+        }
+        CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => {
+            QcdContributionKind::ChiralDiracVector(CurrentOrientation::Antiparticle)
+        }
         DIRAC_SCALAR_TEMPLATE => QcdContributionKind::DiracScalar,
         _ => unreachable!("runtime template checked above"),
     })
@@ -1473,6 +1506,14 @@ fn intrinsic_scale_node(
     let scale = descriptor
         .scale()
         .ok_or_else(|| invalid("intrinsic descriptor has no exact scale"))?;
+    intrinsic_scale_value_node(scale, dense_parameter_slots, builder)
+}
+
+fn intrinsic_scale_value_node(
+    scale: super::PreparedDirectIntrinsicScale,
+    dense_parameter_slots: &BTreeMap<u32, u16>,
+    builder: &mut SpinorDagBuilder,
+) -> RusticolResult<u32> {
     let constant = ExactComplexRational::new(
         ExactRational::from_f64_exact(f64::from_bits(scale.constant_real_bits()))?,
         ExactRational::from_f64_exact(f64::from_bits(scale.constant_imag_bits()))?,
@@ -1487,6 +1528,20 @@ fn intrinsic_scale_node(
         builder.product([constant, parameter])
     } else {
         Ok(constant)
+    }
+}
+
+fn oriented_chiral_half_scales(
+    orientation: CurrentOrientation,
+    left: u32,
+    right: u32,
+) -> RusticolResult<(u32, u32)> {
+    match orientation {
+        CurrentOrientation::Particle => Ok((left, right)),
+        CurrentOrientation::Antiparticle => Ok((right, left)),
+        CurrentOrientation::SelfConjugate => {
+            Err(invalid("a chiral Dirac current cannot be self-conjugate"))
+        }
     }
 }
 
@@ -1630,6 +1685,7 @@ fn qcd_massive_finalizer_contract(
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != contract_digest)
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || typed.orientation() != orientation
     {
@@ -1735,6 +1791,7 @@ fn qcd_massive_vector_finalizer_contract(
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != MASSIVE_VECTOR_UNITARY_CONTRACT)
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || typed.constant_real_bits() != 0.0_f64.to_bits()
         || typed.constant_imag_bits() != (-1.0_f64).to_bits()
@@ -1802,6 +1859,7 @@ fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> Rustico
     if descriptor.runtime_template() != IDENTITY_FINALIZER
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
     {
@@ -1899,6 +1957,7 @@ fn qcd_finalization_scale(
         || descriptor
             .scale()
             .is_none_or(|scale| scale.prepared_parameter_slot().is_some())
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
     {
@@ -2321,7 +2380,6 @@ fn lower_qcd_current(
                         "massive Dirac contribution changes line orientation",
                     ));
                 }
-                let intrinsic = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                 let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let (numerator, scale) = match kind {
                     QcdContributionKind::DiracVector(certified_orientation) => {
@@ -2335,10 +2393,43 @@ fn lower_qcd_current(
                         // Sparse vectors represent V/sqrt(2), whereas the
                         // authenticated component primitive consumes V.
                         let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        let intrinsic =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         (numerator, builder.product([sqrt_two, intrinsic, exact])?)
+                    }
+                    QcdContributionKind::ChiralDiracVector(certified_orientation) => {
+                        if certified_orientation != orientation {
+                            return Err(invalid(
+                                "chiral massive Dirac vector primitive has the wrong orientation",
+                            ));
+                        }
+                        let vector = required_qcd_vector(current_values, parents[1])?;
+                        let numerator = dirac_vector_expression(builder, parent, vector)?;
+                        let chiral = descriptor.chiral_dirac_vector().ok_or_else(|| {
+                            invalid("chiral Dirac-vector descriptor has no typed scales")
+                        })?;
+                        let left = intrinsic_scale_value_node(
+                            chiral.left_scale(),
+                            dense_parameter_slots,
+                            builder,
+                        )?;
+                        let right = intrinsic_scale_value_node(
+                            chiral.right_scale(),
+                            dense_parameter_slots,
+                            builder,
+                        )?;
+                        let (undotted, dotted) =
+                            oriented_chiral_half_scales(certified_orientation, left, right)?;
+                        let numerator = dirac_half_scale(builder, undotted, dotted, &numerator)?;
+                        // Sparse vectors represent V/sqrt(2), whereas the
+                        // authenticated component primitive consumes V.
+                        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        (numerator, builder.product([sqrt_two, exact])?)
                     }
                     QcdContributionKind::DiracScalar => {
                         let scalar = required_qcd_scalar(current_values, parents[1])?;
+                        let intrinsic =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         (
                             dirac_scalar_expression(builder, parent, scalar)?,
                             builder.product([intrinsic, exact])?,
@@ -2585,6 +2676,7 @@ fn lower_qcd_closures(
         if !descriptor.runtime_template().starts_with(CLOSURE_PREFIX)
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
+            || descriptor.chiral_dirac_vector().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
             || descriptor.massive_vector_finalizer().is_some()
         {
@@ -3308,6 +3400,7 @@ fn validate_identity_finalizations(
     if descriptor.runtime_template() != IDENTITY_FINALIZER
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
     {
@@ -3376,6 +3469,9 @@ fn lower_scalar_source(
         .starts_with(SCALAR_SOURCE_PREFIX)
         || descriptor.contract_digest().is_none()
         || descriptor.scale().is_some()
+        || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid(format!(
             "source evaluator {} is not the authenticated scalar source primitive",
@@ -3535,6 +3631,9 @@ fn lower_scalar_closures(
         if !descriptor.runtime_template().starts_with(CLOSURE_PREFIX)
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
+            || descriptor.chiral_dirac_vector().is_some()
+            || descriptor.massive_dirac_finalizer().is_some()
+            || descriptor.massive_vector_finalizer().is_some()
         {
             return Err(invalid(format!(
                 "closure evaluator {} is not the authenticated scalar reduction primitive",
@@ -3592,6 +3691,57 @@ fn validate_transition_parameter_owner(
         "transition coupling parameters",
     )?;
     let output_factor_source = OutputFactorSource::try_from(transition.output_factor_source)?;
+    if let Some(chiral) = descriptor.chiral_dirac_vector() {
+        let expected_slots = [chiral.left_scale(), chiral.right_scale()]
+            .into_iter()
+            .filter_map(|scale| scale.prepared_parameter_slot())
+            .collect::<BTreeSet<_>>();
+        if parameters.len() != expected_slots.len() {
+            return Err(invalid(format!(
+                "transition {} coupling ownership disagrees with its authenticated chiral scales",
+                transition.id
+            )));
+        }
+        let mut actual_slots = BTreeSet::new();
+        for template_id in parameters.iter().copied() {
+            let parameter = templates
+                .input()
+                .parameters
+                .get(template_id as usize)
+                .ok_or_else(|| invalid("transition parameter template is absent"))?;
+            if parameter.id != template_id
+                || !expected_slots.contains(&parameter.prepared_parameter_id)
+                || !actual_slots.insert(parameter.prepared_parameter_id)
+            {
+                return Err(invalid(format!(
+                    "transition {} does not uniquely own its authenticated chiral prepared slots",
+                    transition.id
+                )));
+            }
+            match output_factor_source {
+                OutputFactorSource::None => {
+                    let _ = ParameterValueType::try_from(parameter.value_type)?;
+                }
+                OutputFactorSource::CouplingReal | OutputFactorSource::CouplingImag => {
+                    validate_transition_output_factor_parameter(
+                        templates,
+                        transition,
+                        parameter,
+                        output_factor_source,
+                    )?;
+                }
+            }
+        }
+        if actual_slots != expected_slots
+            || (output_factor_source != OutputFactorSource::None && parameters.len() != 1)
+        {
+            return Err(invalid(format!(
+                "transition {} coupling ownership disagrees with its authenticated chiral scales",
+                transition.id
+            )));
+        }
+        return Ok(());
+    }
     match descriptor
         .scale()
         .and_then(|scale| scale.prepared_parameter_slot())
@@ -3621,38 +3771,12 @@ fn validate_transition_parameter_owner(
                     let _ = ParameterValueType::try_from(parameter.value_type)?;
                 }
                 OutputFactorSource::CouplingReal | OutputFactorSource::CouplingImag => {
-                    if ParameterValueType::try_from(parameter.value_type)?
-                        != ParameterValueType::Real
-                        || ParameterKind::try_from(parameter.kind)? != ParameterKind::External
-                        || parameter.mutable != 1
-                    {
-                        return Err(invalid(format!(
-                            "transition {} output-factor component is not one mutable external real parameter",
-                            transition.id
-                        )));
-                    }
-                    let binding = template_exact_factor(
+                    validate_transition_output_factor_parameter(
                         templates,
-                        transition.binding_coupling_factor_id,
-                        "transition binding coupling",
+                        transition,
+                        parameter,
+                        output_factor_source,
                     )?;
-                    let component = match output_factor_source {
-                        OutputFactorSource::CouplingReal => binding.real(),
-                        OutputFactorSource::CouplingImag => binding.imag(),
-                        OutputFactorSource::None => unreachable!(),
-                    };
-                    if component == ExactRational::ZERO
-                        || template_exact_factor(
-                            templates,
-                            parameter.default_factor_id,
-                            "output-factor parameter default",
-                        )? != ExactComplexRational::new(component, ExactRational::ZERO)
-                    {
-                        return Err(invalid(format!(
-                            "transition {} output-factor parameter default disagrees with its authenticated binding component",
-                            transition.id
-                        )));
-                    }
                 }
             }
             Ok(())
@@ -3662,6 +3786,50 @@ fn validate_transition_parameter_owner(
             transition.id
         ))),
     }
+}
+
+fn validate_transition_output_factor_parameter(
+    templates: &ValidatedRecurrenceTemplateInput,
+    transition: &super::template::TransitionRow,
+    parameter: &super::template::ParameterRow,
+    output_factor_source: OutputFactorSource,
+) -> RusticolResult<()> {
+    if ParameterValueType::try_from(parameter.value_type)? != ParameterValueType::Real
+        || ParameterKind::try_from(parameter.kind)? != ParameterKind::External
+        || parameter.mutable != 1
+    {
+        return Err(invalid(format!(
+            "transition {} output-factor component is not one mutable external real parameter",
+            transition.id
+        )));
+    }
+    let binding = template_exact_factor(
+        templates,
+        transition.binding_coupling_factor_id,
+        "transition binding coupling",
+    )?;
+    let component = match output_factor_source {
+        OutputFactorSource::CouplingReal => binding.real(),
+        OutputFactorSource::CouplingImag => binding.imag(),
+        OutputFactorSource::None => {
+            return Err(invalid(
+                "transition output-factor validation received no output factor",
+            ));
+        }
+    };
+    if component == ExactRational::ZERO
+        || template_exact_factor(
+            templates,
+            parameter.default_factor_id,
+            "output-factor parameter default",
+        )? != ExactComplexRational::new(component, ExactRational::ZERO)
+    {
+        return Err(invalid(format!(
+            "transition {} output-factor parameter default disagrees with its authenticated binding component",
+            transition.id
+        )));
+    }
+    Ok(())
 }
 
 fn normalized_contribution_exact_factor(
@@ -3738,6 +3906,7 @@ fn require_scalar_product_descriptor(
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != SCALAR_PRODUCT_CONTRACT)
         || descriptor.scale().is_none()
+        || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
     {
@@ -4221,6 +4390,19 @@ mod tests {
             [-1, 1, -1, 1]
         );
         assert!(qcd_graph_helicities(&[-1, 1], Some(&[0])).is_err());
+    }
+
+    #[test]
+    fn chiral_dirac_couplings_follow_fermion_line_orientation() {
+        assert_eq!(
+            oriented_chiral_half_scales(CurrentOrientation::Particle, 11, 22).unwrap(),
+            (11, 22)
+        );
+        assert_eq!(
+            oriented_chiral_half_scales(CurrentOrientation::Antiparticle, 11, 22).unwrap(),
+            (22, 11)
+        );
+        assert!(oriented_chiral_half_scales(CurrentOrientation::SelfConjugate, 11, 22).is_err());
     }
 
     #[test]
