@@ -21,6 +21,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+    FULL_THREE_VECTOR_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
@@ -1372,6 +1373,47 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             is not None
             for item in vector_pair_scalars
         )
+        full_three_vectors = tuple(
+            item
+            for item in graph_contributions
+            if item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            == FULL_THREE_VECTOR_TEMPLATE
+        )
+        assert len(full_three_vectors) == 12
+        assert (
+            sum(len(item.semantic_template_ids) for item in full_three_vectors) == 108
+        )
+        assert all(
+            item.parent_component_counts == (4, 4)
+            and item.destination_component_count == 4
+            and len(item.semantic_template_ids) == 9
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.runtime_template is None
+            and item.payload_binding.intrinsic_contract_digest is None
+            and item.payload_binding.contribution_parent_permutation == (0, 1)
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.contract_digest
+            == "0df0f82d182823188d51b7269e56f3d9396d11b668bd327d529114673b4e9ca9"
+            and item.payload_binding.graph_intrinsic.contribution_parent_permutation
+            == (0, 1)
+            and item.payload_binding.graph_intrinsic.projection.get(
+                "constant_imag_bits"
+            )
+            == 4604544271217802184
+            and item.payload_binding.graph_intrinsic.projection.get(
+                "constant_real_bits"
+            )
+            == 0
+            and item.payload_binding.graph_intrinsic.projection.get("kind")
+            == RECURRENCE_INTRINSIC_SCALE_KIND
+            for item in full_three_vectors
+        )
+        assert {
+            item.payload_binding.graph_intrinsic.projection["parameter_index"]
+            for item in full_three_vectors
+            if item.payload_binding.graph_intrinsic is not None
+        } == set(range(84, 96))
         charge_conjugate_weyl_finalizers = tuple(
             item
             for item in direct.templates

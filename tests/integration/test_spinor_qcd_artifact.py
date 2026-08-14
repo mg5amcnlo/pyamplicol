@@ -105,6 +105,34 @@ _DDZH_POINT = (
 _DDZH_PROCESS_ID = "d_dbar_to_z_h"
 _DDZH_FLOW = "flow:2,1"
 _DDZH_ORDER = (2, 1)
+_WWZH_POINT = (
+    (250.0, 0.0, 0.0, 236.71245012806037),
+    (250.0, 0.0, 0.0, -236.71245012806037),
+    (
+        242.690251344,
+        214.54791806402275,
+        0.0,
+        67.47219877703148,
+    ),
+    (
+        257.309748656,
+        -214.54791806402275,
+        0.0,
+        -67.47219877703148,
+    ),
+)
+_WWZH_PROCESS_ID = "wplus_wminus_to_z_h"
+_WWZH_FLOW = "flow:singlet"
+_WWZH_COUPLINGS = (
+    (
+        "coupling.12.23_24_24.component_0",
+        -1053109007290901 / 562949953421312,
+    ),
+    (
+        "coupling.12.24_23_24.component_0",
+        1053109007290901 / 562949953421312,
+    ),
+)
 _DDZG_CHARGE_CONJUGATE_POINT = (
     (500.0, 0.0, 0.0, 500.0),
     (500.0, 0.0, 0.0, -500.0),
@@ -438,6 +466,70 @@ def test_graph_spinor_scalar_vector_recurrence(
     )
     assert value(candidate) == pytest.approx(
         zeroed_vertex_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+
+def test_graph_spinor_full_electroweak_three_vector_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # With the default right closure anchor, the singlet projection contains
+    # two charged-W and one neutral-Z exchange routes using only kind-12
+    # three-vector and kind-19 vector-scalar currents.  In particular, no
+    # charged auxiliary-bivector current is part of this process slice.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_WWZH_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("w+ w- > z h", name=_WWZH_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(0, 2),
+            model=prepared_model,
+        )
+        runtimes[mode] = Runtime.load(artifact, process=_WWZH_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate((_WWZH_POINT,), color_flows=(_WWZH_FLOW,))[0]
+        )
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert baseline.imag == pytest.approx(0.0, abs=1.0e-15)
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+    for coupling_name, default in _WWZH_COUPLINGS:
+        for runtime in (candidate, reference):
+            runtime.set_model_parameters({coupling_name: 0.0})
+        shifted_reference = value(reference)
+        assert shifted_reference != pytest.approx(baseline, rel=1.0e-9)
+        assert value(candidate) == pytest.approx(
+            shifted_reference,
+            rel=2.0e-12,
+            abs=1.0e-15,
+        )
+        for runtime in (candidate, reference):
+            runtime.set_model_parameters({coupling_name: default})
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters(
+            {coupling_name: 0.0 for coupling_name, _ in _WWZH_COUPLINGS}
+        )
+    zeroed_reference = value(reference)
+    assert zeroed_reference == pytest.approx(0.0, abs=1.0e-15)
+    assert value(candidate) == pytest.approx(
+        zeroed_reference,
         rel=2.0e-12,
         abs=1.0e-15,
     )

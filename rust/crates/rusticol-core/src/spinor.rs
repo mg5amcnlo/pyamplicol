@@ -2744,6 +2744,30 @@ pub(crate) fn three_vector_bispinor_expression(
     bispinor_sum(builder, [momentum_term, right_term, left_term])
 }
 
+/// Lower the full three-vector current for parents `(A, p)` and `(B, q)`.
+///
+/// The color-ordered numerator `C(A, p; B, q)` omits the two longitudinal
+/// terms present in the electroweak vertex.  In the sparse bispinor basis the
+/// complete numerator is
+///
+/// `C(A, p; B, q) + (A·p) B - (B·q) A`.
+pub(crate) fn full_three_vector_bispinor_expression(
+    builder: &mut SpinorDagBuilder,
+    left: &BispinorExpression,
+    left_momentum: &BispinorExpression,
+    right: &BispinorExpression,
+    right_momentum: &BispinorExpression,
+) -> RusticolResult<BispinorExpression> {
+    let color_ordered =
+        three_vector_bispinor_expression(builder, left, left_momentum, right, right_momentum)?;
+    let left_dot_left_momentum = bispinor_dot_expression(builder, left, left_momentum)?;
+    let right_dot_right_momentum = bispinor_dot_expression(builder, right, right_momentum)?;
+    let right_term = bispinor_scale(builder, left_dot_left_momentum, right)?;
+    let negative_right_dot_right_momentum = builder.negate(right_dot_right_momentum)?;
+    let left_term = bispinor_scale(builder, negative_right_dot_right_momentum, left)?;
+    bispinor_sum(builder, [color_ordered, right_term, left_term])
+}
+
 fn four_vector_bispinor_expression(
     builder: &mut SpinorDagBuilder,
     left: &BispinorExpression,
@@ -4712,6 +4736,46 @@ mod tests {
         let expected = bispinor_sum(&mut builder, [right_term, left_term]).unwrap();
 
         assert_ne!(actual, BispinorExpression::default());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn full_three_vector_adds_the_two_longitudinal_parent_terms() {
+        let mut builder = SpinorDagBuilder::new(4).unwrap();
+        let one = builder.one();
+        let left = BispinorExpression::dyad(0, 1, one);
+        let left_momentum = BispinorExpression::dyad(2, 3, one);
+        let right = BispinorExpression::dyad(1, 2, one);
+        let right_momentum = BispinorExpression::dyad(3, 0, one);
+
+        let color_ordered = three_vector_bispinor_expression(
+            &mut builder,
+            &left,
+            &left_momentum,
+            &right,
+            &right_momentum,
+        )
+        .unwrap();
+        let actual = full_three_vector_bispinor_expression(
+            &mut builder,
+            &left,
+            &left_momentum,
+            &right,
+            &right_momentum,
+        )
+        .unwrap();
+
+        let left_dot_left_momentum =
+            bispinor_dot_expression(&mut builder, &left, &left_momentum).unwrap();
+        let right_dot_right_momentum =
+            bispinor_dot_expression(&mut builder, &right, &right_momentum).unwrap();
+        let right_term = bispinor_scale(&mut builder, left_dot_left_momentum, &right).unwrap();
+        let negative_right_dot_right_momentum = builder.negate(right_dot_right_momentum).unwrap();
+        let left_term =
+            bispinor_scale(&mut builder, negative_right_dot_right_momentum, &left).unwrap();
+        let expected =
+            bispinor_sum(&mut builder, [color_ordered.clone(), right_term, left_term]).unwrap();
+        assert_ne!(actual, color_ordered);
         assert_eq!(actual, expected);
     }
 

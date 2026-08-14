@@ -91,6 +91,7 @@ MASSIVE_VECTOR_UNITARY_TEMPLATE = (
 VECTOR_PAIR_TO_SCALAR_TEMPLATE = (
     "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1"
 )
+FULL_THREE_VECTOR_TEMPLATE = "rusticol.recurrence-intrinsic.full-three-vector.v1"
 
 DiracOrientation: TypeAlias = Literal["particle", "antiparticle"]
 
@@ -387,6 +388,27 @@ _WITNESSES = (
             "-(r0*p0-r1*p1-r2*p2-r3*p3)*l3)",
         ),
         anchor_monomial="l0*p0*r0",
+        inverse_anchor_coefficient="-1",
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+    ),
+    _IntrinsicWitness(
+        runtime_template=FULL_THREE_VECTOR_TEMPLATE,
+        expressions=(
+            "(l0*r0-l1*r1-l2*r2-l3*r3)*(p0-q0)"
+            "+(l0*(p0+2*q0)-l1*(p1+2*q1)-l2*(p2+2*q2)-l3*(p3+2*q3))*r0"
+            "-(r0*(2*p0+q0)-r1*(2*p1+q1)-r2*(2*p2+q2)-r3*(2*p3+q3))*l0",
+            "(l0*r0-l1*r1-l2*r2-l3*r3)*(p1-q1)"
+            "+(l0*(p0+2*q0)-l1*(p1+2*q1)-l2*(p2+2*q2)-l3*(p3+2*q3))*r1"
+            "-(r0*(2*p0+q0)-r1*(2*p1+q1)-r2*(2*p2+q2)-r3*(2*p3+q3))*l1",
+            "(l0*r0-l1*r1-l2*r2-l3*r3)*(p2-q2)"
+            "+(l0*(p0+2*q0)-l1*(p1+2*q1)-l2*(p2+2*q2)-l3*(p3+2*q3))*r2"
+            "-(r0*(2*p0+q0)-r1*(2*p1+q1)-r2*(2*p2+q2)-r3*(2*p3+q3))*l2",
+            "(l0*r0-l1*r1-l2*r2-l3*r3)*(p3-q3)"
+            "+(l0*(p0+2*q0)-l1*(p1+2*q1)-l2*(p2+2*q2)-l3*(p3+2*q3))*r3"
+            "-(r0*(2*p0+q0)-r1*(2*p1+q1)-r2*(2*p2+q2)-r3*(2*p3+q3))*l3",
+        ),
+        anchor_monomial="l1*p1*r0",
         inverse_anchor_coefficient="-1",
         parent_component_counts=(4, 4),
         destination_component_count=4,
@@ -1832,6 +1854,7 @@ __all__ = [
     "DIRAC_SCALAR_TO_DIRAC_TEMPLATE",
     "DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE",
     "DIRAC_VECTOR_PARTICLE_TEMPLATE",
+    "FULL_THREE_VECTOR_TEMPLATE",
     "MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_PARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_RUNTIME_SCALE_BITS",

@@ -2155,6 +2155,7 @@ struct PreparedClosure {
     row: ClosureRow,
     input_states: [u32; 2],
     quantum_flows: Box<[PreparedClosureQuantumFlow]>,
+    local_coupling_orders: Box<[u32]>,
     contraction: ColorContractionRow,
     canonical_input_order: [u32; 2],
     input_exchange_factor: Option<ExactComplexRational>,
@@ -2196,6 +2197,9 @@ impl PreparedClosure {
                 .collect::<RusticolResult<Vec<_>>>()?
         }
         .into_boxed_slice();
+        let local_coupling_orders = catalog
+            .coupling_orders(row.coupling_order_set_id)?
+            .into_boxed_slice();
         let contraction = template
             .color_contractions
             .get(row.color_contraction_template_id as usize)
@@ -2234,6 +2238,7 @@ impl PreparedClosure {
             row,
             input_states,
             quantum_flows,
+            local_coupling_orders,
             contraction,
             canonical_input_order,
             input_exchange_factor,
@@ -4731,6 +4736,7 @@ fn build_recurrence_program_impl(
             template_input,
             &fermion_ordering,
             pairing_catalog,
+            &coupling_limits,
             &prepared_closures,
             &prepared_closure_sectors,
             &color_states,
@@ -7330,6 +7336,7 @@ fn build_closures(
     template: &OwnedRecurrenceTemplateInput,
     fermion_ordering: &FermionOrderingContext,
     pairing_catalog: Option<ValidatedFermionPairingCatalog<'_>>,
+    coupling_limits: &[Option<u32>],
     prepared_closures: &PreparedClosureCatalog,
     prepared_sectors: &PreparedClosureSectorCatalog,
     color_states: &DynamicLCColorStateInterner,
@@ -7412,6 +7419,7 @@ fn build_closures(
                         process_catalog,
                         template,
                         fermion_ordering,
+                        coupling_limits,
                         color_states,
                         currents,
                         pairing_catalog,
@@ -7648,6 +7656,7 @@ fn add_closure_terms(
     process_catalog: &ProcessCatalog<'_>,
     template: &OwnedRecurrenceTemplateInput,
     fermion_ordering: &FermionOrderingContext,
+    coupling_limits: &[Option<u32>],
     color_states: &DynamicLCColorStateInterner,
     currents: &[PendingCurrent],
     pairing_catalog: Option<ValidatedFermionPairingCatalog<'_>>,
@@ -7660,6 +7669,16 @@ fn add_closure_terms(
         &currents[parent_ids[0] as usize].key,
         &currents[parent_ids[1] as usize].key,
     ];
+    if combined_coupling_orders(
+        parents[0].coupling_orders(),
+        parents[1].coupling_orders(),
+        &closure.local_coupling_orders,
+        coupling_limits,
+    )?
+    .is_none()
+    {
+        return Ok(());
+    }
     let pairing_certificate_ids =
         closure_pairing_certificate_ids(currents, parent_ids, pairing_catalog)?;
     let pairing_rule = pairing_rule_for_certificate(&pairing_certificate_ids, pairing_catalog)?;
@@ -12670,6 +12689,7 @@ mod tests {
             &template,
             &fermion_ordering,
             None,
+            &[],
             &prepared_closures,
             &prepared_closure_sectors,
             &color_states,

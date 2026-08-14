@@ -22,13 +22,13 @@ use crate::spinor::{
     bivector_wedge_expression, dirac_bilinear, dirac_half_scale, dirac_pair_vector_expression,
     dirac_propagator_numerator, dirac_scalar_expression, dirac_scale, dirac_sum,
     dirac_vector_expression, dirac_weyl_pair_vector_expression, external_polarization_expression,
-    external_polarization_expression_with_reference, linear_weyl_scale, linear_weyl_sum,
-    massive_dirac_propagator_denominator, massive_dirac_source_expression,
-    massive_vector_longitudinal_polarization_expression, massive_vector_polarization_expression,
-    massive_vector_propagator_expression, quark_vector_weyl_bilinear,
-    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
-    three_vector_bispinor_expression, weyl_dirac_pair_vector_expression,
-    weyl_pair_vector_expression,
+    external_polarization_expression_with_reference, full_three_vector_bispinor_expression,
+    linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
+    massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
+    massive_vector_polarization_expression, massive_vector_propagator_expression,
+    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
+    signed_momentum_expression, three_vector_bispinor_expression,
+    weyl_dirac_pair_vector_expression, weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -42,6 +42,9 @@ const IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1";
 const THREE_VECTOR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.color-ordered-three-vector.v1";
 const THREE_VECTOR_CONTRACT: &str =
     "5fcffbd8137bb0bb892c7347693bf865d8a45279f13dcf10f70d93f1b7660beb";
+const FULL_THREE_VECTOR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.full-three-vector.v1";
+const FULL_THREE_VECTOR_CONTRACT: &str =
+    "0df0f82d182823188d51b7269e56f3d9396d11b668bd327d529114673b4e9ca9";
 const ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.antisymmetric-tensor-vector.v1";
 const ANTISYMMETRIC_TENSOR_VECTOR_CONTRACT: &str =
@@ -251,6 +254,7 @@ enum QcdChiralDiracPair<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdContributionKind {
     ThreeVector,
+    FullThreeVector,
     AntisymmetricTensorVector,
     VectorWedgeVector,
     WeylVector {
@@ -1462,17 +1466,18 @@ fn qcd_parameter_slots(
         for contribution in contributions {
             let (kind, parents, descriptor) =
                 qcd_contribution_contract(contribution, program, templates, direct)?;
-            if kind == QcdContributionKind::ComponentwiseFourScalar
-                && has_preferred_componentwise_mirrored_alias(
-                    contribution,
-                    parents,
-                    descriptor,
-                    contributions,
-                    program,
-                    templates,
-                    direct,
-                )?
-            {
+            if matches!(
+                kind,
+                QcdContributionKind::ComponentwiseFourScalar | QcdContributionKind::FullThreeVector
+            ) && has_preferred_mirrored_alias(
+                contribution,
+                parents,
+                descriptor,
+                contributions,
+                program,
+                templates,
+                direct,
+            )? {
                 continue;
             }
             if let Some(slot) = descriptor
@@ -1576,6 +1581,7 @@ fn qcd_contribution_kind(
 ) -> RusticolResult<QcdContributionKind> {
     let expected_digest = match descriptor.runtime_template() {
         THREE_VECTOR_TEMPLATE => THREE_VECTOR_CONTRACT,
+        FULL_THREE_VECTOR_TEMPLATE => FULL_THREE_VECTOR_CONTRACT,
         ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE => ANTISYMMETRIC_TENSOR_VECTOR_CONTRACT,
         VECTOR_WEDGE_VECTOR_TEMPLATE => VECTOR_WEDGE_VECTOR_CONTRACT,
         WEYL_VECTOR_A_TEMPLATE => WEYL_VECTOR_A_CONTRACT,
@@ -1634,6 +1640,7 @@ fn qcd_contribution_kind(
     }
     Ok(match descriptor.runtime_template() {
         THREE_VECTOR_TEMPLATE => QcdContributionKind::ThreeVector,
+        FULL_THREE_VECTOR_TEMPLATE => QcdContributionKind::FullThreeVector,
         ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE => QcdContributionKind::AntisymmetricTensorVector,
         VECTOR_WEDGE_VECTOR_TEMPLATE => QcdContributionKind::VectorWedgeVector,
         WEYL_PAIR_VECTOR_A_TEMPLATE => {
@@ -2392,26 +2399,79 @@ fn qcd_contribution_contract<'a>(
 
 fn contribution_uses_construction_parent_order(
     contribution: &super::RecurrenceContribution,
+    program: &RecurrenceProgram,
     templates: &ValidatedRecurrenceTemplateInput,
 ) -> RusticolResult<bool> {
     let [first, second] = contribution.parent_current_ids() else {
-        return Err(invalid("componentwise contribution is not binary"));
+        return Err(invalid("mirrored contribution is not binary"));
     };
     let transition = transition_row(templates, contribution.key().transition_template_id())?;
     let concrete = match template_u32_sequence(
         templates,
         transition.canonical_input_order_sequence_id,
-        "componentwise transition canonical input order",
+        "mirrored transition canonical input order",
     )? {
         [0, 1] => [*first, *second],
         [1, 0] => [*second, *first],
         _ => {
             return Err(invalid(
-                "componentwise transition canonical input order is invalid",
+                "mirrored transition canonical input order is invalid",
             ));
         }
     };
-    Ok(concrete[0] < concrete[1])
+    let left = program
+        .currents()
+        .get(concrete[0] as usize)
+        .ok_or_else(|| invalid("mirrored contribution left parent is out of bounds"))?;
+    let right = program
+        .currents()
+        .get(concrete[1] as usize)
+        .ok_or_else(|| invalid("mirrored contribution right parent is out of bounds"))?;
+    let left_color = program
+        .dynamic_color_states()
+        .get(left.key().dynamic_lc_color_state_id().get() as usize)
+        .ok_or_else(|| invalid("mirrored contribution left color state is out of bounds"))?;
+    let right_color = program
+        .dynamic_color_states()
+        .get(right.key().dynamic_lc_color_state_id().get() as usize)
+        .ok_or_else(|| invalid("mirrored contribution right color state is out of bounds"))?;
+    // Match the component constructor's singlet ordering rule exactly. An
+    // empty dynamic color forest proves that every supported source is a
+    // color singlet; closed colored source ancestry retains components.
+    construction_support_order(
+        left.key().support_source_slots(),
+        left_color.components().is_empty(),
+        right.key().support_source_slots(),
+        right_color.components().is_empty(),
+    )
+}
+
+fn construction_support_order(
+    left: &[u32],
+    left_all_singlet: bool,
+    right: &[u32],
+    right_all_singlet: bool,
+) -> RusticolResult<bool> {
+    let left_max = left
+        .last()
+        .copied()
+        .ok_or_else(|| invalid("mirrored contribution left parent has empty source support"))?;
+    let right_max = right
+        .last()
+        .copied()
+        .ok_or_else(|| invalid("mirrored contribution right parent has empty source support"))?;
+    if left.iter().any(|slot| right.binary_search(slot).is_ok()) {
+        return Err(invalid(
+            "mirrored contribution parent source supports are not disjoint",
+        ));
+    }
+    if left_all_singlet && !right_all_singlet {
+        return Ok(false);
+    }
+    if left_all_singlet && right_all_singlet {
+        return Ok(left_max < right_max);
+    }
+    Ok(true)
 }
 
 fn componentwise_mirrored_alias_contracts_match(
@@ -2482,25 +2542,206 @@ fn componentwise_mirrored_alias_contracts_match(
             && template_exact_factor(
                 templates,
                 left_transition.binding_coupling_factor_id,
-                "left componentwise transition binding coupling",
+                "left mirrored transition binding coupling",
             )? == template_exact_factor(
                 templates,
                 right_transition.binding_coupling_factor_id,
-                "right componentwise transition binding coupling",
+                "right mirrored transition binding coupling",
             )?
             && template_exact_factor(
                 templates,
                 left_transition.exact_factor_id,
-                "left componentwise transition exact factor",
+                "left mirrored transition exact factor",
             )? == template_exact_factor(
                 templates,
                 right_transition.exact_factor_id,
-                "right componentwise transition exact factor",
+                "right mirrored transition exact factor",
             )?,
     )
 }
 
-fn has_preferred_componentwise_mirrored_alias(
+fn full_three_vector_mirrored_alias_contracts_match(
+    left: &super::RecurrenceContribution,
+    left_parents: [u32; 2],
+    left_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    right: &super::RecurrenceContribution,
+    right_parents: [u32; 2],
+    right_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<bool> {
+    if left_parents != [right_parents[1], right_parents[0]]
+        || left.key().color_witness_term_id() != right.key().color_witness_term_id()
+        || left_descriptor.runtime_template() != FULL_THREE_VECTOR_TEMPLATE
+        || right_descriptor.runtime_template() != FULL_THREE_VECTOR_TEMPLATE
+        || left_descriptor.contract_digest() != right_descriptor.contract_digest()
+        || left_descriptor.parent_permutation() != [0, 1]
+        || right_descriptor.parent_permutation() != [0, 1]
+        || normalized_contribution_exact_factor(left, templates)?
+            != normalized_contribution_exact_factor(right, templates)?
+    {
+        return Ok(false);
+    }
+    let Some(left_scale) = left_descriptor.scale() else {
+        return Ok(false);
+    };
+    let Some(right_scale) = right_descriptor.scale() else {
+        return Ok(false);
+    };
+    if left_scale.constant_real_bits() != right_scale.constant_real_bits()
+        || left_scale.constant_imag_bits() != right_scale.constant_imag_bits()
+        || left_scale.prepared_parameter_slot().is_none()
+        || right_scale.prepared_parameter_slot().is_none()
+        || left_scale.prepared_parameter_slot() == right_scale.prepared_parameter_slot()
+    {
+        return Ok(false);
+    }
+
+    let left_transition = transition_row(templates, left.key().transition_template_id())?;
+    let right_transition = transition_row(templates, right.key().transition_template_id())?;
+    let left_inputs = template_u32_sequence(
+        templates,
+        left_transition.input_state_sequence_id,
+        "left full-three-vector transition input states",
+    )?;
+    let right_inputs = template_u32_sequence(
+        templates,
+        right_transition.input_state_sequence_id,
+        "right full-three-vector transition input states",
+    )?;
+    if left_inputs.len() != 2
+        || right_inputs.len() != 2
+        || left_inputs != [right_inputs[1], right_inputs[0]]
+    {
+        return Ok(false);
+    }
+    let left_binding = template_exact_factor(
+        templates,
+        left_transition.binding_coupling_factor_id,
+        "left full-three-vector transition binding coupling",
+    )?;
+    let right_binding = template_exact_factor(
+        templates,
+        right_transition.binding_coupling_factor_id,
+        "right full-three-vector transition binding coupling",
+    )?;
+    if left_binding != right_binding.checked_neg()? {
+        return Ok(false);
+    }
+
+    let left_flow = quantum_flow_row(templates, left_transition.quantum_flow_template_id)?;
+    let right_flow = quantum_flow_row(templates, right_transition.quantum_flow_template_id)?;
+    let left_flow_states = template_u32_sequence(
+        templates,
+        left_flow.input_state_sequence_id,
+        "left full-three-vector quantum-flow input states",
+    )?;
+    let right_flow_states = template_u32_sequence(
+        templates,
+        right_flow.input_state_sequence_id,
+        "right full-three-vector quantum-flow input states",
+    )?;
+    let left_flow_spins = template_i32_sequence(
+        templates,
+        left_flow.input_spin_sequence_id,
+        "left full-three-vector quantum-flow input spins",
+    )?;
+    let right_flow_spins = template_i32_sequence(
+        templates,
+        right_flow.input_spin_sequence_id,
+        "right full-three-vector quantum-flow input spins",
+    )?;
+    let left_flow_flavours = template_u32_sequence(
+        templates,
+        left_flow.input_flavour_sequence_id,
+        "left full-three-vector quantum-flow input flavours",
+    )?;
+    let right_flow_flavours = template_u32_sequence(
+        templates,
+        right_flow.input_flavour_sequence_id,
+        "right full-three-vector quantum-flow input flavours",
+    )?;
+    let left_flow_quantum_numbers = template_u32_sequence(
+        templates,
+        left_flow.input_quantum_sequence_id,
+        "left full-three-vector quantum-flow input quantum numbers",
+    )?;
+    let right_flow_quantum_numbers = template_u32_sequence(
+        templates,
+        right_flow.input_quantum_sequence_id,
+        "right full-three-vector quantum-flow input quantum numbers",
+    )?;
+    if left_flow_states.len() != 2
+        || right_flow_states.len() != 2
+        || left_flow_states != [right_flow_states[1], right_flow_states[0]]
+        || left_flow_spins.len() != 2
+        || right_flow_spins.len() != 2
+        || left_flow_spins != [right_flow_spins[1], right_flow_spins[0]]
+        || left_flow_flavours.len() != 2
+        || right_flow_flavours.len() != 2
+        || left_flow_flavours != [right_flow_flavours[1], right_flow_flavours[0]]
+        || left_flow_quantum_numbers.len() != 2
+        || right_flow_quantum_numbers.len() != 2
+        || left_flow_quantum_numbers
+            != [right_flow_quantum_numbers[1], right_flow_quantum_numbers[0]]
+    {
+        return Ok(false);
+    }
+    let left_flow_coupling = template_exact_factor(
+        templates,
+        left_flow.exact_coupling_factor_id,
+        "left full-three-vector quantum-flow coupling",
+    )?;
+    let right_flow_coupling = template_exact_factor(
+        templates,
+        right_flow.exact_coupling_factor_id,
+        "right full-three-vector quantum-flow coupling",
+    )?;
+
+    Ok(
+        left_transition.result_state_template_id == right_transition.result_state_template_id
+            && left_transition.color_contraction_template_id
+                == right_transition.color_contraction_template_id
+            && left_transition.coupling_order_set_id == right_transition.coupling_order_set_id
+            && left_transition.momentum_convention_sequence_id
+                == right_transition.momentum_convention_sequence_id
+            && left_transition.output_factor_source == right_transition.output_factor_source
+            && OutputFactorSource::try_from(left_transition.output_factor_source)?
+                == OutputFactorSource::CouplingReal
+            && left_transition.equivalence_class_string_id
+                == right_transition.equivalence_class_string_id
+            && left_transition.input_exchange_factor_id == MISSING_U32
+            && right_transition.input_exchange_factor_id == MISSING_U32
+            && left_transition.output_projection_string_id
+                == right_transition.output_projection_string_id
+            && left_transition.contact_orbit_step_sequence_id
+                == right_transition.contact_orbit_step_sequence_id
+            && left_transition.contact_orbit_step_semantic_digest_sequence_id
+                == right_transition.contact_orbit_step_semantic_digest_sequence_id
+            && template_exact_factor(
+                templates,
+                left_transition.exact_factor_id,
+                "left full-three-vector transition exact factor",
+            )? == template_exact_factor(
+                templates,
+                right_transition.exact_factor_id,
+                "right full-three-vector transition exact factor",
+            )?
+            && left_flow.result_state_template_id == right_flow.result_state_template_id
+            && left_flow.result_spin_state == right_flow.result_spin_state
+            && left_flow.result_flavour_flow_id == right_flow.result_flavour_flow_id
+            && left_flow.result_quantum_number_flow_id == right_flow.result_quantum_number_flow_id
+            && left_flow.flavour_flow_operation_string_id
+                == right_flow.flavour_flow_operation_string_id
+            && left_flow.quantum_number_flow_operation_string_id
+                == right_flow.quantum_number_flow_operation_string_id
+            && left_flow.coupling_order_set_id == right_flow.coupling_order_set_id
+            && left_flow.coupling_order_set_id == left_transition.coupling_order_set_id
+            && left_flow_coupling == left_binding
+            && right_flow_coupling == right_binding,
+    )
+}
+
+fn has_preferred_mirrored_alias(
     contribution: &super::RecurrenceContribution,
     parents: [u32; 2],
     descriptor: &super::PreparedDirectIntrinsicDescriptor,
@@ -2509,28 +2750,47 @@ fn has_preferred_componentwise_mirrored_alias(
     templates: &ValidatedRecurrenceTemplateInput,
     direct: &PreparedDirectExecutorCatalog,
 ) -> RusticolResult<bool> {
-    if contribution_uses_construction_parent_order(contribution, templates)? {
+    if contribution_uses_construction_parent_order(contribution, program, templates)? {
         return Ok(false);
     }
     for candidate in contributions {
         if candidate.id() == contribution.id()
-            || !contribution_uses_construction_parent_order(candidate, templates)?
+            || !contribution_uses_construction_parent_order(candidate, program, templates)?
         {
             continue;
         }
         let (kind, candidate_parents, candidate_descriptor) =
             qcd_contribution_contract(candidate, program, templates, direct)?;
-        if kind == QcdContributionKind::ComponentwiseFourScalar
-            && componentwise_mirrored_alias_contracts_match(
-                contribution,
-                parents,
-                descriptor,
-                candidate,
-                candidate_parents,
-                candidate_descriptor,
-                templates,
-            )?
-        {
+        let original_kind = qcd_contribution_kind(descriptor)?;
+        if original_kind != kind {
+            continue;
+        }
+        let matches = match original_kind {
+            QcdContributionKind::ComponentwiseFourScalar => {
+                componentwise_mirrored_alias_contracts_match(
+                    contribution,
+                    parents,
+                    descriptor,
+                    candidate,
+                    candidate_parents,
+                    candidate_descriptor,
+                    templates,
+                )?
+            }
+            QcdContributionKind::FullThreeVector => {
+                full_three_vector_mirrored_alias_contracts_match(
+                    contribution,
+                    parents,
+                    descriptor,
+                    candidate,
+                    candidate_parents,
+                    candidate_descriptor,
+                    templates,
+                )?
+            }
+            _ => false,
+        };
+        if matches {
             return Ok(true);
         }
     }
@@ -2655,22 +2915,24 @@ fn lower_qcd_current(
                 }
                 let (kind, parents, descriptor) =
                     qcd_contribution_contract(contribution, program, templates, direct)?;
-                if kind == QcdContributionKind::ComponentwiseFourScalar
-                    && has_preferred_componentwise_mirrored_alias(
-                        contribution,
-                        parents,
-                        descriptor,
-                        contributions,
-                        program,
-                        templates,
-                        direct,
-                    )?
-                {
+                if matches!(
+                    kind,
+                    QcdContributionKind::ComponentwiseFourScalar
+                        | QcdContributionKind::FullThreeVector
+                ) && has_preferred_mirrored_alias(
+                    contribution,
+                    parents,
+                    descriptor,
+                    contributions,
+                    program,
+                    templates,
+                    direct,
+                )? {
                     continue;
                 }
                 let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let (numerator, scale) = match kind {
-                    QcdContributionKind::ThreeVector => {
+                    QcdContributionKind::ThreeVector | QcdContributionKind::FullThreeVector => {
                         let scale =
                             intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         let left = required_qcd_vector(current_values, parents[0])?;
@@ -2685,13 +2947,25 @@ fn lower_qcd_current(
                             representative_signs,
                             builder,
                         )?;
-                        let numerator = three_vector_bispinor_expression(
-                            builder,
-                            left,
-                            &left_momentum,
-                            right,
-                            &right_momentum,
-                        )?;
+                        let numerator = match kind {
+                            QcdContributionKind::ThreeVector => three_vector_bispinor_expression(
+                                builder,
+                                left,
+                                &left_momentum,
+                                right,
+                                &right_momentum,
+                            )?,
+                            QcdContributionKind::FullThreeVector => {
+                                full_three_vector_bispinor_expression(
+                                    builder,
+                                    left,
+                                    &left_momentum,
+                                    right,
+                                    &right_momentum,
+                                )?
+                            }
+                            _ => unreachable!("three-vector contribution kind checked above"),
+                        };
                         let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                         (numerator, builder.product([sqrt_two, scale, exact])?)
                     }
@@ -4744,6 +5018,29 @@ fn transition_row(
     Ok(transition)
 }
 
+fn quantum_flow_row(
+    templates: &ValidatedRecurrenceTemplateInput,
+    quantum_flow_id: u32,
+) -> RusticolResult<&super::template::QuantumFlowRow> {
+    if quantum_flow_id == MISSING_U32 {
+        return Err(invalid(
+            "full-three-vector quantum-flow template is missing",
+        ));
+    }
+    let quantum_flow = templates
+        .input()
+        .quantum_flows
+        .get(quantum_flow_id as usize)
+        .ok_or_else(|| invalid(format!("quantum-flow template {quantum_flow_id} is absent")))?;
+    if quantum_flow.id != quantum_flow_id {
+        return Err(invalid(format!(
+            "quantum-flow template {quantum_flow_id} has noncanonical ID {}",
+            quantum_flow.id
+        )));
+    }
+    Ok(quantum_flow)
+}
+
 fn require_scalar_state(
     templates: &ValidatedRecurrenceTemplateInput,
     state_id: u32,
@@ -4836,6 +5133,28 @@ fn template_u32_sequence<'a>(
     Ok(&input.u32_sequence_values[range])
 }
 
+fn template_i32_sequence<'a>(
+    templates: &'a ValidatedRecurrenceTemplateInput,
+    sequence_id: u32,
+    label: &str,
+) -> RusticolResult<&'a [i32]> {
+    let input = templates.input();
+    let range = input
+        .i32_sequence_ranges
+        .get(sequence_id as usize)
+        .ok_or_else(|| invalid(format!("{label} sequence {sequence_id} is absent")))?;
+    if range.id != sequence_id {
+        return Err(invalid(format!(
+            "{label} sequence {sequence_id} has noncanonical ID {}",
+            range.id
+        )));
+    }
+    let range = range
+        .range
+        .as_usize_range(input.i32_sequence_values.len(), label)?;
+    Ok(&input.i32_sequence_values[range])
+}
+
 fn template_string<'a>(
     templates: &'a ValidatedRecurrenceTemplateInput,
     string_id: u32,
@@ -4882,13 +5201,17 @@ mod tests {
         SemanticDigest::new([seed; 32]).unwrap()
     }
 
-    fn scalar_contract_digest() -> SemanticDigest {
-        let text = SCALAR_PRODUCT_CONTRACT.as_bytes();
+    fn contract_digest(text: &str) -> SemanticDigest {
+        let text = text.as_bytes();
         let mut bytes = [0_u8; 32];
         for (index, pair) in text.chunks_exact(2).enumerate() {
             bytes[index] = (hex(pair[0]) << 4) | hex(pair[1]);
         }
         SemanticDigest::new(bytes).unwrap()
+    }
+
+    fn scalar_contract_digest() -> SemanticDigest {
+        contract_digest(SCALAR_PRODUCT_CONTRACT)
     }
 
     fn hex(value: u8) -> u8 {
@@ -5240,6 +5563,54 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn full_three_vector_has_a_distinct_authenticated_contribution_kind() {
+        let descriptor = PreparedDirectIntrinsicDescriptor::new(
+            PreparedDirectExecutorKey::Evaluator {
+                role: DirectExecutorRole::Contribution,
+                evaluator_binding_id: 9,
+            },
+            FULL_THREE_VECTOR_TEMPLATE.to_owned(),
+            Some(contract_digest(FULL_THREE_VECTOR_CONTRACT)),
+            Some(PreparedDirectIntrinsicScale::new(
+                1.0_f64.to_bits(),
+                0.0_f64.to_bits(),
+                None,
+            )),
+        );
+        assert_eq!(
+            qcd_contribution_kind(&descriptor).unwrap(),
+            QcdContributionKind::FullThreeVector
+        );
+
+        let wrong_contract = PreparedDirectIntrinsicDescriptor::new(
+            PreparedDirectExecutorKey::Evaluator {
+                role: DirectExecutorRole::Contribution,
+                evaluator_binding_id: 9,
+            },
+            FULL_THREE_VECTOR_TEMPLATE.to_owned(),
+            Some(digest(42)),
+            Some(PreparedDirectIntrinsicScale::new(
+                1.0_f64.to_bits(),
+                0.0_f64.to_bits(),
+                None,
+            )),
+        );
+        assert!(qcd_contribution_kind(&wrong_contract).is_err());
+    }
+
+    #[test]
+    fn mirrored_alias_owner_matches_singlet_construction_order() {
+        assert!(!construction_support_order(&[0, 5], true, &[2, 3], true).unwrap());
+        assert!(construction_support_order(&[2, 3], true, &[0, 5], true).unwrap());
+        assert!(!construction_support_order(&[0], true, &[1], false).unwrap());
+        assert!(construction_support_order(&[0], false, &[1], true).unwrap());
+        assert!(construction_support_order(&[0], false, &[1], false).unwrap());
+        assert!(construction_support_order(&[1], false, &[0], false).unwrap());
+        assert!(construction_support_order(&[], true, &[0], true).is_err());
+        assert!(construction_support_order(&[0], true, &[0], true).is_err());
     }
 
     #[test]

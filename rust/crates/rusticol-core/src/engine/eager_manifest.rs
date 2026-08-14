@@ -42,6 +42,7 @@ const CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE: &str =
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const VECTOR_PAIR_TO_SCALAR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1";
+const FULL_THREE_VECTOR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.full-three-vector.v1";
 const WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1";
 const WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
@@ -1712,6 +1713,7 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                     | DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
                     | DIRAC_SCALAR_TEMPLATE
                     | VECTOR_PAIR_TO_SCALAR_TEMPLATE
+                    | FULL_THREE_VECTOR_TEMPLATE
                     | WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE
                     | WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE
             ) =>
@@ -3075,6 +3077,35 @@ mod typed_finalizer_tests {
             }))
             .unwrap();
         assert!(wrong_template.validate("contribution").is_err());
+    }
+
+    #[test]
+    fn full_three_vector_projection_uses_an_ordinary_authenticated_scale() {
+        let graph = |real: f64, imaginary: f64| {
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": "0df0f82d182823188d51b7269e56f3d9396d11b668bd327d529114673b4e9ca9",
+                "contribution_parent_permutation": [1, 0],
+                "runtime_template": FULL_THREE_VECTOR_TEMPLATE,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": 131,
+                },
+            }))
+            .unwrap()
+        };
+
+        graph(0.0, 0.707106781186547)
+            .validate("contribution")
+            .unwrap();
+        assert!(graph(0.0, 0.0).validate("contribution").is_err());
+        assert!(graph(0.0, f64::INFINITY).validate("contribution").is_err());
+        assert!(
+            graph(0.0, 0.707106781186547)
+                .validate("finalization")
+                .is_err()
+        );
     }
 
     #[test]

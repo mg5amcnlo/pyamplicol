@@ -15,6 +15,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
     DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     DIRAC_VECTOR_PARTICLE_TEMPLATE,
+    FULL_THREE_VECTOR_TEMPLATE,
     MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_SCALAR_TEMPLATE,
@@ -304,6 +305,17 @@ def _substitute_three_vector(expression: str) -> str:
                 f"model::prepared::{prefix}_{component}",
             )
     return result
+
+
+_FULL_THREE_VECTOR_EXPRESSIONS = tuple(
+    "(l0*r0-l1*r1-l2*r2-l3*r3)"
+    f"*(p{component}-q{component})"
+    "+(l0*(p0+2*q0)-l1*(p1+2*q1)-l2*(p2+2*q2)-l3*(p3+2*q3))"
+    f"*r{component}"
+    "-(r0*(2*p0+q0)-r1*(2*p1+q1)-r2*(2*p2+q2)-r3*(2*p3+q3))"
+    f"*l{component}"
+    for component in range(4)
+)
 
 
 def _finalization_contracts(components: int) -> tuple[str, ...]:
@@ -1130,6 +1142,84 @@ def test_certifies_color_ordered_three_vector_with_momentum_operands() -> None:
     )
     assert result.constant_scale == 0.0 + 1.5j
     assert result.model_parameter_index is None
+
+
+def test_certifies_full_three_vector_with_factored_parameter_owner() -> None:
+    expressions = tuple(
+        _substitute_three_vector(f"7.07106781186547e-1\U0001d456*({expression})")
+        for expression in _FULL_THREE_VECTOR_EXPRESSIONS
+    )
+
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_three_vector_contracts(),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+        factored_output_parameter_index=84,
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert result is not None
+    assert result.runtime_template == FULL_THREE_VECTOR_TEMPLATE
+    assert result.contract_digest == (
+        "0df0f82d182823188d51b7269e56f3d9396d11b668bd327d529114673b4e9ca9"
+    )
+    assert (
+        result.contract_digest
+        == RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[FULL_THREE_VECTOR_TEMPLATE]
+    )
+    assert result.constant_scale == 0.0 + 0.707106781186547j
+    assert result.model_parameter_index == 84
+    assert result.parent_permutation == (0, 1)
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4604544271217802184,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": 84,
+    }
+
+
+def test_full_three_vector_rejects_color_ordered_and_perturbed_algebra() -> None:
+    dot_lr = "(l0*r0-l1*r1-l2*r2-l3*r3)"
+    dot_lq = "(l0*q0-l1*q1-l2*q2-l3*q3)"
+    dot_rp = "(r0*p0-r1*p1-r2*p2-r3*p3)"
+    color_ordered = tuple(
+        _substitute_three_vector(
+            f"{dot_lr}*(p{component}-q{component})"
+            f"+2*({dot_lq}*r{component}-{dot_rp}*l{component})"
+        )
+        for component in range(4)
+    )
+    color_result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=color_ordered,
+        input_contracts=_three_vector_contracts(),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+        allow_nontrivial_parent_permutation=True,
+    )
+    assert color_result is not None
+    assert color_result.runtime_template != FULL_THREE_VECTOR_TEMPLATE
+
+    perturbed = tuple(
+        _substitute_three_vector(expression)
+        for expression in (
+            _FULL_THREE_VECTOR_EXPRESSIONS[0].replace("2*q1", "3*q1"),
+            *_FULL_THREE_VECTOR_EXPRESSIONS[1:],
+        )
+    )
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=perturbed,
+            input_contracts=_three_vector_contracts(),
+            parent_component_counts=(4, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+            allow_nontrivial_parent_permutation=True,
+        )
+        is None
+    )
 
 
 def test_certifies_binary64_scaled_three_vector_without_tolerance() -> None:
