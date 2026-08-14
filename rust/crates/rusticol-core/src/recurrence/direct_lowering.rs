@@ -123,6 +123,18 @@ pub struct PreparedDirectChiralDiracVectorIntrinsic {
     right_scale: PreparedDirectIntrinsicScale,
 }
 
+/// Authenticated chiral couplings for one fermion-pair-to-vector contribution.
+///
+/// The built-in Dirac pair primitive is polymorphic over Dirac/Weyl parent
+/// representations.  A missing Weyl half is represented by an exact zero
+/// scale without a prepared-parameter owner; lowering authenticates which
+/// half is present from the two parent current states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedDirectChiralDiracPairVectorIntrinsic {
+    left_scale: PreparedDirectIntrinsicScale,
+    right_scale: PreparedDirectIntrinsicScale,
+}
+
 /// Authenticated runtime inputs for one massive Dirac propagator intrinsic.
 ///
 /// Unlike an ordinary intrinsic scale, the two prepared slots are semantic
@@ -319,6 +331,26 @@ impl PreparedDirectChiralDiracVectorIntrinsic {
     }
 }
 
+impl PreparedDirectChiralDiracPairVectorIntrinsic {
+    pub const fn new(
+        left_scale: PreparedDirectIntrinsicScale,
+        right_scale: PreparedDirectIntrinsicScale,
+    ) -> Self {
+        Self {
+            left_scale,
+            right_scale,
+        }
+    }
+
+    pub const fn left_scale(self) -> PreparedDirectIntrinsicScale {
+        self.left_scale
+    }
+
+    pub const fn right_scale(self) -> PreparedDirectIntrinsicScale {
+        self.right_scale
+    }
+}
+
 /// Execution-semantic metadata retained from one authenticated intrinsic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedDirectIntrinsicDescriptor {
@@ -327,6 +359,7 @@ pub struct PreparedDirectIntrinsicDescriptor {
     contract_digest: Option<SemanticDigest>,
     scale: Option<PreparedDirectIntrinsicScale>,
     chiral_dirac_vector: Option<PreparedDirectChiralDiracVectorIntrinsic>,
+    chiral_dirac_pair_vector: Option<PreparedDirectChiralDiracPairVectorIntrinsic>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
     massive_scalar_finalizer: Option<PreparedDirectMassiveScalarFinalizer>,
     massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
@@ -346,6 +379,7 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest,
             scale,
             chiral_dirac_vector: None,
+            chiral_dirac_pair_vector: None,
             massive_dirac_finalizer: None,
             massive_scalar_finalizer: None,
             massive_vector_finalizer: None,
@@ -365,6 +399,7 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest: Some(contract_digest),
             scale: None,
             chiral_dirac_vector: None,
+            chiral_dirac_pair_vector: None,
             massive_dirac_finalizer: Some(finalizer),
             massive_scalar_finalizer: None,
             massive_vector_finalizer: None,
@@ -384,6 +419,7 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest: Some(contract_digest),
             scale: None,
             chiral_dirac_vector: None,
+            chiral_dirac_pair_vector: None,
             massive_dirac_finalizer: None,
             massive_scalar_finalizer: Some(finalizer),
             massive_vector_finalizer: None,
@@ -403,6 +439,7 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest: Some(contract_digest),
             scale: None,
             chiral_dirac_vector: None,
+            chiral_dirac_pair_vector: None,
             massive_dirac_finalizer: None,
             massive_scalar_finalizer: None,
             massive_vector_finalizer: Some(finalizer),
@@ -425,6 +462,31 @@ impl PreparedDirectIntrinsicDescriptor {
             scale: None,
             chiral_dirac_vector: Some(PreparedDirectChiralDiracVectorIntrinsic::new(
                 orientation,
+                left_scale,
+                right_scale,
+            )),
+            chiral_dirac_pair_vector: None,
+            massive_dirac_finalizer: None,
+            massive_scalar_finalizer: None,
+            massive_vector_finalizer: None,
+            parent_permutation: [0, 1],
+        }
+    }
+
+    pub fn new_with_chiral_dirac_pair_vector(
+        key: PreparedDirectExecutorKey,
+        runtime_template: String,
+        contract_digest: SemanticDigest,
+        left_scale: PreparedDirectIntrinsicScale,
+        right_scale: PreparedDirectIntrinsicScale,
+    ) -> Self {
+        Self {
+            key,
+            runtime_template: runtime_template.into_boxed_str(),
+            contract_digest: Some(contract_digest),
+            scale: None,
+            chiral_dirac_vector: None,
+            chiral_dirac_pair_vector: Some(PreparedDirectChiralDiracPairVectorIntrinsic::new(
                 left_scale,
                 right_scale,
             )),
@@ -458,6 +520,12 @@ impl PreparedDirectIntrinsicDescriptor {
 
     pub const fn chiral_dirac_vector(&self) -> Option<PreparedDirectChiralDiracVectorIntrinsic> {
         self.chiral_dirac_vector
+    }
+
+    pub const fn chiral_dirac_pair_vector(
+        &self,
+    ) -> Option<PreparedDirectChiralDiracPairVectorIntrinsic> {
+        self.chiral_dirac_pair_vector
     }
 
     pub const fn massive_dirac_finalizer(&self) -> Option<PreparedDirectMassiveDiracFinalizer> {
@@ -624,6 +692,7 @@ impl PreparedDirectExecutorCatalog {
                     descriptor.contract_digest.is_none()
                         && descriptor.scale.is_none()
                         && descriptor.chiral_dirac_vector.is_none()
+                        && descriptor.chiral_dirac_pair_vector.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
                         && descriptor.massive_scalar_finalizer.is_none()
                         && descriptor.massive_vector_finalizer.is_none()
@@ -635,6 +704,7 @@ impl PreparedDirectExecutorCatalog {
                     descriptor.contract_digest.is_some()
                         && usize::from(descriptor.scale.is_some())
                             + usize::from(descriptor.chiral_dirac_vector.is_some())
+                            + usize::from(descriptor.chiral_dirac_pair_vector.is_some())
                             == 1
                         && descriptor.massive_dirac_finalizer.is_none()
                         && descriptor.massive_scalar_finalizer.is_none()
@@ -646,6 +716,7 @@ impl PreparedDirectExecutorCatalog {
                 } => {
                     descriptor.contract_digest.is_some()
                         && descriptor.chiral_dirac_vector.is_none()
+                        && descriptor.chiral_dirac_pair_vector.is_none()
                         && usize::from(descriptor.scale.is_some())
                             + usize::from(descriptor.massive_dirac_finalizer.is_some())
                             + usize::from(descriptor.massive_scalar_finalizer.is_some())
@@ -656,6 +727,7 @@ impl PreparedDirectExecutorCatalog {
                     descriptor.contract_digest.is_some()
                         && descriptor.scale.is_none()
                         && descriptor.chiral_dirac_vector.is_none()
+                        && descriptor.chiral_dirac_pair_vector.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
                         && descriptor.massive_scalar_finalizer.is_none()
                         && descriptor.massive_vector_finalizer.is_none()
@@ -706,6 +778,32 @@ impl PreparedDirectExecutorCatalog {
                 {
                     return Err(invalid(format!(
                         "prepared chiral Dirac-vector intrinsic for key {key:?} has invalid typed metadata"
+                    )));
+                }
+            }
+            if let Some(chiral) = descriptor.chiral_dirac_pair_vector {
+                let finite_scale = |scale: PreparedDirectIntrinsicScale| {
+                    let real = f64::from_bits(scale.constant_real_bits);
+                    let imaginary = f64::from_bits(scale.constant_imag_bits);
+                    real.is_finite() && imaginary.is_finite()
+                };
+                let nonzero_scale = |scale: PreparedDirectIntrinsicScale| {
+                    f64::from_bits(scale.constant_real_bits) != 0.0
+                        || f64::from_bits(scale.constant_imag_bits) != 0.0
+                };
+                if key.role() != DirectExecutorRole::Contribution
+                    || descriptor.runtime_template.as_ref()
+                        != "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1"
+                    || !finite_scale(chiral.left_scale)
+                    || !finite_scale(chiral.right_scale)
+                    || (!nonzero_scale(chiral.left_scale)
+                        && chiral.left_scale.prepared_parameter_slot.is_some())
+                    || (!nonzero_scale(chiral.right_scale)
+                        && chiral.right_scale.prepared_parameter_slot.is_some())
+                    || !(nonzero_scale(chiral.left_scale) || nonzero_scale(chiral.right_scale))
+                {
+                    return Err(invalid(format!(
+                        "prepared chiral Dirac-pair-vector intrinsic for key {key:?} has invalid typed metadata"
                     )));
                 }
             }
@@ -3754,6 +3852,77 @@ mod chiral_intrinsic_metadata_tests {
                     0,
                 )],
                 vec![wrong_template],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid typed metadata")
+        );
+    }
+
+    #[test]
+    fn chiral_dirac_pair_vector_metadata_is_typed_and_role_closed() {
+        let key = PreparedDirectExecutorKey::Evaluator {
+            role: DirectExecutorRole::Contribution,
+            evaluator_binding_id: 46,
+        };
+        let left =
+            PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), 2.0_f64.to_bits(), Some(10));
+        let absent = PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), 0.0_f64.to_bits(), None);
+        let descriptor = PreparedDirectIntrinsicDescriptor::new_with_chiral_dirac_pair_vector(
+            key,
+            "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1".to_owned(),
+            digest(24),
+            left,
+            absent,
+        );
+        let binding =
+            PreparedDirectExecutorBinding::evaluator(DirectExecutorRole::Contribution, 46, 0);
+        let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![binding],
+            vec![descriptor],
+        )
+        .unwrap();
+        let retained = catalog
+            .intrinsic_descriptor(DirectExecutorRole::Contribution, 46)
+            .unwrap()
+            .chiral_dirac_pair_vector()
+            .unwrap();
+        assert_eq!(retained.left_scale(), left);
+        assert_eq!(retained.right_scale(), absent);
+
+        let both_zero = PreparedDirectIntrinsicDescriptor::new_with_chiral_dirac_pair_vector(
+            key,
+            "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1".to_owned(),
+            digest(24),
+            absent,
+            absent,
+        );
+        assert!(
+            PreparedDirectExecutorCatalog::new_with_intrinsics(
+                digest(3),
+                vec![binding],
+                vec![both_zero],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid typed metadata")
+        );
+
+        let owned_zero =
+            PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), 0.0_f64.to_bits(), Some(11));
+        let invalid_owner = PreparedDirectIntrinsicDescriptor::new_with_chiral_dirac_pair_vector(
+            key,
+            "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1".to_owned(),
+            digest(24),
+            left,
+            owned_zero,
+        );
+        assert!(
+            PreparedDirectExecutorCatalog::new_with_intrinsics(
+                digest(3),
+                vec![binding],
+                vec![invalid_owner],
             )
             .unwrap_err()
             .to_string()

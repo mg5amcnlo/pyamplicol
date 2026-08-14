@@ -19,14 +19,16 @@ use crate::spinor::{
     SpinorDagBuilder, SpinorDagPayloadV3, SpinorKinematicScalar, SpinorPreparedParameterBinding,
     SpinorSourceInputBinding, SpinorSourceInputKind, bispinor_dot_expression, bispinor_scale,
     bispinor_sum, bivector_scale, bivector_sum, bivector_vector_expression,
-    bivector_wedge_expression, dirac_bilinear, dirac_half_scale, dirac_propagator_numerator,
-    dirac_scalar_expression, dirac_scale, dirac_sum, dirac_vector_expression,
-    external_polarization_expression, external_polarization_expression_with_reference,
-    linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
-    massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
-    massive_vector_polarization_expression, massive_vector_propagator_expression,
-    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
-    signed_momentum_expression, three_vector_bispinor_expression, weyl_pair_vector_expression,
+    bivector_wedge_expression, dirac_bilinear, dirac_half_scale, dirac_pair_vector_expression,
+    dirac_propagator_numerator, dirac_scalar_expression, dirac_scale, dirac_sum,
+    dirac_vector_expression, dirac_weyl_pair_vector_expression, external_polarization_expression,
+    external_polarization_expression_with_reference, linear_weyl_scale, linear_weyl_sum,
+    massive_dirac_propagator_denominator, massive_dirac_source_expression,
+    massive_vector_longitudinal_polarization_expression, massive_vector_polarization_expression,
+    massive_vector_propagator_expression, quark_vector_weyl_bilinear,
+    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
+    three_vector_bispinor_expression, weyl_dirac_pair_vector_expression,
+    weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -105,6 +107,10 @@ const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT: &str =
     "ff5d75dc8549684287b9eb9c801ead3e60d031ea841754e59c3ee3c841050975";
+const CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1";
+const CHIRAL_DIRAC_PAIR_VECTOR_CONTRACT: &str =
+    "777f92d0a97800be35bea7c2f8d9915bea83700973a6efbf7361bb647dc2faa0";
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const DIRAC_SCALAR_CONTRACT: &str =
     "d9c7dbc51561cdc2b2a7daf3d97ea24283d6c690ae5da2d775e86c80a3b4886f";
@@ -225,6 +231,23 @@ enum QcdCurrent {
     },
 }
 
+enum QcdChiralDiracPair<'a> {
+    DiracDirac {
+        particle: &'a DiracExpression,
+        antiparticle: &'a DiracExpression,
+    },
+    DiracWeyl {
+        particle: &'a DiracExpression,
+        antiparticle_chirality: SpinorChirality,
+        antiparticle: &'a LinearWeylExpression,
+    },
+    WeylDirac {
+        particle_chirality: SpinorChirality,
+        particle: &'a LinearWeylExpression,
+        antiparticle: &'a DiracExpression,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdContributionKind {
     ThreeVector,
@@ -235,6 +258,7 @@ enum QcdContributionKind {
         orientation: CurrentOrientation,
     },
     WeylPairVector(SpinorChirality),
+    ChiralDiracPairVector,
     DiracVector(CurrentOrientation),
     ChiralDiracVector(CurrentOrientation),
     ComponentwiseFourScalar,
@@ -1232,6 +1256,7 @@ fn lower_qcd_source(
     if descriptor.contract_digest().is_none()
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -1463,6 +1488,13 @@ fn qcd_parameter_slots(
                     }
                 }
             }
+            if let Some(chiral) = descriptor.chiral_dirac_pair_vector() {
+                for scale in [chiral.left_scale(), chiral.right_scale()] {
+                    if let Some(slot) = scale.prepared_parameter_slot() {
+                        slots.insert(slot);
+                    }
+                }
+            }
         }
     }
     for current in program
@@ -1556,6 +1588,7 @@ fn qcd_contribution_kind(
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
         CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_PARTICLE_CONTRACT,
         CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
+        CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE => CHIRAL_DIRAC_PAIR_VECTOR_CONTRACT,
         DIRAC_SCALAR_TEMPLATE => DIRAC_SCALAR_CONTRACT,
         VECTOR_PAIR_SCALAR_TEMPLATE => VECTOR_PAIR_SCALAR_CONTRACT,
         other => {
@@ -1564,21 +1597,32 @@ fn qcd_contribution_kind(
             )));
         }
     };
-    let chiral = matches!(
+    let chiral_dirac_vector = matches!(
         descriptor.runtime_template(),
         CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE | CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
     );
+    let chiral_dirac_pair_vector =
+        descriptor.runtime_template() == CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE;
+    let metadata_matches = if chiral_dirac_vector {
+        descriptor.scale().is_none()
+            && descriptor.chiral_dirac_vector().is_some()
+            && descriptor.chiral_dirac_pair_vector().is_none()
+    } else if chiral_dirac_pair_vector {
+        descriptor.scale().is_none()
+            && descriptor.chiral_dirac_vector().is_none()
+            && descriptor.chiral_dirac_pair_vector().is_some()
+    } else {
+        descriptor.scale().is_some()
+            && descriptor.chiral_dirac_vector().is_none()
+            && descriptor.chiral_dirac_pair_vector().is_none()
+    };
     if descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
         || descriptor
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != expected_digest)
-        || if chiral {
-            descriptor.scale().is_some() || descriptor.chiral_dirac_vector().is_none()
-        } else {
-            descriptor.scale().is_none() || descriptor.chiral_dirac_vector().is_some()
-        }
+        || !metadata_matches
     {
         return Err(invalid(format!(
             "QCD contribution descriptor {:?} has the wrong authenticated contract",
@@ -1598,6 +1642,7 @@ fn qcd_contribution_kind(
         WEYL_PAIR_VECTOR_B_TEMPLATE => {
             QcdContributionKind::WeylPairVector(SpinorChirality::Positive)
         }
+        CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE => QcdContributionKind::ChiralDiracPairVector,
         DIRAC_VECTOR_PARTICLE_TEMPLATE => {
             QcdContributionKind::DiracVector(CurrentOrientation::Particle)
         }
@@ -1665,6 +1710,23 @@ fn intrinsic_scale_value_node(
     } else {
         Ok(constant)
     }
+}
+
+fn intrinsic_scale_is_zero(scale: super::PreparedDirectIntrinsicScale) -> bool {
+    f64::from_bits(scale.constant_real_bits()) == 0.0
+        && f64::from_bits(scale.constant_imag_bits()) == 0.0
+}
+
+fn require_chiral_dirac_pair_mixed_scale(
+    active: super::PreparedDirectIntrinsicScale,
+    inactive: super::PreparedDirectIntrinsicScale,
+) -> RusticolResult<super::PreparedDirectIntrinsicScale> {
+    if intrinsic_scale_is_zero(active) || !intrinsic_scale_is_zero(inactive) {
+        return Err(invalid(
+            "a mixed Dirac/Weyl pair-vector primitive has the wrong active chiral scale",
+        ));
+    }
+    Ok(active)
 }
 
 fn oriented_chiral_half_scales(
@@ -1822,6 +1884,7 @@ fn qcd_massive_finalizer_contract(
             .is_none_or(|digest| digest.to_string() != contract_digest)
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
         || typed.orientation() != orientation
@@ -1929,6 +1992,7 @@ fn qcd_massive_vector_finalizer_contract(
             .is_none_or(|digest| digest.to_string() != MASSIVE_VECTOR_UNITARY_CONTRACT)
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
         || typed.constant_real_bits() != 0.0_f64.to_bits()
@@ -2034,6 +2098,7 @@ fn qcd_massive_scalar_finalizer_contract(
             .is_none_or(|digest| digest.to_string() != MASSIVE_SCALAR_CONTRACT)
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || typed.constant_real_bits() != 0.0_f64.to_bits()
@@ -2103,6 +2168,7 @@ fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> Rustico
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -2205,6 +2271,7 @@ fn qcd_finalization_scale(
                     || scale.constant_imag_bits() != 0.0_f64.to_bits()
             }))
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -2601,10 +2668,11 @@ fn lower_qcd_current(
                 {
                     continue;
                 }
-                let scale = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                 let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let (numerator, scale) = match kind {
                     QcdContributionKind::ThreeVector => {
+                        let scale =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         let left = required_qcd_vector(current_values, parents[0])?;
                         let right = required_qcd_vector(current_values, parents[1])?;
                         let (left_momentum, _) = qcd_current_momentum(
@@ -2628,6 +2696,8 @@ fn lower_qcd_current(
                         (numerator, builder.product([sqrt_two, scale, exact])?)
                     }
                     QcdContributionKind::AntisymmetricTensorVector => {
+                        let scale =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         let tensor = required_qcd_bivector(current_values, parents[0])?;
                         let vector = required_qcd_vector(current_values, parents[1])?;
                         let numerator = bivector_vector_expression(builder, tensor, vector)?;
@@ -2641,6 +2711,8 @@ fn lower_qcd_current(
                         (numerator, builder.product([two, scale, exact])?)
                     }
                     QcdContributionKind::WeylPairVector(particle_chirality) => {
+                        let scale =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         let (particle, antiparticle) =
                             required_qcd_weyl_pair(current_values, parents, particle_chirality)?;
                         let numerator = weyl_pair_vector_expression(
@@ -2657,7 +2729,99 @@ fn lower_qcd_current(
                         let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                         (numerator, builder.product([sqrt_two, scale, exact])?)
                     }
+                    QcdContributionKind::ChiralDiracPairVector => {
+                        let pair = required_qcd_chiral_dirac_pair(current_values, parents)?;
+                        let chiral = descriptor.chiral_dirac_pair_vector().ok_or_else(|| {
+                            invalid("chiral Dirac-pair-vector descriptor has no typed scales")
+                        })?;
+                        let left = chiral.left_scale();
+                        let right = chiral.right_scale();
+                        let numerator = match pair {
+                            QcdChiralDiracPair::DiracDirac {
+                                particle,
+                                antiparticle,
+                            } => {
+                                let left = intrinsic_scale_value_node(
+                                    left,
+                                    dense_parameter_slots,
+                                    builder,
+                                )?;
+                                let right = intrinsic_scale_value_node(
+                                    right,
+                                    dense_parameter_slots,
+                                    builder,
+                                )?;
+                                dirac_pair_vector_expression(
+                                    builder,
+                                    particle,
+                                    antiparticle,
+                                    left,
+                                    right,
+                                )?
+                            }
+                            QcdChiralDiracPair::DiracWeyl {
+                                particle,
+                                antiparticle_chirality,
+                                antiparticle,
+                            } => {
+                                let active = match antiparticle_chirality {
+                                    SpinorChirality::Negative => {
+                                        require_chiral_dirac_pair_mixed_scale(left, right)?
+                                    }
+                                    SpinorChirality::Positive => {
+                                        require_chiral_dirac_pair_mixed_scale(right, left)?
+                                    }
+                                };
+                                let active = intrinsic_scale_value_node(
+                                    active,
+                                    dense_parameter_slots,
+                                    builder,
+                                )?;
+                                dirac_weyl_pair_vector_expression(
+                                    builder,
+                                    particle,
+                                    antiparticle_chirality,
+                                    antiparticle,
+                                    active,
+                                )?
+                            }
+                            QcdChiralDiracPair::WeylDirac {
+                                particle_chirality,
+                                particle,
+                                antiparticle,
+                            } => {
+                                let active = match particle_chirality {
+                                    SpinorChirality::Positive => {
+                                        require_chiral_dirac_pair_mixed_scale(left, right)?
+                                    }
+                                    SpinorChirality::Negative => {
+                                        require_chiral_dirac_pair_mixed_scale(right, left)?
+                                    }
+                                };
+                                let active = intrinsic_scale_value_node(
+                                    active,
+                                    dense_parameter_slots,
+                                    builder,
+                                )?;
+                                weyl_dirac_pair_vector_expression(
+                                    builder,
+                                    particle_chirality,
+                                    particle,
+                                    antiparticle,
+                                    active,
+                                )?
+                            }
+                        };
+                        // The A/B component witnesses map to minus two sparse
+                        // dyads. Combining that conversion with the DAG's
+                        // V/sqrt(2) storage convention contributes one common
+                        // sqrt(2); the typed scales already own +i/sqrt(2).
+                        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        (numerator, builder.product([sqrt_two, exact])?)
+                    }
                     QcdContributionKind::ComponentwiseFourScalar => {
+                        let scale =
+                            intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                         let vector = required_qcd_vector(current_values, parents[0])?;
                         let scalar = required_qcd_scalar(current_values, parents[1])?;
                         // The authenticated four-by-scalar tensor is the
@@ -3136,6 +3300,68 @@ fn required_qcd_weyl_pair(
     Ok((particle, antiparticle))
 }
 
+fn required_qcd_chiral_dirac_pair<'a>(
+    values: &'a [Option<QcdCurrent>],
+    parents: [u32; 2],
+) -> RusticolResult<QcdChiralDiracPair<'a>> {
+    let particle = values
+        .get(parents[0] as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| invalid("chiral Dirac-pair particle parent is not lowered"))?;
+    let antiparticle = values
+        .get(parents[1] as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| invalid("chiral Dirac-pair antiparticle parent is not lowered"))?;
+    match (particle, antiparticle) {
+        (
+            QcdCurrent::Dirac {
+                orientation: CurrentOrientation::Particle,
+                value: particle,
+            },
+            QcdCurrent::Dirac {
+                orientation: CurrentOrientation::Antiparticle,
+                value: antiparticle,
+            },
+        ) => Ok(QcdChiralDiracPair::DiracDirac {
+            particle,
+            antiparticle,
+        }),
+        (
+            QcdCurrent::Dirac {
+                orientation: CurrentOrientation::Particle,
+                value: particle,
+            },
+            QcdCurrent::Weyl {
+                chirality: antiparticle_chirality,
+                orientation: CurrentOrientation::Antiparticle,
+                value: Some(antiparticle),
+            },
+        ) => Ok(QcdChiralDiracPair::DiracWeyl {
+            particle,
+            antiparticle_chirality: *antiparticle_chirality,
+            antiparticle,
+        }),
+        (
+            QcdCurrent::Weyl {
+                chirality: particle_chirality,
+                orientation: CurrentOrientation::Particle,
+                value: Some(particle),
+            },
+            QcdCurrent::Dirac {
+                orientation: CurrentOrientation::Antiparticle,
+                value: antiparticle,
+            },
+        ) => Ok(QcdChiralDiracPair::WeylDirac {
+            particle_chirality: *particle_chirality,
+            particle,
+            antiparticle,
+        }),
+        _ => Err(invalid(
+            "chiral Dirac-pair vector primitive does not have a certified particle/antiparticle Dirac/Weyl parent shape",
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_qcd_closures(
     program: &RecurrenceProgram,
@@ -3211,6 +3437,7 @@ fn lower_qcd_closures(
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
             || descriptor.chiral_dirac_vector().is_some()
+            || descriptor.chiral_dirac_pair_vector().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
             || descriptor.massive_vector_finalizer().is_some()
             || descriptor.massive_scalar_finalizer().is_some()
@@ -3940,6 +4167,7 @@ fn validate_identity_finalizations(
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -4010,6 +4238,7 @@ fn lower_scalar_source(
         || descriptor.contract_digest().is_none()
         || descriptor.scale().is_some()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -4173,6 +4402,7 @@ fn lower_scalar_closures(
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
             || descriptor.chiral_dirac_vector().is_some()
+            || descriptor.chiral_dirac_pair_vector().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
             || descriptor.massive_vector_finalizer().is_some()
             || descriptor.massive_scalar_finalizer().is_some()
@@ -4233,8 +4463,13 @@ fn validate_transition_parameter_owner(
         "transition coupling parameters",
     )?;
     let output_factor_source = OutputFactorSource::try_from(transition.output_factor_source)?;
-    if let Some(chiral) = descriptor.chiral_dirac_vector() {
-        let expected_slots = [chiral.left_scale(), chiral.right_scale()]
+    let chiral_dirac_pair = descriptor.chiral_dirac_pair_vector();
+    let chiral_scales = descriptor
+        .chiral_dirac_vector()
+        .map(|chiral| [chiral.left_scale(), chiral.right_scale()])
+        .or_else(|| chiral_dirac_pair.map(|chiral| [chiral.left_scale(), chiral.right_scale()]));
+    if let Some(chiral_scales) = chiral_scales {
+        let expected_slots = chiral_scales
             .into_iter()
             .filter_map(|scale| scale.prepared_parameter_slot())
             .collect::<BTreeSet<_>>();
@@ -4274,8 +4509,17 @@ fn validate_transition_parameter_owner(
                 }
             }
         }
+        let pair_output_slot = chiral_dirac_pair.and_then(|chiral| match output_factor_source {
+            OutputFactorSource::CouplingReal => chiral.left_scale().prepared_parameter_slot(),
+            OutputFactorSource::CouplingImag => chiral.right_scale().prepared_parameter_slot(),
+            OutputFactorSource::None => None,
+        });
+        let pair_output_owner_matches = chiral_dirac_pair.is_none()
+            || output_factor_source == OutputFactorSource::None
+            || pair_output_slot.is_some_and(|slot| actual_slots == BTreeSet::from([slot]));
         if actual_slots != expected_slots
             || (output_factor_source != OutputFactorSource::None && parameters.len() != 1)
+            || !pair_output_owner_matches
         {
             return Err(invalid(format!(
                 "transition {} coupling ownership disagrees with its authenticated chiral scales",
@@ -4449,6 +4693,7 @@ fn require_scalar_product_descriptor(
             .is_none_or(|digest| digest.to_string() != SCALAR_PRODUCT_CONTRACT)
         || descriptor.scale().is_none()
         || descriptor.chiral_dirac_vector().is_some()
+        || descriptor.chiral_dirac_pair_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
         || descriptor.massive_scalar_finalizer().is_some()
@@ -5203,6 +5448,95 @@ mod tests {
             required_qcd_weyl_pair(&raw_antiparticle_first, [0, 1], SpinorChirality::Negative,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn chiral_dirac_pair_vector_requires_canonical_oriented_parent_shapes() {
+        let builder = SpinorDagBuilder::new(4).unwrap();
+        let dirac_particle = QcdCurrent::Dirac {
+            orientation: CurrentOrientation::Particle,
+            value: DiracExpression::default(),
+        };
+        let dirac_antiparticle = QcdCurrent::Dirac {
+            orientation: CurrentOrientation::Antiparticle,
+            value: DiracExpression::default(),
+        };
+        let weyl_particle = QcdCurrent::Weyl {
+            chirality: SpinorChirality::Positive,
+            orientation: CurrentOrientation::Particle,
+            value: Some(LinearWeylExpression::atom(0, builder.one())),
+        };
+        let weyl_antiparticle = QcdCurrent::Weyl {
+            chirality: SpinorChirality::Negative,
+            orientation: CurrentOrientation::Antiparticle,
+            value: Some(LinearWeylExpression::atom(1, builder.one())),
+        };
+
+        let full = vec![
+            Some(dirac_particle.clone()),
+            Some(dirac_antiparticle.clone()),
+        ];
+        assert!(matches!(
+            required_qcd_chiral_dirac_pair(&full, [0, 1]).unwrap(),
+            QcdChiralDiracPair::DiracDirac { .. }
+        ));
+
+        let dirac_weyl = vec![
+            Some(dirac_particle.clone()),
+            Some(weyl_antiparticle.clone()),
+        ];
+        assert!(matches!(
+            required_qcd_chiral_dirac_pair(&dirac_weyl, [0, 1]).unwrap(),
+            QcdChiralDiracPair::DiracWeyl {
+                antiparticle_chirality: SpinorChirality::Negative,
+                ..
+            }
+        ));
+
+        let weyl_dirac = vec![
+            Some(weyl_particle.clone()),
+            Some(dirac_antiparticle.clone()),
+        ];
+        assert!(matches!(
+            required_qcd_chiral_dirac_pair(&weyl_dirac, [0, 1]).unwrap(),
+            QcdChiralDiracPair::WeylDirac {
+                particle_chirality: SpinorChirality::Positive,
+                ..
+            }
+        ));
+
+        let raw_antiparticle_first = vec![Some(dirac_antiparticle), Some(dirac_particle)];
+        assert!(required_qcd_chiral_dirac_pair(&raw_antiparticle_first, [1, 0]).is_ok());
+        assert!(required_qcd_chiral_dirac_pair(&raw_antiparticle_first, [0, 1]).is_err());
+
+        let pure_weyl = vec![Some(weyl_particle), Some(weyl_antiparticle)];
+        assert!(required_qcd_chiral_dirac_pair(&pure_weyl, [0, 1]).is_err());
+    }
+
+    #[test]
+    fn chiral_dirac_pair_scale_shape_is_closed() {
+        let zero = crate::recurrence::PreparedDirectIntrinsicScale::new(
+            0.0_f64.to_bits(),
+            0.0_f64.to_bits(),
+            None,
+        );
+        let left = crate::recurrence::PreparedDirectIntrinsicScale::new(
+            0.0_f64.to_bits(),
+            1.0_f64.to_bits(),
+            Some(7),
+        );
+        let right = crate::recurrence::PreparedDirectIntrinsicScale::new(
+            0.0_f64.to_bits(),
+            2.0_f64.to_bits(),
+            Some(8),
+        );
+
+        assert_eq!(
+            require_chiral_dirac_pair_mixed_scale(left, zero).unwrap(),
+            left
+        );
+        assert!(require_chiral_dirac_pair_mixed_scale(zero, right).is_err());
+        assert!(require_chiral_dirac_pair_mixed_scale(left, right).is_err());
     }
 
     #[test]

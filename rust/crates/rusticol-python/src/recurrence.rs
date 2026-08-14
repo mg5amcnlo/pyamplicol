@@ -74,6 +74,8 @@ const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
+const CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1";
 const WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1";
 const WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
@@ -92,6 +94,7 @@ struct ParsedGraphIntrinsic {
         PreparedDirectIntrinsicScale,
         PreparedDirectIntrinsicScale,
     )>,
+    chiral_dirac_pair_vector: Option<(PreparedDirectIntrinsicScale, PreparedDirectIntrinsicScale)>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
     massive_scalar_finalizer: Option<PreparedDirectMassiveScalarFinalizer>,
     massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
@@ -2787,6 +2790,7 @@ fn parse_direct_template_catalog(
         let (
             intrinsic_scale,
             chiral_dirac_vector,
+            chiral_dirac_pair_vector,
             massive_dirac_finalizer,
             massive_scalar_finalizer,
             massive_vector_finalizer,
@@ -2813,11 +2817,16 @@ fn parse_direct_template_catalog(
                     "{context} non-scalar intrinsic carries scalar projections"
                 )));
             }
-            (None, None, None, None, None)
+            (None, None, None, None, None, None)
         };
         if payload_kind == "rusticol-intrinsic" && chiral_dirac_vector.is_some() {
             return Err(RusticolError::compatibility(format!(
                 "{context} chiral Dirac-vector algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
+            )));
+        }
+        if payload_kind == "rusticol-intrinsic" && chiral_dirac_pair_vector.is_some() {
+            return Err(RusticolError::compatibility(format!(
+                "{context} chiral Dirac-pair-vector algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
             )));
         }
         if payload_kind == "rusticol-intrinsic" && massive_dirac_finalizer.is_some() {
@@ -2944,6 +2953,14 @@ fn parse_direct_template_catalog(
                             graph.runtime_template,
                             graph.contract_digest,
                             orientation,
+                            left_scale,
+                            right_scale,
+                        )
+                    } else if let Some((left_scale, right_scale)) = graph.chiral_dirac_pair_vector {
+                        PreparedDirectIntrinsicDescriptor::new_with_chiral_dirac_pair_vector(
+                            key,
+                            graph.runtime_template,
+                            graph.contract_digest,
                             left_scale,
                             right_scale,
                         )
@@ -3166,6 +3183,7 @@ fn parse_intrinsic_scalar_projection(
         PreparedDirectIntrinsicScale,
         PreparedDirectIntrinsicScale,
     )>,
+    Option<(PreparedDirectIntrinsicScale, PreparedDirectIntrinsicScale)>,
     Option<PreparedDirectMassiveDiracFinalizer>,
     Option<PreparedDirectMassiveScalarFinalizer>,
     Option<PreparedDirectMassiveVectorFinalizer>,
@@ -3174,6 +3192,7 @@ fn parse_intrinsic_scalar_projection(
     match json_string(projection, "kind", &format!("{context} kind"))? {
         "intrinsic-scale-v1" => Ok((
             Some(parse_intrinsic_scale_projection(value, context)?),
+            None,
             None,
             None,
             None,
@@ -3203,6 +3222,26 @@ fn parse_intrinsic_scalar_projection(
                 None,
                 None,
                 None,
+                None,
+            ))
+        }
+        "chiral-dirac-pair-to-vector-scales-v1" if role == DirectExecutorRole::Contribution => {
+            require_json_fields(projection, &["kind", "left_scale", "right_scale"], context)?;
+            let left_scale = parse_intrinsic_scale_projection(
+                json_field(projection, "left_scale", context)?,
+                &format!("{context} left scale"),
+            )?;
+            let right_scale = parse_intrinsic_scale_projection(
+                json_field(projection, "right_scale", context)?,
+                &format!("{context} right scale"),
+            )?;
+            Ok((
+                None,
+                None,
+                Some((left_scale, right_scale)),
+                None,
+                None,
+                None,
             ))
         }
         "massive-dirac-propagator-v1" if role == DirectExecutorRole::Finalization => {
@@ -3223,6 +3262,7 @@ fn parse_intrinsic_scalar_projection(
                 context,
             )?;
             Ok((
+                None,
                 None,
                 None,
                 Some(PreparedDirectMassiveDiracFinalizer::new(
@@ -3252,6 +3292,7 @@ fn parse_intrinsic_scalar_projection(
                 None,
                 None,
                 None,
+                None,
                 Some(PreparedDirectMassiveScalarFinalizer::new(
                     json_u64(projection, "constant_real_bits", context)?,
                     json_u64(projection, "constant_imag_bits", context)?,
@@ -3274,6 +3315,7 @@ fn parse_intrinsic_scalar_projection(
                 context,
             )?;
             Ok((
+                None,
                 None,
                 None,
                 None,
@@ -3356,6 +3398,7 @@ fn parse_graph_intrinsic(
     let (
         scale,
         chiral_dirac_vector,
+        chiral_dirac_pair_vector,
         massive_dirac_finalizer,
         massive_scalar_finalizer,
         massive_vector_finalizer,
@@ -3439,6 +3482,28 @@ fn parse_graph_intrinsic(
             )));
         }
     }
+    if let Some((left_scale, right_scale)) = chiral_dirac_pair_vector {
+        let finite_scale = |scale: PreparedDirectIntrinsicScale| {
+            let real = f64::from_bits(scale.constant_real_bits());
+            let imaginary = f64::from_bits(scale.constant_imag_bits());
+            real.is_finite() && imaginary.is_finite()
+        };
+        let nonzero_scale = |scale: PreparedDirectIntrinsicScale| {
+            f64::from_bits(scale.constant_real_bits()) != 0.0
+                || f64::from_bits(scale.constant_imag_bits()) != 0.0
+        };
+        if runtime_template != CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE
+            || !finite_scale(left_scale)
+            || !finite_scale(right_scale)
+            || (!nonzero_scale(left_scale) && left_scale.prepared_parameter_slot().is_some())
+            || (!nonzero_scale(right_scale) && right_scale.prepared_parameter_slot().is_some())
+            || !(nonzero_scale(left_scale) || nonzero_scale(right_scale))
+        {
+            return Err(invalid(format!(
+                "{context} chiral Dirac-pair-vector projection disagrees with its runtime primitive"
+            )));
+        }
+    }
     if let Some(finalizer) = massive_vector_finalizer {
         if runtime_template != MASSIVE_VECTOR_UNITARY_TEMPLATE
             || (
@@ -3474,6 +3539,7 @@ fn parse_graph_intrinsic(
         )?,
         scale,
         chiral_dirac_vector,
+        chiral_dirac_pair_vector,
         massive_dirac_finalizer,
         massive_scalar_finalizer,
         massive_vector_finalizer,
@@ -6607,6 +6673,91 @@ mod direct_binding_tests {
                 &pure_chiral,
                 DirectExecutorRole::Contribution,
                 "test pure-chiral Dirac-vector graph intrinsic",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn chiral_dirac_pair_vector_graph_intrinsic_parser_is_typed_and_closed() {
+        let graph = json!({
+            "contract_digest": digest(12),
+            "contribution_parent_permutation": [1, 0],
+            "runtime_template": CHIRAL_DIRAC_PAIR_VECTOR_TEMPLATE,
+            "scalar_projection": {
+                "kind": "chiral-dirac-pair-to-vector-scales-v1",
+                "left_scale": {
+                    "constant_imag_bits": 2.0_f64.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": 11,
+                },
+                "right_scale": {
+                    "constant_imag_bits": 0.0_f64.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": null,
+                },
+            },
+        });
+        let parsed = parse_graph_intrinsic(
+            &graph,
+            DirectExecutorRole::Contribution,
+            "test chiral Dirac-pair-vector graph intrinsic",
+        )
+        .unwrap();
+        let (left_scale, right_scale) = parsed.chiral_dirac_pair_vector.unwrap();
+        assert_eq!(left_scale.constant_imag_bits(), 2.0_f64.to_bits());
+        assert_eq!(left_scale.prepared_parameter_slot(), Some(11));
+        assert_eq!(right_scale.constant_real_bits(), 0.0_f64.to_bits());
+        assert_eq!(right_scale.prepared_parameter_slot(), None);
+        assert_eq!(parsed.parent_permutation, [1, 0]);
+
+        let mut wrong_template = graph.clone();
+        wrong_template["runtime_template"] = json!(CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE);
+        assert!(
+            parse_graph_intrinsic(
+                &wrong_template,
+                DirectExecutorRole::Contribution,
+                "test chiral Dirac-pair-vector graph intrinsic",
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disagrees with its runtime primitive")
+        );
+
+        let mut open_projection = graph.clone();
+        open_projection["scalar_projection"]["orientation"] = json!("particle");
+        assert!(
+            parse_graph_intrinsic(
+                &open_projection,
+                DirectExecutorRole::Contribution,
+                "test chiral Dirac-pair-vector graph intrinsic",
+            )
+            .is_err()
+        );
+
+        let mut both_zero = graph.clone();
+        both_zero["scalar_projection"]["left_scale"]["constant_imag_bits"] =
+            json!(0.0_f64.to_bits());
+        both_zero["scalar_projection"]["left_scale"]["parameter_index"] = JsonValue::Null;
+        assert!(
+            parse_graph_intrinsic(
+                &both_zero,
+                DirectExecutorRole::Contribution,
+                "test chiral Dirac-pair-vector graph intrinsic",
+            )
+            .is_err()
+        );
+
+        let mut owned_zero = graph;
+        owned_zero["scalar_projection"]["right_scale"]["parameter_index"] = json!(12);
+        assert!(
+            parse_graph_intrinsic(
+                &owned_zero,
+                DirectExecutorRole::Contribution,
+                "test chiral Dirac-pair-vector graph intrinsic",
             )
             .is_err()
         );

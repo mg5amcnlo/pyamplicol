@@ -2357,6 +2357,89 @@ pub(crate) fn weyl_pair_vector_expression(
     bispinor_sum(builder, terms)
 }
 
+/// Lower the authenticated chiral Dirac particle/antiparticle bilinear.
+///
+/// The built-in component primitive's left projection is the A witness on
+/// the particle's lower half and the antiparticle's upper half. Its right
+/// projection is the B witness on the particle's upper half and the
+/// antiparticle's lower half. The caller owns the common sparse-vector
+/// normalization but supplies both independently authenticated chiral scales.
+pub(crate) fn dirac_pair_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    particle: &DiracExpression,
+    antiparticle: &DiracExpression,
+    left_scale: SpinorNodeId,
+    right_scale: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let left = weyl_pair_vector_expression(
+        builder,
+        SpinorChirality::Negative,
+        &particle.dotted,
+        &antiparticle.undotted,
+    )?;
+    let left = bispinor_scale(builder, left_scale, &left)?;
+    let right = weyl_pair_vector_expression(
+        builder,
+        SpinorChirality::Positive,
+        &particle.undotted,
+        &antiparticle.dotted,
+    )?;
+    let right = bispinor_scale(builder, right_scale, &right)?;
+    bispinor_sum(builder, [left, right])
+}
+
+/// Lower a Dirac particle and Weyl antiparticle through the one chiral half
+/// present in the Weyl current. `scale` is the authenticated active scale.
+pub(crate) fn dirac_weyl_pair_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    particle: &DiracExpression,
+    antiparticle_chirality: SpinorChirality,
+    antiparticle: &LinearWeylExpression,
+    scale: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let expression = match antiparticle_chirality {
+        SpinorChirality::Negative => weyl_pair_vector_expression(
+            builder,
+            SpinorChirality::Negative,
+            &particle.dotted,
+            antiparticle,
+        )?,
+        SpinorChirality::Positive => weyl_pair_vector_expression(
+            builder,
+            SpinorChirality::Positive,
+            &particle.undotted,
+            antiparticle,
+        )?,
+    };
+    bispinor_scale(builder, scale, &expression)
+}
+
+/// Lower a Weyl particle and Dirac antiparticle through the one chiral half
+/// present in the Weyl current. `scale` is the authenticated active scale.
+pub(crate) fn weyl_dirac_pair_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    particle_chirality: SpinorChirality,
+    particle: &LinearWeylExpression,
+    antiparticle: &DiracExpression,
+    scale: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let expression = match particle_chirality {
+        SpinorChirality::Positive => weyl_pair_vector_expression(
+            builder,
+            SpinorChirality::Negative,
+            particle,
+            &antiparticle.undotted,
+        )?,
+        SpinorChirality::Negative => weyl_pair_vector_expression(
+            builder,
+            SpinorChirality::Positive,
+            particle,
+            &antiparticle.dotted,
+        )?,
+    };
+    bispinor_scale(builder, scale, &expression)
+}
+
 fn linear_weyl_bracket(
     builder: &mut SpinorDagBuilder,
     kind: SpinorBracketKind,
@@ -4832,6 +4915,123 @@ mod tests {
             )
             .unwrap(),
             BispinorExpression::dyad(1, 0, coefficient),
+        );
+    }
+
+    #[test]
+    fn chiral_dirac_pair_vector_sparse_witness_selects_authenticated_halves() {
+        let mut builder = SpinorDagBuilder::new(4).unwrap();
+        let one = builder.one();
+        let left_scale = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(2, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let right_scale = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(3, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let negative_left = builder.negate(left_scale).unwrap();
+        let negative_right = builder.negate(right_scale).unwrap();
+        let particle = DiracExpression {
+            undotted: LinearWeylExpression::atom(0, one),
+            dotted: LinearWeylExpression::atom(1, one),
+        };
+        let antiparticle = DiracExpression {
+            undotted: LinearWeylExpression::atom(2, one),
+            dotted: LinearWeylExpression::atom(3, one),
+        };
+
+        assert_eq!(
+            dirac_pair_vector_expression(
+                &mut builder,
+                &particle,
+                &antiparticle,
+                left_scale,
+                right_scale,
+            )
+            .unwrap(),
+            BispinorExpression {
+                terms: BTreeMap::from([
+                    (
+                        SpinorDyad {
+                            undotted: 1,
+                            dotted: 2,
+                        },
+                        negative_left,
+                    ),
+                    (
+                        SpinorDyad {
+                            undotted: 3,
+                            dotted: 0,
+                        },
+                        negative_right,
+                    ),
+                ]),
+            },
+        );
+        assert_eq!(
+            {
+                let zero = builder.zero();
+                dirac_pair_vector_expression(
+                    &mut builder,
+                    &particle,
+                    &antiparticle,
+                    left_scale,
+                    zero,
+                )
+                .unwrap()
+            },
+            BispinorExpression::dyad(1, 2, negative_left),
+        );
+
+        let weyl = LinearWeylExpression::atom(2, one);
+        assert_eq!(
+            dirac_weyl_pair_vector_expression(
+                &mut builder,
+                &particle,
+                SpinorChirality::Negative,
+                &weyl,
+                left_scale,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(1, 2, negative_left),
+        );
+        assert_eq!(
+            dirac_weyl_pair_vector_expression(
+                &mut builder,
+                &particle,
+                SpinorChirality::Positive,
+                &weyl,
+                right_scale,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(2, 0, negative_right),
+        );
+        assert_eq!(
+            weyl_dirac_pair_vector_expression(
+                &mut builder,
+                SpinorChirality::Positive,
+                &weyl,
+                &antiparticle,
+                left_scale,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(2, 2, negative_left),
+        );
+        assert_eq!(
+            weyl_dirac_pair_vector_expression(
+                &mut builder,
+                SpinorChirality::Negative,
+                &weyl,
+                &antiparticle,
+                right_scale,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(3, 2, negative_right),
         );
     }
 

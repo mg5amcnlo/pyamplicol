@@ -22,6 +22,7 @@ from .._internal.versions import (
     SYMJIT_PLANE_APPLICATION_ABI,
 )
 from .recurrence_direct_intrinsics import (
+    CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
@@ -34,6 +35,7 @@ from .recurrence_direct_intrinsics import (
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_RUNTIME_SCALE_BITS,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND,
     RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
@@ -48,6 +50,7 @@ from .recurrence_direct_intrinsics import (
     WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+    CertifiedChiralDiracPairToVectorIntrinsic,
     CertifiedChiralDiracVectorIntrinsic,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
@@ -104,6 +107,7 @@ _NATIVE_SOURCE_APPLICATION_ABIS = frozenset(
 )
 _PREPARED_GRAPH_CONTRIBUTION_TEMPLATES = frozenset(
     {
+        CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
         CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
         CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
         DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
@@ -463,6 +467,48 @@ def _validate_intrinsic_scale_projection(
             )
 
 
+def _validate_chiral_scales(
+    projection: Mapping[str, object],
+    *,
+    label: str,
+) -> None:
+    zero_scales: list[bool] = []
+    for name in ("left_scale", "right_scale"):
+        scale = projection.get(name)
+        if not isinstance(scale, Mapping):
+            raise RecurrenceDirectTemplateError(
+                f"{label} {name} has the wrong JSON shape"
+            )
+        if scale.get("kind") != RECURRENCE_INTRINSIC_SCALE_KIND:
+            raise RecurrenceDirectTemplateError(
+                f"{label} {name} has an unsupported projection"
+            )
+        _validate_intrinsic_scale_projection(scale, allow_parameter=True)
+        real_bits = _require_f64_bits(
+            f"{label} {name} real scale bits",
+            scale.get("constant_real_bits"),
+        )
+        imag_bits = _require_f64_bits(
+            f"{label} {name} imaginary scale bits",
+            scale.get("constant_imag_bits"),
+        )
+        if any(
+            bits & 0x7FF0000000000000 == 0x7FF0000000000000
+            for bits in (real_bits, imag_bits)
+        ):
+            raise RecurrenceDirectTemplateError(
+                f"{label} {name} scale must be finite"
+            )
+        is_zero = all(bits & 0x7FFFFFFFFFFFFFFF == 0 for bits in (real_bits, imag_bits))
+        if is_zero and scale.get("parameter_index") is not None:
+            raise RecurrenceDirectTemplateError(
+                f"zero {label} {name} scale cannot own a parameter"
+            )
+        zero_scales.append(is_zero)
+    if all(zero_scales):
+        raise RecurrenceDirectTemplateError(f"{label} scales cannot both be zero")
+
+
 def _validate_chiral_dirac_vector_scale_projection(
     projection: Mapping[str, object],
     *,
@@ -490,43 +536,23 @@ def _validate_chiral_dirac_vector_scale_projection(
         raise RecurrenceDirectTemplateError(
             "chiral Dirac-vector orientation disagrees with its runtime template"
         )
-    zero_scales: list[bool] = []
-    for name in ("left_scale", "right_scale"):
-        scale = projection.get(name)
-        if not isinstance(scale, Mapping):
-            raise RecurrenceDirectTemplateError(
-                f"chiral Dirac-vector {name} has the wrong JSON shape"
-            )
-        if scale.get("kind") != RECURRENCE_INTRINSIC_SCALE_KIND:
-            raise RecurrenceDirectTemplateError(
-                f"chiral Dirac-vector {name} has an unsupported projection"
-            )
-        _validate_intrinsic_scale_projection(scale, allow_parameter=True)
-        real_bits = _require_f64_bits(
-            f"chiral Dirac-vector {name} real scale bits",
-            scale.get("constant_real_bits"),
-        )
-        imag_bits = _require_f64_bits(
-            f"chiral Dirac-vector {name} imaginary scale bits",
-            scale.get("constant_imag_bits"),
-        )
-        if any(
-            bits & 0x7FF0000000000000 == 0x7FF0000000000000
-            for bits in (real_bits, imag_bits)
-        ):
-            raise RecurrenceDirectTemplateError(
-                f"chiral Dirac-vector {name} scale must be finite"
-            )
-        is_zero = all(bits & 0x7FFFFFFFFFFFFFFF == 0 for bits in (real_bits, imag_bits))
-        if is_zero and scale.get("parameter_index") is not None:
-            raise RecurrenceDirectTemplateError(
-                f"zero chiral Dirac-vector {name} scale cannot own a parameter"
-            )
-        zero_scales.append(is_zero)
-    if all(zero_scales):
+    _validate_chiral_scales(projection, label="chiral Dirac-vector")
+
+
+def _validate_chiral_dirac_pair_to_vector_scale_projection(
+    projection: Mapping[str, object],
+    *,
+    runtime_template: str,
+) -> None:
+    if set(projection) != {"kind", "left_scale", "right_scale"}:
         raise RecurrenceDirectTemplateError(
-            "chiral Dirac-vector scales cannot both be zero"
+            "chiral Dirac-pair projection has unsupported fields"
         )
+    if runtime_template != CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE:
+        raise RecurrenceDirectTemplateError(
+            "chiral Dirac-pair projection has the wrong runtime template"
+        )
+    _validate_chiral_scales(projection, label="chiral Dirac-pair")
 
 
 def _require_empty_prepared_call_metadata(
@@ -642,6 +668,11 @@ def _validate_graph_intrinsic_for_role(
         projection_kind = projection.get("kind")
         if projection_kind == RECURRENCE_INTRINSIC_SCALE_KIND:
             _validate_intrinsic_scale_projection(projection, allow_parameter=True)
+        elif projection_kind == RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND:
+            _validate_chiral_dirac_pair_to_vector_scale_projection(
+                projection,
+                runtime_template=intrinsic.runtime_template,
+            )
         elif projection_kind == RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND:
             _validate_chiral_dirac_vector_scale_projection(
                 projection,
@@ -2762,6 +2793,7 @@ def _build_certified_intrinsic_binding(
 def _build_certified_graph_intrinsic(
     certified: (
         CertifiedRecurrenceIntrinsic
+        | CertifiedChiralDiracPairToVectorIntrinsic
         | CertifiedChiralDiracVectorIntrinsic
         | CertifiedRecurrenceFinalizationIntrinsic
     ),
@@ -2770,7 +2802,11 @@ def _build_certified_graph_intrinsic(
         certified.parent_permutation
         if isinstance(
             certified,
-            (CertifiedRecurrenceIntrinsic, CertifiedChiralDiracVectorIntrinsic),
+            (
+                CertifiedRecurrenceIntrinsic,
+                CertifiedChiralDiracPairToVectorIntrinsic,
+                CertifiedChiralDiracVectorIntrinsic,
+            ),
         )
         else (0, 1)
     )

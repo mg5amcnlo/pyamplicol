@@ -17,6 +17,7 @@ from pyamplicol.models.recurrence_catalog_builder import (
     build_recurrence_template_catalog,
 )
 from pyamplicol.models.recurrence_direct_intrinsics import (
+    CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
@@ -36,6 +37,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+    CertifiedChiralDiracPairToVectorIntrinsic,
     CertifiedChiralDiracVectorIntrinsic,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
@@ -435,6 +437,69 @@ def test_weyl_pair_graph_contract_keeps_prepared_component_execution() -> None:
     tampered["graph_intrinsic"]["scalar_projection"]["parameter_index"] = 74
     with pytest.raises(RecurrenceDirectTemplateError, match="payload digest"):
         RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+
+def test_chiral_dirac_pair_graph_contract_keeps_prepared_component_execution() -> (
+    None
+):
+    contract_digest = RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+        CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE
+    ]
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedChiralDiracPairToVectorIntrinsic(
+            runtime_template=CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
+            contract_digest=contract_digest,
+            left_constant_scale=0.0,
+            left_model_parameter_index=None,
+            right_constant_scale=0.0 + 0.707106781186547j,
+            right_model_parameter_index=73,
+            parent_permutation=(1, 0),
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic)
+    payload = binding.to_dict()
+
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["contribution_parent_permutation"] == [0, 1]
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": (
+            "777f92d0a97800be35bea7c2f8d9915bea83700973a6efbf7361bb647dc2faa0"
+        ),
+        "contribution_parent_permutation": [1, 0],
+        "runtime_template": CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
+        "scalar_projection": {
+            "kind": "chiral-dirac-pair-to-vector-scales-v1",
+            "left_scale": {
+                "constant_imag_bits": 0,
+                "constant_real_bits": 0,
+                "kind": "intrinsic-scale-v1",
+                "parameter_index": None,
+            },
+            "right_scale": {
+                "constant_imag_bits": 4604544271217802184,
+                "constant_real_bits": 0,
+                "kind": "intrinsic-scale-v1",
+                "parameter_index": 73,
+            },
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["right_scale"][
+        "parameter_index"
+    ] = 74
+    with pytest.raises(RecurrenceDirectTemplateError, match="payload digest"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    malformed = binding.to_dict()
+    malformed["graph_intrinsic"]["scalar_projection"]["left_scale"][
+        "parameter_index"
+    ] = 72
+    with pytest.raises(RecurrenceDirectTemplateError, match="cannot own a parameter"):
+        RecurrenceDirectPayloadBindingV1.from_dict(malformed)
 
 
 def test_vector_pair_to_scalar_graph_contract_keeps_prepared_execution() -> None:
@@ -1107,6 +1172,7 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             and item.payload_binding.graph_intrinsic is not None
         )
         assert {
+            CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
             CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
             CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
             "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1",
@@ -1199,6 +1265,75 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             and item.destination_component_count == 4
             and item.payload_binding.kind == "prepared-direct-call"
             for item in chiral_dirac_vectors
+        )
+        chiral_dirac_pairs = tuple(
+            item
+            for item in graph_contributions
+            if item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            == CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE
+        )
+        assert {
+            shape: sum(
+                item.parent_component_counts == shape
+                for item in chiral_dirac_pairs
+            )
+            for shape in ((2, 4), (4, 2), (4, 4))
+        } == {(2, 4): 56, (4, 2): 56, (4, 4): 24}
+        assert all(
+            item.destination_component_count == 4
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.runtime_template is None
+            and item.payload_binding.intrinsic_contract_digest is None
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.contract_digest
+            == "777f92d0a97800be35bea7c2f8d9915bea83700973a6efbf7361bb647dc2faa0"
+            for item in chiral_dirac_pairs
+        )
+        for item in chiral_dirac_pairs:
+            assert item.payload_binding.graph_intrinsic is not None
+            projection = item.payload_binding.graph_intrinsic.projection
+            scales = (projection["left_scale"], projection["right_scale"])
+            assert all(isinstance(scale, dict) for scale in scales)
+            parameter_indices = tuple(
+                scale["parameter_index"]  # type: ignore[index]
+                for scale in scales
+            )
+            nonzero = tuple(
+                bool(
+                    scale["constant_real_bits"]  # type: ignore[index]
+                    or scale["constant_imag_bits"]  # type: ignore[index]
+                )
+                for scale in scales
+            )
+            assert any(nonzero)
+            assert all(
+                index is None or branch_nonzero
+                for index, branch_nonzero in zip(
+                    parameter_indices,
+                    nonzero,
+                    strict=True,
+                )
+            )
+            if item.parent_component_counts != (4, 4):
+                assert sum(nonzero) == 1
+        assert any(
+            item.parent_component_counts != (4, 4)
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection["left_scale"][  # type: ignore[index]
+                "parameter_index"
+            ]
+            is not None
+            for item in chiral_dirac_pairs
+        )
+        assert any(
+            item.parent_component_counts != (4, 4)
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection["right_scale"][  # type: ignore[index]
+                "parameter_index"
+            ]
+            is not None
+            for item in chiral_dirac_pairs
         )
         weyl_pair_currents = tuple(
             item

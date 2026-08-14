@@ -9,6 +9,7 @@ from fractions import Fraction
 import pytest
 
 from pyamplicol.models.recurrence_direct_intrinsics import (
+    CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
     CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
     DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
@@ -18,6 +19,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
@@ -31,6 +33,7 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
     WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+    CertifiedChiralDiracPairToVectorIntrinsic,
     CertifiedChiralDiracVectorIntrinsic,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
@@ -94,6 +97,34 @@ def _contracts(
     )
 
 
+def _sliced_contracts(
+    left_components: tuple[int, ...],
+    right_components: tuple[int, ...],
+) -> tuple[str, ...]:
+    values = [
+        {
+            "component": component,
+            "role": role,
+            "symbol": f"model::prepared::{prefix}_{component}",
+        }
+        for role, prefix, components in (
+            ("left-current", "left", left_components),
+            ("right-current", "right", right_components),
+        )
+        for component in components
+    ]
+    return tuple(
+        json.dumps(
+            item,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for item in values
+    )
+
+
 def _dirac_vector_contracts_with_parameters(
     *parameter_indexes: int,
 ) -> tuple[str, ...]:
@@ -141,6 +172,21 @@ _WEYL_PAIR_TO_VECTOR_EXPRESSIONS = {
         "l0*r0-l1*r1",
     ),
 }
+
+_DIRAC_PAIR_LEFT_LOCAL = _WEYL_PAIR_TO_VECTOR_EXPRESSIONS[
+    WEYL_PAIR_TO_VECTOR_A_TEMPLATE
+]
+_DIRAC_PAIR_LEFT_DIRAC = tuple(
+    expression.replace("l0", "l2").replace("l1", "l3")
+    for expression in _DIRAC_PAIR_LEFT_LOCAL
+)
+_DIRAC_PAIR_RIGHT_LOCAL = _WEYL_PAIR_TO_VECTOR_EXPRESSIONS[
+    WEYL_PAIR_TO_VECTOR_B_TEMPLATE
+]
+_DIRAC_PAIR_RIGHT_DIRAC = tuple(
+    expression.replace("r0", "r2").replace("r1", "r3")
+    for expression in _DIRAC_PAIR_RIGHT_LOCAL
+)
 
 
 def _reversed_contracts(
@@ -750,6 +796,193 @@ def test_weyl_pair_to_vector_rejects_contract_drift(mutation: str) -> None:
             destination_component_count=4,
             binding_coupling=None,
             factored_output_parameter_index=factored_slot,
+            allow_nontrivial_parent_permutation=True,
+        )
+        is None
+    )
+
+
+def test_certifies_full_chiral_dirac_pair_to_vector_from_inline_coupling() -> None:
+    expressions = tuple(
+        _substitute(
+            "7.07106781186547e-1\U0001d456*"
+            f"(model::prepared::coupling_re*({left})+"
+            f"model::prepared::coupling_im*({right}))"
+        )
+        for left, right in zip(
+            _DIRAC_PAIR_LEFT_DIRAC,
+            _DIRAC_PAIR_RIGHT_DIRAC,
+            strict=True,
+        )
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_contracts(4, 4, coupling=True),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=ExactComplexRationalV1.from_fractions(2, -3),
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert isinstance(result, CertifiedChiralDiracPairToVectorIntrinsic)
+    assert result.runtime_template == CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE
+    assert result.contract_digest == (
+        "777f92d0a97800be35bea7c2f8d9915bea83700973a6efbf7361bb647dc2faa0"
+    )
+    assert result.left_constant_scale == pytest.approx(
+        0.0 + 1.414213562373094j
+    )
+    assert result.right_constant_scale == pytest.approx(
+        0.0 - 2.121320343559641j
+    )
+    assert result.left_model_parameter_index is None
+    assert result.right_model_parameter_index is None
+    assert result.parent_permutation == (0, 1)
+    assert result.scale_projection()["kind"] == (
+        RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_shape", "components", "expressions", "active_branch"),
+    (
+        (
+            (2, 4),
+            ((0, 1), (0, 1)),
+            _DIRAC_PAIR_LEFT_LOCAL,
+            "left",
+        ),
+        (
+            (2, 4),
+            ((0, 1), (2, 3)),
+            _DIRAC_PAIR_RIGHT_DIRAC,
+            "right",
+        ),
+        (
+            (4, 2),
+            ((2, 3), (0, 1)),
+            _DIRAC_PAIR_LEFT_DIRAC,
+            "left",
+        ),
+        (
+            (4, 2),
+            ((0, 1), (0, 1)),
+            _DIRAC_PAIR_RIGHT_LOCAL,
+            "right",
+        ),
+    ),
+)
+def test_certifies_mixed_dirac_pair_slices_with_one_parameter_owner(
+    parent_shape: tuple[int, int],
+    components: tuple[tuple[int, ...], tuple[int, ...]],
+    expressions: tuple[str, ...],
+    active_branch: str,
+) -> None:
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=tuple(
+            _substitute(f"7.07106781186547e-1\U0001d456*({item})")
+            for item in expressions
+        ),
+        input_contracts=_sliced_contracts(*components),
+        parent_component_counts=parent_shape,
+        destination_component_count=4,
+        binding_coupling=None,
+        factored_output_parameter_index=73,
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert isinstance(result, CertifiedChiralDiracPairToVectorIntrinsic)
+    assert result.contract_digest == RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+        CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE
+    ]
+    left_active = active_branch == "left"
+    assert result.left_constant_scale == (
+        0.0 + 0.707106781186547j if left_active else 0.0
+    )
+    assert result.right_constant_scale == (
+        0.0 if left_active else 0.0 + 0.707106781186547j
+    )
+    assert result.left_model_parameter_index == (73 if left_active else None)
+    assert result.right_model_parameter_index == (None if left_active else 73)
+    projection = result.scale_projection()
+    assert projection["left_scale"]["parameter_index"] == (  # type: ignore[index]
+        73 if left_active else None
+    )
+    assert projection["right_scale"]["parameter_index"] == (  # type: ignore[index]
+        None if left_active else 73
+    )
+
+
+def test_dirac_pair_to_vector_preserves_authenticated_parent_permutation() -> None:
+    expressions = tuple(
+        _substitute_reversed_shape(
+            f"2\U0001d456*({left})-3\U0001d456*({right})",
+            4,
+            4,
+        )
+        for left, right in zip(
+            _DIRAC_PAIR_LEFT_DIRAC,
+            _DIRAC_PAIR_RIGHT_DIRAC,
+            strict=True,
+        )
+    )
+
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=expressions,
+            input_contracts=_reversed_contracts(4, 4),
+            parent_component_counts=(4, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_reversed_contracts(4, 4),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+        allow_nontrivial_parent_permutation=True,
+    )
+    assert isinstance(result, CertifiedChiralDiracPairToVectorIntrinsic)
+    assert result.parent_permutation == (1, 0)
+
+
+def test_dirac_pair_to_vector_rejects_slice_or_algebra_drift() -> None:
+    expressions = [
+        _substitute(f"7.07106781186547e-1\U0001d456*({item})")
+        for item in _DIRAC_PAIR_RIGHT_DIRAC
+    ]
+    expressions[1] = f"{expressions[1]}+model::prepared::left_1"
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=expressions,
+            input_contracts=_sliced_contracts((0, 1), (2, 3)),
+            parent_component_counts=(2, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+            factored_output_parameter_index=73,
+            allow_nontrivial_parent_permutation=True,
+        )
+        is None
+    )
+
+    contracts = [
+        json.loads(item) for item in _sliced_contracts((0, 1), (2, 3))
+    ]
+    contracts[-1]["component"] = 4
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=tuple(
+                _substitute(f"7.07106781186547e-1\U0001d456*({item})")
+                for item in _DIRAC_PAIR_RIGHT_DIRAC
+            ),
+            input_contracts=tuple(json.dumps(item) for item in contracts),
+            parent_component_counts=(2, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+            factored_output_parameter_index=73,
             allow_nontrivial_parent_permutation=True,
         )
         is None

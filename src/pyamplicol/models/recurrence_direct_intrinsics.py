@@ -30,6 +30,9 @@ class _LazyCompilerSymbolica:
 _sym = _LazyCompilerSymbolica()
 
 RECURRENCE_INTRINSIC_SCALE_KIND = "intrinsic-scale-v1"
+RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND = (
+    "chiral-dirac-pair-to-vector-scales-v1"
+)
 RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND = "chiral-dirac-vector-scales-v1"
 RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND = "massive-dirac-propagator-v1"
 RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND = "massive-scalar-propagator-v1"
@@ -63,6 +66,9 @@ CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE = (
 CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1"
 )
+CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.dirac-pair-to-vector-chiral.v1"
+)
 DIRAC_SCALAR_TO_DIRAC_TEMPLATE = (
     "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1"
 )
@@ -91,6 +97,37 @@ DiracOrientation: TypeAlias = Literal["particle", "antiparticle"]
 
 def _f64_bits(value: float) -> int:
     return struct.unpack("<Q", struct.pack("<d", value))[0]
+
+
+def _validate_chiral_scale_pair(
+    label: str,
+    branches: Sequence[tuple[str, complex, int | None]],
+) -> None:
+    for name, constant, parameter_index in branches:
+        if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+            raise ValueError(f"{label} {name} scale must be finite")
+        if parameter_index is not None and (
+            type(parameter_index) is not int or parameter_index < 0
+        ):
+            raise ValueError(f"{label} {name} parameter index must be nonnegative")
+        if constant == 0.0 and parameter_index is not None:
+            raise ValueError(f"zero {label} {name} scale cannot own a parameter")
+    if all(constant == 0.0 for _, constant, _ in branches):
+        raise ValueError(f"{label} scales cannot both be zero")
+
+
+def _chiral_branch_scale_projection(
+    constant: complex,
+    parameter_index: int | None,
+) -> dict[str, object]:
+    real = 0.0 if constant.real == 0.0 else constant.real
+    imag = 0.0 if constant.imag == 0.0 else constant.imag
+    return {
+        "constant_imag_bits": _f64_bits(imag),
+        "constant_real_bits": _f64_bits(real),
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": parameter_index,
+    }
 
 
 MASSIVE_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
@@ -141,56 +178,78 @@ class CertifiedChiralDiracVectorIntrinsic:
             raise ValueError(
                 "chiral Dirac-vector orientation disagrees with its runtime template"
             )
-        for name, constant, parameter_index in (
+        _validate_chiral_scale_pair(
+            "chiral Dirac-vector",
             (
-                "left",
-                self.left_constant_scale,
-                self.left_model_parameter_index,
+                (
+                    "left",
+                    self.left_constant_scale,
+                    self.left_model_parameter_index,
+                ),
+                (
+                    "right",
+                    self.right_constant_scale,
+                    self.right_model_parameter_index,
+                ),
             ),
-            (
-                "right",
-                self.right_constant_scale,
-                self.right_model_parameter_index,
-            ),
-        ):
-            if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
-                raise ValueError(f"chiral Dirac-vector {name} scale must be finite")
-            if parameter_index is not None and (
-                type(parameter_index) is not int or parameter_index < 0
-            ):
-                raise ValueError(
-                    f"chiral Dirac-vector {name} parameter index must be nonnegative"
-                )
-            if constant == 0.0 and parameter_index is not None:
-                raise ValueError(
-                    f"zero chiral Dirac-vector {name} scale cannot own a parameter"
-                )
-        if self.left_constant_scale == 0.0 and self.right_constant_scale == 0.0:
-            raise ValueError("chiral Dirac-vector scales cannot both be zero")
-
-    @staticmethod
-    def _scale_projection(
-        constant: complex,
-        parameter_index: int | None,
-    ) -> dict[str, object]:
-        real = 0.0 if constant.real == 0.0 else constant.real
-        imag = 0.0 if constant.imag == 0.0 else constant.imag
-        return {
-            "constant_imag_bits": _f64_bits(imag),
-            "constant_real_bits": _f64_bits(real),
-            "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
-            "parameter_index": parameter_index,
-        }
+        )
 
     def scale_projection(self) -> dict[str, object]:
         return {
             "kind": RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND,
-            "left_scale": self._scale_projection(
+            "left_scale": _chiral_branch_scale_projection(
                 self.left_constant_scale,
                 self.left_model_parameter_index,
             ),
             "orientation": self.orientation,
-            "right_scale": self._scale_projection(
+            "right_scale": _chiral_branch_scale_projection(
+                self.right_constant_scale,
+                self.right_model_parameter_index,
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CertifiedChiralDiracPairToVectorIntrinsic:
+    """One exact fermion-pair vector current with independent chiral scales."""
+
+    runtime_template: str
+    contract_digest: str
+    left_constant_scale: complex
+    left_model_parameter_index: int | None
+    right_constant_scale: complex
+    right_model_parameter_index: int | None
+    parent_permutation: tuple[int, int] = (0, 1)
+
+    def __post_init__(self) -> None:
+        if self.runtime_template != CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE:
+            raise ValueError(
+                "chiral Dirac-pair intrinsic has the wrong runtime template"
+            )
+        _validate_chiral_scale_pair(
+            "chiral Dirac-pair",
+            (
+                (
+                    "left",
+                    self.left_constant_scale,
+                    self.left_model_parameter_index,
+                ),
+                (
+                    "right",
+                    self.right_constant_scale,
+                    self.right_model_parameter_index,
+                ),
+            ),
+        )
+
+    def scale_projection(self) -> dict[str, object]:
+        return {
+            "kind": RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND,
+            "left_scale": _chiral_branch_scale_projection(
+                self.left_constant_scale,
+                self.left_model_parameter_index,
+            ),
+            "right_scale": _chiral_branch_scale_projection(
                 self.right_constant_scale,
                 self.right_model_parameter_index,
             ),
@@ -567,13 +626,158 @@ _CHIRAL_DIRAC_VECTOR_WITNESSES = (
     ),
 )
 
+
+@dataclass(frozen=True, slots=True)
+class _ChiralDiracPairBranchWitness:
+    expressions: tuple[str, str, str, str]
+    anchor_output: int
+    anchor_monomial: str
+    inverse_anchor_coefficient: str
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "anchor": {
+                "inverse_anchor_coefficient": self.inverse_anchor_coefficient,
+                "monomial": self.anchor_monomial,
+                "output_component": self.anchor_output,
+            },
+            "expressions": list(self.expressions),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ChiralDiracPairVariantWitness:
+    parent_component_counts: tuple[int, int]
+    left: _ChiralDiracPairBranchWitness | None
+    right: _ChiralDiracPairBranchWitness | None
+
+    def __post_init__(self) -> None:
+        if self.left is None and self.right is None:
+            raise ValueError("chiral Dirac-pair witness has no active branch")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "left": None if self.left is None else self.left.payload(),
+            "parent_component_counts": list(self.parent_component_counts),
+            "right": None if self.right is None else self.right.payload(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ChiralDiracPairToVectorWitness:
+    runtime_template: str
+    variants: tuple[_ChiralDiracPairVariantWitness, ...]
+    contract_digest: str = ""
+
+    def __post_init__(self) -> None:
+        payload = {
+            "destination_component_count": 4,
+            "parent_orientations": ["particle", "antiparticle"],
+            "runtime_template": self.runtime_template,
+            "variants": [variant.payload() for variant in self.variants],
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        object.__setattr__(self, "contract_digest", digest)
+
+
+_DIRAC_PAIR_LEFT_LOCAL = _ChiralDiracPairBranchWitness(
+    expressions=(
+        "l0*r0+l1*r1",
+        "-l1*r0-l0*r1",
+        "1\U0001d456*(-l1*r0+l0*r1)",
+        "-l0*r0+l1*r1",
+    ),
+    anchor_output=0,
+    anchor_monomial="l0*r0",
+    inverse_anchor_coefficient="1",
+)
+_DIRAC_PAIR_LEFT_DIRAC = _ChiralDiracPairBranchWitness(
+    expressions=(
+        "l2*r0+l3*r1",
+        "-l3*r0-l2*r1",
+        "1\U0001d456*(-l3*r0+l2*r1)",
+        "-l2*r0+l3*r1",
+    ),
+    anchor_output=0,
+    anchor_monomial="l2*r0",
+    inverse_anchor_coefficient="1",
+)
+_DIRAC_PAIR_RIGHT_LOCAL = _ChiralDiracPairBranchWitness(
+    expressions=(
+        "l0*r0+l1*r1",
+        "l0*r1+l1*r0",
+        "1\U0001d456*(-l0*r1+l1*r0)",
+        "l0*r0-l1*r1",
+    ),
+    anchor_output=0,
+    anchor_monomial="l0*r0",
+    inverse_anchor_coefficient="1",
+)
+_DIRAC_PAIR_RIGHT_DIRAC = _ChiralDiracPairBranchWitness(
+    expressions=(
+        "l0*r2+l1*r3",
+        "l0*r3+l1*r2",
+        "1\U0001d456*(-l0*r3+l1*r2)",
+        "l0*r2-l1*r3",
+    ),
+    anchor_output=0,
+    anchor_monomial="l0*r2",
+    inverse_anchor_coefficient="1",
+)
+_CHIRAL_DIRAC_PAIR_TO_VECTOR_WITNESS = _ChiralDiracPairToVectorWitness(
+    runtime_template=CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE,
+    variants=(
+        _ChiralDiracPairVariantWitness(
+            parent_component_counts=(2, 4),
+            left=_DIRAC_PAIR_LEFT_LOCAL,
+            right=None,
+        ),
+        _ChiralDiracPairVariantWitness(
+            parent_component_counts=(2, 4),
+            left=None,
+            right=_DIRAC_PAIR_RIGHT_DIRAC,
+        ),
+        _ChiralDiracPairVariantWitness(
+            parent_component_counts=(4, 2),
+            left=_DIRAC_PAIR_LEFT_DIRAC,
+            right=None,
+        ),
+        _ChiralDiracPairVariantWitness(
+            parent_component_counts=(4, 2),
+            left=None,
+            right=_DIRAC_PAIR_RIGHT_LOCAL,
+        ),
+        _ChiralDiracPairVariantWitness(
+            parent_component_counts=(4, 4),
+            left=_DIRAC_PAIR_LEFT_DIRAC,
+            right=_DIRAC_PAIR_RIGHT_DIRAC,
+        ),
+    ),
+)
+
 RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES = frozenset(
     witness.runtime_template
-    for witness in (*_WITNESSES, *_CHIRAL_DIRAC_VECTOR_WITNESSES)
+    for witness in (
+        *_WITNESSES,
+        *_CHIRAL_DIRAC_VECTOR_WITNESSES,
+        _CHIRAL_DIRAC_PAIR_TO_VECTOR_WITNESS,
+    )
 )
 RECURRENCE_INTRINSIC_CONTRACT_DIGESTS = {
     witness.runtime_template: witness.contract_digest
-    for witness in (*_WITNESSES, *_CHIRAL_DIRAC_VECTOR_WITNESSES)
+    for witness in (
+        *_WITNESSES,
+        *_CHIRAL_DIRAC_VECTOR_WITNESSES,
+        _CHIRAL_DIRAC_PAIR_TO_VECTOR_WITNESS,
+    )
 }
 
 
@@ -841,7 +1045,12 @@ def certify_recurrence_contribution_intrinsic(
     binding_coupling: ExactComplexRationalV1 | None,
     factored_output_parameter_index: int | None = None,
     allow_nontrivial_parent_permutation: bool = False,
-) -> CertifiedRecurrenceIntrinsic | CertifiedChiralDiracVectorIntrinsic | None:
+) -> (
+    CertifiedRecurrenceIntrinsic
+    | CertifiedChiralDiracVectorIntrinsic
+    | CertifiedChiralDiracPairToVectorIntrinsic
+    | None
+):
     """Prove that one prepared kernel is exactly one known arena primitive.
 
     Model-owned namespaces and parameter numbers do not participate in the
@@ -936,6 +1145,16 @@ def certify_recurrence_contribution_intrinsic(
         )
         if chiral is not None:
             return chiral
+        chiral_pair = _certify_chiral_dirac_pair_to_vector_intrinsic(
+            normalized,
+            parameter_symbols=parameter_symbols,
+            normalized_shape=normalized_shape,
+            destination_component_count=destination_component_count,
+            factored_output_parameter_index=factored_output_parameter_index,
+            parent_permutation=parent_permutation,
+        )
+        if chiral_pair is not None:
+            return chiral_pair
     return None
 
 
@@ -1000,6 +1219,78 @@ def _certify_chiral_dirac_vector_intrinsic(
             runtime_template=witness.runtime_template,
             contract_digest=witness.contract_digest,
             orientation=witness.orientation,
+            left_constant_scale=left_constant,
+            left_model_parameter_index=left_parameter_index,
+            right_constant_scale=right_constant,
+            right_model_parameter_index=right_parameter_index,
+            parent_permutation=parent_permutation,
+        )
+    return None
+
+
+def _certify_chiral_dirac_pair_to_vector_intrinsic(
+    normalized: Sequence[object],
+    *,
+    parameter_symbols: Mapping[str, int],
+    normalized_shape: tuple[int, int],
+    destination_component_count: int,
+    factored_output_parameter_index: int | None,
+    parent_permutation: tuple[int, int],
+) -> CertifiedChiralDiracPairToVectorIntrinsic | None:
+    if destination_component_count != 4:
+        return None
+    _sym._ensure_symbolica()
+    witness = _CHIRAL_DIRAC_PAIR_TO_VECTOR_WITNESS
+    for variant in witness.variants:
+        if variant.parent_component_counts != normalized_shape:
+            continue
+        branch_data: list[tuple[tuple[object, ...], object]] = []
+        for branch in (variant.left, variant.right):
+            if branch is None:
+                branch_data.append(
+                    (tuple(_sym.E("0") for _ in range(4)), _sym.E("0"))
+                )
+                continue
+            references = tuple(
+                _sym.E(value).expand() for value in branch.expressions
+            )
+            scale = (
+                normalized[branch.anchor_output].coefficient(
+                    _sym.E(branch.anchor_monomial)
+                )
+                * _sym.E(branch.inverse_anchor_coefficient)
+            ).expand()
+            branch_data.append((references, scale))
+        (left_references, left_scale), (right_references, right_scale) = branch_data
+        if any(
+            not _symbolically_equal(
+                candidate,
+                left_scale * left_reference + right_scale * right_reference,
+            )
+            for candidate, left_reference, right_reference in zip(
+                normalized,
+                left_references,
+                right_references,
+                strict=True,
+            )
+        ):
+            continue
+        left_scalar = _extract_chiral_scalar_scale(left_scale, parameter_symbols)
+        right_scalar = _extract_chiral_scalar_scale(right_scale, parameter_symbols)
+        if left_scalar is None or right_scalar is None:
+            continue
+        left_constant, left_parameter_index = left_scalar
+        right_constant, right_parameter_index = right_scalar
+        if left_constant == 0.0 and right_constant == 0.0:
+            continue
+        if factored_output_parameter_index is not None:
+            if left_constant != 0.0:
+                left_parameter_index = factored_output_parameter_index
+            if right_constant != 0.0:
+                right_parameter_index = factored_output_parameter_index
+        return CertifiedChiralDiracPairToVectorIntrinsic(
+            runtime_template=witness.runtime_template,
+            contract_digest=witness.contract_digest,
             left_constant_scale=left_constant,
             left_model_parameter_index=left_parameter_index,
             right_constant_scale=right_constant,
@@ -1407,11 +1698,10 @@ def _normalization_candidates(
 ]:
     if len(parent_component_counts) != 2:
         raise ValueError("contribution intrinsic must have two parents")
-    raw_shape = _binary_parent_shape(input_contracts)
-    if raw_shape != parent_component_counts:
-        raise ValueError(
-            "prepared current-input shape disagrees with recurrence parent shape"
-        )
+    raw_shape = _binary_parent_shape(
+        input_contracts,
+        parent_component_counts=parent_component_counts,
+    )
     permutations = [(0, 1)]
     if allow_nontrivial_parent_permutation:
         permutations.append((1, 0))
@@ -1424,7 +1714,10 @@ def _normalization_candidates(
                 parent_permutation=parent_permutation,
             ),
             parent_permutation,
-            tuple(raw_shape[index] for index in parent_permutation),
+            (
+                raw_shape[parent_permutation[0]],
+                raw_shape[parent_permutation[1]],
+            ),
         )
         for parent_permutation in permutations
     )
@@ -1432,7 +1725,13 @@ def _normalization_candidates(
 
 def _binary_parent_shape(
     input_contracts: Sequence[str],
+    *,
+    parent_component_counts: tuple[int, ...],
 ) -> tuple[int, int]:
+    if len(parent_component_counts) != 2 or any(
+        type(count) is not int or count <= 0 for count in parent_component_counts
+    ):
+        raise ValueError("recurrence parent shape is not a positive binary shape")
     components: dict[str, set[int]] = {
         "left-current": set(),
         "right-current": set(),
@@ -1450,12 +1749,17 @@ def _binary_parent_shape(
         if component in components[role]:
             raise ValueError("prepared current-input component is duplicated")
         components[role].add(component)
-    shape: list[int] = []
-    for role in ("left-current", "right-current"):
+    shape = tuple(parent_component_counts)
+    for role, component_count in zip(
+        ("left-current", "right-current"),
+        shape,
+        strict=True,
+    ):
         values = components[role]
-        if not values or values != set(range(max(values) + 1)):
-            raise ValueError(f"prepared {role} components are not a contiguous basis")
-        shape.append(len(values))
+        if not values or any(component >= component_count for component in values):
+            raise ValueError(
+                f"prepared {role} components are outside the recurrence parent basis"
+            )
     return shape[0], shape[1]
 
 
@@ -1522,6 +1826,7 @@ def _symbolically_equal(left: object, right: object) -> bool:
 
 
 __all__ = [
+    "CHIRAL_DIRAC_PAIR_TO_VECTOR_TEMPLATE",
     "CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE",
     "CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE",
     "DIRAC_SCALAR_TO_DIRAC_TEMPLATE",
@@ -1534,6 +1839,7 @@ __all__ = [
     "MASSIVE_SCALAR_TEMPLATE",
     "MASSIVE_VECTOR_RUNTIME_SCALE_BITS",
     "MASSIVE_VECTOR_UNITARY_TEMPLATE",
+    "RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND",
     "RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND",
     "RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_CONTRACT_DIGESTS",
@@ -1545,6 +1851,7 @@ __all__ = [
     "VECTOR_PAIR_TO_SCALAR_TEMPLATE",
     "WEYL_PAIR_TO_VECTOR_A_TEMPLATE",
     "WEYL_PAIR_TO_VECTOR_B_TEMPLATE",
+    "CertifiedChiralDiracPairToVectorIntrinsic",
     "CertifiedChiralDiracVectorIntrinsic",
     "CertifiedRecurrenceFinalizationIntrinsic",
     "CertifiedRecurrenceIntrinsic",

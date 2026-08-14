@@ -1103,6 +1103,7 @@ fn scalar_projection(
         }
         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
         | RecurrenceDirectScalarProjectionManifest::ChiralDiracVectorScales { .. }
+        | RecurrenceDirectScalarProjectionManifest::ChiralDiracPairVectorScales { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveScalarPropagator { .. }
         | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. } => {
