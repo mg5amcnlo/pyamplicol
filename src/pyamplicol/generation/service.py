@@ -3842,7 +3842,16 @@ class GenerationBackend:
                     model_inputs.catalog,
                     layout="topology-replay",
                     normalization=normalization_contract,
-                    topology_replay=prepared.topology_replay,
+                    # The prepared replay contract belongs to the complete
+                    # color plan. An explicitly restricted spinor artifact
+                    # owns only its dense selected-flow domain, so replaying
+                    # complete-plan aliases here would silently broaden that
+                    # fixed-flow artifact again.
+                    topology_replay=(
+                        prepared.topology_replay
+                        if selection.selected_color_sector_ids is None
+                        else None
+                    ),
                     generation_slice=RecurrenceGenerationSliceV1(
                         selected_source_helicities=source_selection,
                     ),
@@ -3851,11 +3860,31 @@ class GenerationBackend:
                     closure_anchor_policy=self._recurrence_closure_anchor_policy,
                 )
                 if selection.selected_color_sector_ids is not None:
+                    selected_public_flow_ids = tuple(
+                        flow.flow_id for flow in logical.public_flows
+                    )
+                    if selection.reference_color_order is not None:
+                        source_slot_by_label = {
+                            int(leg.label): source_slot
+                            for source_slot, leg in enumerate(process.legs)
+                        }
+                        requested_word = tuple(
+                            source_slot_by_label[int(label)]
+                            for label in selection.reference_color_order
+                        )
+                        selected_public_flow_ids = tuple(
+                            flow.flow_id
+                            for flow in logical.public_flows
+                            if flow.word_source_slots == requested_word
+                        )
+                        if len(selected_public_flow_ids) != 1:
+                            raise GenerationError(
+                                "the requested fixed color order did not select "
+                                "exactly one recurrence public flow"
+                            )
                     logical = replace(
                         logical,
-                        selected_public_flow_ids=tuple(
-                            flow.flow_id for flow in logical.public_flows
-                        ),
+                        selected_public_flow_ids=selected_public_flow_ids,
                     )
                 try:
                     graph_payload = _invoke_rust_spinor_graph_lowering_v2(

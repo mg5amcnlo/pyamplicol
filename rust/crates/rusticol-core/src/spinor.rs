@@ -1802,6 +1802,92 @@ impl BispinorExpression {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BivectorTerm {
+    coefficient: SpinorNodeId,
+    left: BispinorExpression,
+    right: BispinorExpression,
+}
+
+/// An antisymmetric Lorentz tensor kept as a sparse sum of decomposable
+/// bivectors.  A term `(coefficient, left, right)` denotes
+/// `coefficient * (left ∧ right)` in the authenticated component ordering
+/// `(01, 02, 03, 12, 13, 23)`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BivectorExpression {
+    terms: Vec<BivectorTerm>,
+}
+
+pub(crate) fn bivector_wedge_expression(
+    builder: &SpinorDagBuilder,
+    left: &BispinorExpression,
+    right: &BispinorExpression,
+) -> BivectorExpression {
+    BivectorExpression {
+        terms: vec![BivectorTerm {
+            coefficient: builder.one(),
+            left: left.clone(),
+            right: right.clone(),
+        }],
+    }
+}
+
+pub(crate) fn bivector_sum(
+    builder: &SpinorDagBuilder,
+    expressions: impl IntoIterator<Item = BivectorExpression>,
+) -> BivectorExpression {
+    BivectorExpression {
+        terms: expressions
+            .into_iter()
+            .flat_map(|expression| expression.terms)
+            .filter(|term| term.coefficient != builder.zero())
+            .collect(),
+    }
+}
+
+pub(crate) fn bivector_scale(
+    builder: &mut SpinorDagBuilder,
+    scalar: SpinorNodeId,
+    expression: &BivectorExpression,
+) -> RusticolResult<BivectorExpression> {
+    if scalar == builder.zero() {
+        return Ok(BivectorExpression::default());
+    }
+    let mut terms = Vec::with_capacity(expression.terms.len());
+    for term in &expression.terms {
+        let coefficient = builder.product([scalar, term.coefficient])?;
+        if coefficient != builder.zero() {
+            terms.push(BivectorTerm {
+                coefficient,
+                left: term.left.clone(),
+                right: term.right.clone(),
+            });
+        }
+    }
+    Ok(BivectorExpression { terms })
+}
+
+/// Apply an antisymmetric tensor to a vector without materializing tensor
+/// components.  For the certified direct primitive,
+/// `(left ∧ right) vector = right (left·vector) - left (right·vector)`.
+pub(crate) fn bivector_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    tensor: &BivectorExpression,
+    vector: &BispinorExpression,
+) -> RusticolResult<BispinorExpression> {
+    let mut terms = Vec::with_capacity(tensor.terms.len() * 2);
+    for term in &tensor.terms {
+        let left_dot_vector = bispinor_dot_expression(builder, &term.left, vector)?;
+        let right_dot_vector = bispinor_dot_expression(builder, &term.right, vector)?;
+        let right_scale = builder.product([term.coefficient, left_dot_vector])?;
+        terms.push(bispinor_scale(builder, right_scale, &term.right)?);
+        let negative_coefficient = builder.negate(term.coefficient)?;
+        let left_scale = builder.product([negative_coefficient, right_dot_vector])?;
+        terms.push(bispinor_scale(builder, left_scale, &term.left)?);
+    }
+    bispinor_sum(builder, terms)
+}
+
 fn exact_real(numerator: i128, denominator: i128) -> RusticolResult<ExactComplexRational> {
     Ok(ExactComplexRational::new(
         ExactRational::new(numerator, denominator)?,
@@ -4138,6 +4224,28 @@ mod tests {
                 | SpinorNode::Product(_)
                 | SpinorNode::Reciprocal(_)
         )));
+    }
+
+    #[test]
+    fn sparse_bivector_action_has_the_certified_tensor_vector_orientation() {
+        let mut builder = SpinorDagBuilder::new(4).unwrap();
+        let one = builder.one();
+        let left = BispinorExpression::dyad(0, 1, one);
+        let right = BispinorExpression::dyad(2, 3, one);
+        let vector = BispinorExpression::dyad(1, 2, one);
+
+        let tensor = bivector_wedge_expression(&builder, &left, &right);
+        let actual = bivector_vector_expression(&mut builder, &tensor, &vector).unwrap();
+
+        let left_dot_vector = bispinor_dot_expression(&mut builder, &left, &vector).unwrap();
+        let right_dot_vector = bispinor_dot_expression(&mut builder, &right, &vector).unwrap();
+        let right_term = bispinor_scale(&mut builder, left_dot_vector, &right).unwrap();
+        let negative_right_dot_vector = builder.negate(right_dot_vector).unwrap();
+        let left_term = bispinor_scale(&mut builder, negative_right_dot_vector, &left).unwrap();
+        let expected = bispinor_sum(&mut builder, [right_term, left_term]).unwrap();
+
+        assert_ne!(actual, BispinorExpression::default());
+        assert_eq!(actual, expected);
     }
 
     #[test]

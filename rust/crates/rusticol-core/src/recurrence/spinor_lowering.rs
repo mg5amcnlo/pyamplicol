@@ -14,11 +14,12 @@ use super::{
     RecurrenceStrategy, SourceStateAssignment,
 };
 use crate::spinor::{
-    BispinorExpression, LinearWeylExpression, SpinorChirality, SpinorDagBuilder,
-    SpinorDagPayloadV2, SpinorKinematicScalar, SpinorPreparedParameterBinding,
+    BispinorExpression, BivectorExpression, LinearWeylExpression, SpinorChirality,
+    SpinorDagBuilder, SpinorDagPayloadV2, SpinorKinematicScalar, SpinorPreparedParameterBinding,
     SpinorSourceInputBinding, SpinorSourceInputKind, bispinor_dot_expression, bispinor_scale,
-    bispinor_sum, external_polarization_expression, linear_weyl_scale, linear_weyl_sum,
-    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
+    bispinor_sum, bivector_scale, bivector_sum, bivector_vector_expression,
+    bivector_wedge_expression, external_polarization_expression, linear_weyl_scale,
+    linear_weyl_sum, quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
     signed_momentum_expression, three_vector_bispinor_expression,
 };
 use crate::{RusticolError, RusticolResult};
@@ -33,6 +34,13 @@ const IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1";
 const THREE_VECTOR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.color-ordered-three-vector.v1";
 const THREE_VECTOR_CONTRACT: &str =
     "5fcffbd8137bb0bb892c7347693bf865d8a45279f13dcf10f70d93f1b7660beb";
+const ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.antisymmetric-tensor-vector.v1";
+const ANTISYMMETRIC_TENSOR_VECTOR_CONTRACT: &str =
+    "c4ba66d6b6a2a9bc0d0ccdb500ded6fb71fe3be6f8887a2468d86159ca6e2ffe";
+const VECTOR_WEDGE_VECTOR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.vector-wedge-vector.v1";
+const VECTOR_WEDGE_VECTOR_CONTRACT: &str =
+    "484328b1e11d0e294f512e11cc34797fda35d24c3724a83ffda3a7cbf73cb895";
 const WEYL_VECTOR_A_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-a.v1";
 const WEYL_VECTOR_A_CONTRACT: &str =
     "cefa8f1afe99611314d099742ee08d6014e16d6cf5cb12f06a4c07c82e1df4b2";
@@ -100,6 +108,7 @@ pub fn lower_authenticated_recurrence_to_spinor_payload_v2(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdStateKind {
     Vector,
+    Bivector,
     Weyl {
         chirality: SpinorChirality,
         orientation: CurrentOrientation,
@@ -109,6 +118,7 @@ enum QcdStateKind {
 #[derive(Clone, Debug)]
 enum QcdCurrent {
     Vector(BispinorExpression),
+    Bivector(BivectorExpression),
     Weyl {
         chirality: SpinorChirality,
         orientation: CurrentOrientation,
@@ -121,6 +131,8 @@ enum QcdCurrent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdContributionKind {
     ThreeVector,
+    AntisymmetricTensorVector,
+    VectorWedgeVector,
     WeylVector(SpinorChirality),
 }
 
@@ -276,37 +288,88 @@ fn qcd_state_kind(
         )));
     }
     let basis = template_string(templates, state.basis_string_id, "current-state basis")?;
+    let auxiliary_kind = if state.auxiliary_kind_string_id == MISSING_U32 {
+        None
+    } else {
+        Some(template_string(
+            templates,
+            state.auxiliary_kind_string_id,
+            "current-state auxiliary kind",
+        )?)
+    };
     let statistics = ParticleStatistics::try_from(state.statistics)?;
     let orientation = CurrentOrientation::try_from(state.orientation)?;
-    match (
+    let kind = match (
         statistics,
         basis,
         state.dimension,
         state.chirality,
         orientation,
+        auxiliary_kind,
     ) {
-        (ParticleStatistics::Boson, "lorentz-vector", 4, 0, CurrentOrientation::SelfConjugate) => {
-            Ok(QcdStateKind::Vector)
-        }
-        (ParticleStatistics::Fermion, "weyl-chiral", 2, chirality @ (-1 | 1), orientation)
-            if matches!(
-                orientation,
-                CurrentOrientation::Particle | CurrentOrientation::Antiparticle
-            ) =>
+        (
+            ParticleStatistics::Boson,
+            "lorentz-vector",
+            4,
+            0,
+            CurrentOrientation::SelfConjugate,
+            None,
+        ) => QcdStateKind::Vector,
+        (
+            ParticleStatistics::Boson,
+            "auxiliary:antisymmetric-tensor",
+            6,
+            0,
+            CurrentOrientation::SelfConjugate,
+            Some("antisymmetric-tensor"),
+        ) => QcdStateKind::Bivector,
+        (
+            ParticleStatistics::Fermion,
+            "weyl-chiral",
+            2,
+            chirality @ (-1 | 1),
+            orientation,
+            None,
+        ) if matches!(
+            orientation,
+            CurrentOrientation::Particle | CurrentOrientation::Antiparticle
+        ) =>
         {
-            Ok(QcdStateKind::Weyl {
+            QcdStateKind::Weyl {
                 chirality: if chirality == 1 {
                     SpinorChirality::Positive
                 } else {
                     SpinorChirality::Negative
                 },
                 orientation,
-            })
+            }
         }
-        _ => Err(invalid(format!(
-            "current-state template {state_id} is outside the vector/one-Weyl-line QCD slice"
-        ))),
+        _ => {
+            return Err(invalid(format!(
+                "current-state template {state_id} is outside the vector/bivector/one-Weyl-line QCD slice"
+            )));
+        }
+    };
+    let ordering = template_u32_sequence(
+        templates,
+        state.tensor_ordering_sequence_id,
+        "QCD current tensor ordering",
+    )?;
+    if ordering.len() != state.dimension as usize {
+        return Err(invalid(format!(
+            "current-state template {state_id} has the wrong tensor-ordering width"
+        )));
     }
+    for (component, string_id) in ordering.iter().copied().enumerate() {
+        let actual = template_string(templates, string_id, "QCD current tensor component")?;
+        let expected = format!("{basis}:c{component}");
+        if actual != expected {
+            return Err(invalid(format!(
+                "current-state template {state_id} uses unsupported tensor component {actual:?} at slot {component}"
+            )));
+        }
+    }
+    Ok(kind)
 }
 
 fn qcd_representative_signs(
@@ -433,6 +496,9 @@ fn lower_qcd_source(
                 &polarization,
             )?))
         }
+        QcdStateKind::Bivector => Err(invalid(
+            "an auxiliary antisymmetric tensor cannot be an external QCD source",
+        )),
         QcdStateKind::Weyl {
             chirality,
             orientation,
@@ -487,6 +553,8 @@ fn qcd_contribution_kind(
 ) -> RusticolResult<QcdContributionKind> {
     let expected_digest = match descriptor.runtime_template() {
         THREE_VECTOR_TEMPLATE => THREE_VECTOR_CONTRACT,
+        ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE => ANTISYMMETRIC_TENSOR_VECTOR_CONTRACT,
+        VECTOR_WEDGE_VECTOR_TEMPLATE => VECTOR_WEDGE_VECTOR_CONTRACT,
         WEYL_VECTOR_A_TEMPLATE => WEYL_VECTOR_A_CONTRACT,
         WEYL_VECTOR_B_TEMPLATE => WEYL_VECTOR_B_CONTRACT,
         other => {
@@ -507,6 +575,8 @@ fn qcd_contribution_kind(
     }
     Ok(match descriptor.runtime_template() {
         THREE_VECTOR_TEMPLATE => QcdContributionKind::ThreeVector,
+        ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE => QcdContributionKind::AntisymmetricTensorVector,
+        VECTOR_WEDGE_VECTOR_TEMPLATE => QcdContributionKind::VectorWedgeVector,
         WEYL_VECTOR_A_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Positive),
         WEYL_VECTOR_B_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Negative),
         _ => unreachable!("runtime template checked above"),
@@ -572,13 +642,13 @@ fn qcd_current_momentum(
     Ok((signed_momentum_expression(&terms), terms))
 }
 
-fn qcd_finalization<'a>(
+fn qcd_optional_finalization<'a>(
     current: &super::RecurrenceCurrent,
     program: &'a RecurrenceProgram,
-) -> RusticolResult<&'a super::RecurrenceFinalization> {
-    let id = current
-        .finalization_id()
-        .ok_or_else(|| invalid(format!("current {} has no finalization", current.id())))?;
+) -> RusticolResult<Option<&'a super::RecurrenceFinalization>> {
+    let Some(id) = current.finalization_id() else {
+        return Ok(None);
+    };
     let finalization = program
         .finalizations()
         .get(id as usize)
@@ -589,7 +659,19 @@ fn qcd_finalization<'a>(
             current.id()
         )));
     }
-    Ok(finalization)
+    Ok(Some(finalization))
+}
+
+fn qcd_finalization<'a>(
+    current: &super::RecurrenceCurrent,
+    program: &'a RecurrenceProgram,
+) -> RusticolResult<&'a super::RecurrenceFinalization> {
+    qcd_optional_finalization(current, program)?.ok_or_else(|| {
+        invalid(format!(
+            "current {} has no active finalization",
+            current.id()
+        ))
+    })
 }
 
 fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> RusticolResult<()> {
@@ -652,6 +734,11 @@ fn qcd_finalization_scale(
             VECTOR_PROPAGATOR_CONTRACT,
             false,
         ),
+        QcdStateKind::Bivector => {
+            return Err(invalid(
+                "an auxiliary antisymmetric tensor cannot have an active propagator",
+            ));
+        }
         QcdStateKind::Weyl {
             chirality: SpinorChirality::Positive,
             ..
@@ -798,14 +885,9 @@ fn lower_qcd_current(
             current.id()
         )));
     }
-    let finalization = qcd_finalization(current, program)?;
+    let finalization = qcd_optional_finalization(current, program)?;
     match state {
         QcdStateKind::Vector => {
-            if finalization.propagator_template_id().is_none() {
-                return Err(invalid(
-                    "the initial QCD slice does not materialize identity-finalized vector roots",
-                ));
-            }
             let mut terms = Vec::new();
             for contribution in &program.contributions()[range] {
                 if contribution.result_current_id() != current.id() {
@@ -813,54 +895,139 @@ fn lower_qcd_current(
                 }
                 let (kind, parents, descriptor) =
                     qcd_contribution_contract(contribution, program, templates, direct)?;
-                if kind != QcdContributionKind::ThreeVector {
-                    return Err(invalid("vector current uses a non-three-vector primitive"));
-                }
-                let left = required_qcd_vector(current_values, parents[0])?;
-                let right = required_qcd_vector(current_values, parents[1])?;
-                let (left_momentum, _) = qcd_current_momentum(
-                    &program.currents()[parents[0] as usize],
-                    representative_signs,
-                    builder,
-                )?;
-                let (right_momentum, _) = qcd_current_momentum(
-                    &program.currents()[parents[1] as usize],
-                    representative_signs,
-                    builder,
-                )?;
-                let numerator = three_vector_bispinor_expression(
-                    builder,
-                    left,
-                    &left_momentum,
-                    right,
-                    &right_momentum,
-                )?;
-                let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                 let scale = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                 let exact = builder.constant(contribution.exact_factor())?;
-                let scale = builder.product([sqrt_two, scale, exact])?;
+                let (numerator, scale) = match kind {
+                    QcdContributionKind::ThreeVector => {
+                        let left = required_qcd_vector(current_values, parents[0])?;
+                        let right = required_qcd_vector(current_values, parents[1])?;
+                        let (left_momentum, _) = qcd_current_momentum(
+                            &program.currents()[parents[0] as usize],
+                            representative_signs,
+                            builder,
+                        )?;
+                        let (right_momentum, _) = qcd_current_momentum(
+                            &program.currents()[parents[1] as usize],
+                            representative_signs,
+                            builder,
+                        )?;
+                        let numerator = three_vector_bispinor_expression(
+                            builder,
+                            left,
+                            &left_momentum,
+                            right,
+                            &right_momentum,
+                        )?;
+                        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        (numerator, builder.product([sqrt_two, scale, exact])?)
+                    }
+                    QcdContributionKind::AntisymmetricTensorVector => {
+                        let tensor = required_qcd_bivector(current_values, parents[0])?;
+                        let vector = required_qcd_vector(current_values, parents[1])?;
+                        let numerator = bivector_vector_expression(builder, tensor, vector)?;
+                        // Sparse vectors represent V/sqrt(2), while sparse
+                        // bivectors represent B/2.  The certified component
+                        // primitive therefore needs n_B*n_V/n_V = 2 here.
+                        let two = builder.constant(ExactComplexRational::new(
+                            ExactRational::new(2, 1)?,
+                            ExactRational::ZERO,
+                        ))?;
+                        (numerator, builder.product([two, scale, exact])?)
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "vector current uses a primitive with the wrong result type",
+                        ));
+                    }
+                };
                 terms.push(bispinor_scale(builder, scale, &numerator)?);
             }
             let numerator = bispinor_sum(builder, terms)?;
-            let scale = qcd_finalization_scale(
-                current,
-                state,
-                program,
-                templates,
-                direct,
-                dense_parameter_slots,
-                representative_signs,
-                builder,
-            )?;
+            let scale = if finalization
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_some()
+            {
+                qcd_finalization_scale(
+                    current,
+                    state,
+                    program,
+                    templates,
+                    direct,
+                    dense_parameter_slots,
+                    representative_signs,
+                    builder,
+                )?
+            } else {
+                require_identity_finalizer(direct)?;
+                if program.contributions().iter().any(|contribution| {
+                    contribution.result_current_id() > current.id()
+                        && contribution.parent_current_ids().contains(&current.id())
+                }) {
+                    return Err(invalid(
+                        "an identity-finalized vector current is reused as a contribution parent",
+                    ));
+                }
+                builder.constant(
+                    finalization
+                        .map(super::RecurrenceFinalization::exact_factor)
+                        .unwrap_or(ExactComplexRational::ONE),
+                )?
+            };
             Ok(QcdCurrent::Vector(bispinor_scale(
                 builder, scale, &numerator,
+            )?))
+        }
+        QcdStateKind::Bivector => {
+            if finalization
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_some()
+            {
+                return Err(invalid(
+                    "an auxiliary antisymmetric tensor has an active propagator",
+                ));
+            }
+            require_identity_finalizer(direct)?;
+            let mut terms = Vec::new();
+            for contribution in &program.contributions()[range] {
+                if contribution.result_current_id() != current.id() {
+                    return Err(invalid("QCD contribution belongs to the wrong current"));
+                }
+                let (kind, parents, descriptor) =
+                    qcd_contribution_contract(contribution, program, templates, direct)?;
+                if kind != QcdContributionKind::VectorWedgeVector {
+                    return Err(invalid(
+                        "bivector current uses a non-vector-wedge-vector primitive",
+                    ));
+                }
+                let left = required_qcd_vector(current_values, parents[0])?;
+                let right = required_qcd_vector(current_values, parents[1])?;
+                let wedge = bivector_wedge_expression(builder, left, right);
+                let intrinsic = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
+                let exact = builder.constant(contribution.exact_factor())?;
+                let scale = builder.product([intrinsic, exact])?;
+                // n_V*n_V/n_B = sqrt(2)^2/2 = 1.
+                terms.push(bivector_scale(builder, scale, &wedge)?);
+            }
+            let tensor = bivector_sum(builder, terms);
+            let finalization_scale = builder.constant(
+                finalization
+                    .map(super::RecurrenceFinalization::exact_factor)
+                    .unwrap_or(ExactComplexRational::ONE),
+            )?;
+            Ok(QcdCurrent::Bivector(bivector_scale(
+                builder,
+                finalization_scale,
+                &tensor,
             )?))
         }
         QcdStateKind::Weyl {
             chirality,
             orientation,
         } => {
-            if finalization.propagator_template_id().is_none() {
+            if finalization
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_none()
+            {
                 require_identity_finalizer(direct)?;
                 for contribution in &program.contributions()[range] {
                     let (kind, parents, _) =
@@ -953,6 +1120,18 @@ fn required_qcd_vector(
         Some(QcdCurrent::Vector(value)) => Ok(value),
         _ => Err(invalid(format!(
             "parent current {id} is not a lowered vector current"
+        ))),
+    }
+}
+
+fn required_qcd_bivector(
+    values: &[Option<QcdCurrent>],
+    id: u32,
+) -> RusticolResult<&BivectorExpression> {
+    match values.get(id as usize).and_then(Option::as_ref) {
+        Some(QcdCurrent::Bivector(value)) => Ok(value),
+        _ => Err(invalid(format!(
+            "parent current {id} is not a lowered antisymmetric-tensor current"
         ))),
     }
 }
@@ -1051,24 +1230,59 @@ fn lower_qcd_closures(
             return Err(invalid("QCD closure intrinsic descriptor is malformed"));
         }
         let coefficients = templates.closure_component_coefficients(row.id)?;
-        if coefficients.as_slice() != [ExactComplexRational::ONE, ExactComplexRational::ONE]
-            || template_string(
-                templates,
-                row.chirality_relation_string_id,
-                "QCD closure chirality relation",
-            )? != "opposite"
-        {
-            return Err(invalid(
-                "QCD closure is not the certified opposite-Weyl contraction",
-            ));
-        }
-
+        let chirality_relation = template_string(
+            templates,
+            row.chirality_relation_string_id,
+            "QCD closure chirality relation",
+        )?;
+        let metric_signature = template_optional_string(
+            templates,
+            row.metric_signature_string_id,
+            "QCD closure metric signature",
+        )?;
         let left = current_values
             .get(*left_id as usize)
             .ok_or_else(|| invalid("QCD closure left current is absent"))?;
         let right = current_values
             .get(*right_id as usize)
             .ok_or_else(|| invalid("QCD closure right current is absent"))?;
+        if let (QcdCurrent::Vector(left), QcdCurrent::Vector(right)) = (left, right) {
+            if coefficients.as_slice()
+                != [
+                    ExactComplexRational::ONE,
+                    ExactComplexRational::new(ExactRational::new(-1, 1)?, ExactRational::ZERO),
+                    ExactComplexRational::new(ExactRational::new(-1, 1)?, ExactRational::ZERO),
+                    ExactComplexRational::new(ExactRational::new(-1, 1)?, ExactRational::ZERO),
+                ]
+                || chirality_relation != "any"
+                || metric_signature != Some("mostly-minus")
+            {
+                return Err(invalid(
+                    "QCD vector closure is not the certified mostly-minus Lorentz contraction",
+                ));
+            }
+            let contraction = bispinor_dot_expression(builder, left, right)?;
+            // Both sparse vector expressions represent V/sqrt(2).
+            let two = builder.constant(ExactComplexRational::new(
+                ExactRational::new(2, 1)?,
+                ExactRational::ZERO,
+            ))?;
+            let exact = builder.constant(closure.exact_factor())?;
+            let node = builder.product([two, contraction, exact])?;
+            terms_by_destination
+                .entry(closure.target_destination_id())
+                .or_default()
+                .push(node);
+            continue;
+        }
+        if coefficients.as_slice() != [ExactComplexRational::ONE, ExactComplexRational::ONE]
+            || chirality_relation != "opposite"
+            || metric_signature.is_some()
+        {
+            return Err(invalid(
+                "QCD closure is not a certified vector or opposite-Weyl contraction",
+            ));
+        }
         let (
             terminal_id,
             terminal_chirality,
@@ -1134,8 +1348,11 @@ fn lower_qcd_closures(
             ));
         }
         let terminal = &program.currents()[terminal_id as usize];
-        let terminal_finalization = qcd_finalization(terminal, program)?;
-        if terminal_finalization.propagator_template_id().is_some() {
+        let terminal_finalization = qcd_optional_finalization(terminal, program)?;
+        if terminal_finalization
+            .and_then(|finalization| finalization.propagator_template_id())
+            .is_some()
+        {
             return Err(invalid(
                 "terminal QCD Weyl current is unexpectedly propagated",
             ));
@@ -1184,7 +1401,11 @@ fn lower_qcd_closures(
             ])?);
         }
         let terminal_sum = builder.sum(terminal_terms)?;
-        let terminal_exact = builder.constant(terminal_finalization.exact_factor())?;
+        let terminal_exact = builder.constant(
+            terminal_finalization
+                .map(super::RecurrenceFinalization::exact_factor)
+                .unwrap_or(ExactComplexRational::ONE),
+        )?;
         let closure_exact = builder.constant(closure.exact_factor())?;
         let node = builder.product([terminal_sum, terminal_exact, closure_exact])?;
         // Force momentum authentication for the terminal even though the
@@ -2119,6 +2340,18 @@ fn template_string<'a>(
     let range = range.as_usize_range(input.string_bytes.len(), label)?;
     std::str::from_utf8(&input.string_bytes[range])
         .map_err(|error| invalid(format!("{label} is not UTF-8: {error}")))
+}
+
+fn template_optional_string<'a>(
+    templates: &'a ValidatedRecurrenceTemplateInput,
+    string_id: u32,
+    label: &str,
+) -> RusticolResult<Option<&'a str>> {
+    if string_id == MISSING_U32 {
+        Ok(None)
+    } else {
+        template_string(templates, string_id, label).map(Some)
+    }
 }
 
 #[cfg(test)]

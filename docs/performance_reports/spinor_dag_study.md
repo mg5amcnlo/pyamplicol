@@ -14,8 +14,8 @@ It now has two complementary construction paths:
 
 - a model-driven recurrence lowerer which consumes the authenticated semantic
   recurrence and prepared-kernel catalogue. It currently publishes generic
-  scalar-contact graphs and the mixed fixed-flow process `u u~ > g g` without
-  a process-family tag or a PDG-specific lowering switch;
+  scalar-contact graphs, `u u~ > g g`, `u u~ > g g g`, and selected-flow
+  `g g > g g` without a process-family tag or a PDG-specific lowering switch;
 - compact specialized builders for four through six external gluons, one
   massless quark line plus two through four gluons, a massless quark line plus
   `Z + 0, 1, 2 gluons`, and `g g > t t~` in either LC ordering.
@@ -24,12 +24,15 @@ All of these evaluators expose one aggregate `h:sum` axis and run through the
 normal pyAmpliCol `Runtime`. The graph-backed path is an artifact format and
 runtime architecture, not merely a private numerical prototype.
 
-The first model-driven mixed-QCD benchmark is faster than the corresponding
-selected-flow component recurrence:
+The first model-driven mixed-QCD cell is faster than the corresponding
+selected-flow component recurrence. The newly covered contact and five-point
+cells are correct but not yet competitive with the component evaluator:
 
 | Process and fixed LC flow | Spinor us/point (RSE) | Component us/point (RSE) | Paired speedup (RSE) |
 | --- | ---: | ---: | ---: |
 | `u u~ > g g`, `flow:2,3,4,1` | 0.4025 (0.93%) | 0.5291 (0.68%) | 1.315x (1.14%) |
+| `g g > g g`, `flow:1,2,3,4` | 0.7542 (0.54%) | 0.6169 (1.50%) | 0.818x (1.54%) |
+| `u u~ > g g g`, `flow:2,3,4,5,1` | 1.9359 (1.11%) | 1.2619 (0.67%) | 0.652x (1.30%) |
 
 The earlier optimized all-gluon builders remain substantially faster:
 
@@ -62,9 +65,12 @@ The initial primitive set includes:
 
 - scalar product/contact transitions and scalar closure;
 - colour-ordered three-vector transitions;
+- vector-wedge-vector and antisymmetric-tensor-vector transitions, represented
+  as sparse sums of decomposable bivectors rather than six dense components;
 - both massless Weyl-vector transitions;
 - massless Weyl and Feynman-vector propagators;
-- metric-vector and opposite-chirality Weyl closures;
+- metric-vector and opposite-chirality Weyl closures, including
+  identity-finalized terminal vectors;
 - scalar, vector, and fermion source contracts with authenticated crossing.
 
 The certificate retains the runtime primitive, exact contract digest, parent
@@ -132,19 +138,19 @@ execution graph from the 7,482-node raw BG oracle to 415 live semantic nodes.
 
 ## Correctness
 
-The graph-backed `u u~ > g g` candidate and the component recurrence use the
-same saved seed-12345 momentum point and fixed flow:
+The graph-backed QCD candidates and component recurrence use the same saved
+seed-12345 momentum points and fixed flows:
 
-| Evaluator | Normalized value |
-| --- | ---: |
-| Spinor DAG | 4.459883460083079 |
-| Component recurrence | 4.459883460083116 |
+| Process and fixed flow | Spinor DAG | Component recurrence | Relative difference |
+| --- | ---: | ---: | ---: |
+| `u u~ > g g`, `flow:2,3,4,1` | 4.459883460083079 | 4.459883460083116 | 8.36e-15 |
+| `g g > g g`, `flow:1,2,3,4` | 24.344900673179623 | 24.344900673179900 | 1.14e-14 |
+| `u u~ > g g g`, `flow:2,3,4,5,1` | 0.0035919538077271934 | 0.0035919538077272050 | 3.26e-15 |
 
-The absolute difference is `3.73e-14` and the relative difference is
-`8.36e-15`. A separate integration test regenerates the prepared model and
-artifact, compares with the retained component oracle
-`4.45988346008312`, and verifies that doubling `alpha_s` multiplies this QCD
-power-two result by four.
+A single integration test regenerates the prepared model and all three graph
+artifacts, checks the retained component authorities (including the tracked
+four-gluon LC fixture value `1.7527418719125202` at its generic-1 point), and
+verifies that doubling `alpha_s` multiplies each result by `2**QCD_power`.
 
 The generic scalar integration covers two independently normalized processes:
 
@@ -177,22 +183,23 @@ zeros, parity multiplicities, scalar/batch parity, and liveness slot reuse.
 
 ## Structural size
 
-The model-driven mixed-QCD payload is small even though it carries the full
-always-summed graph:
+The model-driven QCD payloads remain compact, although the unfused generic DAG
+grows faster than the component recurrence:
 
-| Metric | Spinor graph | Component recurrence |
-| --- | ---: | ---: |
-| Process payload bytes | 431,458 | 7,266,670 |
-| Executable graph/schedule bytes | 1,412 | included in recurrence container |
-| Semantic DAG nodes / recurrence currents | 69 | 16 |
-| Estimated complex operations / contribution rows | 202 | 14 |
-| Stored helicity representatives | 4 | 4 |
+| Process | Spinor payload bytes | Component payload bytes | DAG nodes | Recurrence currents | DAG operands / contribution rows |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `u u~ > g g` | 431,458 | 7,266,670 | 69 | 16 | 202 / 14 |
+| `g g > g g` | 430,354 | 725,823 | 189 | 9 | 612 / 8 |
+| `u u~ > g g g` | 442,084 | 975,928 | 531 | 13 | 1,963 / 14 |
 
 The operation counts are structural proxies, not machine-instruction counts.
-The spinor graph's greater scalar-node count still wins at runtime because its
-nodes are simple shared bracket/scalar operations and avoid repeated
-four-component current kernels. Most of the candidate's 431 kB is ordinary
-compiled-model and physics metadata; the executable graph itself is 1.4 kB.
+The two-gluon quark graph's greater scalar-node count still wins at runtime
+because its nodes are simple shared bracket/scalar operations and avoid
+repeated four-component current kernels. The current generic contact and
+five-point graphs need further common-subexpression and liveness lowering;
+their structural growth is consistent with the measured slowdown. Most
+candidate bytes are ordinary compiled-model and physics metadata rather than
+workspace layout.
 
 For comparison, the specialized all-gluon graphs contain 13, 33, and 415
 nodes for four, five, and six external gluons, with 8, 16, and 32 stored roots.
@@ -202,20 +209,23 @@ nodes for four, five, and six external gluons, with 8, 16, and 32 stored roots.
 - Host: Intel Core i7-8700K, 6 cores / 12 threads, Linux x86_64,
   Python 3.12.3.
 - Model: prepared built-in SM, leading colour, selected sector 0.
-- Mixed process: `u u~ > g g`, fixed `flow:2,3,4,1`.
-- Input: the deterministic seed-12345 validation point, cycled to batch 128.
+- Processes: `u u~ > g g`, `g g > g g`, and `u u~ > g g g`, each with one
+  explicit fixed flow.
+- Input: each artifact's deterministic seed-12345 validation point, cycled to
+  batch 128.
 - Sampling: two warmups and five paired/interleaved blocks per evaluator;
   each block was calibrated to approximately one second.
 - Timer: native `Runtime._benchmark_f64_wall_time` for both implementations.
-- Candidate RSE: 0.93%; reference RSE: 0.68%; paired-speedup RSE: 1.14%.
+- Candidate RSE range: 0.54--1.11%; reference RSE range: 0.67--1.50%.
 
 Memory was guarded throughout the current mixed/scalar checkpoint:
 
 | Operation | Peak process-tree RSS |
 | --- | ---: |
 | Prepared built-in model | 0.189 GiB |
-| Candidate native restage | 2.694 GiB |
-| Fresh mixed-QCD integration test | 0.208 GiB |
+| Coordinated release restage plus focused Rust test | 3.389 GiB |
+| Fresh three-process QCD integration test | 0.241 GiB |
+| Four candidate/reference artifact generations | 0.210 GiB |
 | Fresh parameterized-scalar integration test | 1.293 GiB |
 | Paired mixed benchmark | 0.136 GiB |
 
@@ -257,6 +267,7 @@ generate_slice(
     ProcessRequest.parse("u u~ > g g", name="u_ubar_to_g_g"),
     Path(".artifacts/uugg-spinor"),
     selection=GenerationSlice(
+        reference_color_order=(2, 3, 4, 1),
         selected_color_sector_ids=(0,),
         experimental_spinor_dag=True,
     ),
@@ -292,15 +303,18 @@ python tools/developer/spinor_dag_mixed_benchmark.py \
 
 The result establishes a model-driven mixed-process execution path, but not a
 universal replacement for the component recurrence. The next generic
-primitives are:
+boundaries are:
 
-1. sparse bivector intermediates for authenticated four-gluon contact terms,
-   needed by the generic path for longer gluon chains;
-2. scalar--Dirac/Yukawa transitions and general massive-Dirac propagation;
-3. arbitrary massive-vector insertions rather than the current certified Z
+1. scalar--Dirac/Yukawa and Dirac-vector transitions plus general
+   massive-Dirac propagation;
+2. arbitrary massive-vector insertions rather than the current certified Z
    slice;
-4. more than one open quark line and more than one retained colour flow;
-5. a numerically safe dynamic BCFW shift or fallback for the specialized
+3. fermion-pair-to-vector transitions and more than one open quark line;
+4. more than one retained colour flow in one graph payload;
+5. common-subexpression, fusion, and liveness lowering for generic contact and
+   higher-multiplicity graphs, which are currently slower than the component
+   evaluator;
+6. a numerically safe dynamic BCFW shift or fallback for the specialized
    pure-gluon graphs.
 
 Until those are implemented and measured, unsupported recurrences continue to
