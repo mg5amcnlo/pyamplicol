@@ -45,6 +45,12 @@ DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE = (
 DIRAC_SCALAR_TO_DIRAC_TEMPLATE = (
     "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1"
 )
+WEYL_PAIR_TO_VECTOR_A_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-pair-to-vector-a.v1"
+)
+WEYL_PAIR_TO_VECTOR_B_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-pair-to-vector-b.v1"
+)
 MASSIVE_DIRAC_PARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1"
 )
@@ -221,6 +227,32 @@ _WITNESSES = (
         inverse_anchor_coefficient="-1",
         parent_component_counts=(2, 4),
         destination_component_count=2,
+    ),
+    _IntrinsicWitness(
+        runtime_template=WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+        expressions=(
+            "l0*r0+l1*r1",
+            "-l1*r0-l0*r1",
+            "1\U0001d456*(-l1*r0+l0*r1)",
+            "-l0*r0+l1*r1",
+        ),
+        anchor_monomial="l0*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(2, 2),
+        destination_component_count=4,
+    ),
+    _IntrinsicWitness(
+        runtime_template=WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
+        expressions=(
+            "l0*r0+l1*r1",
+            "l0*r1+l1*r0",
+            "1\U0001d456*(-l0*r1+l1*r0)",
+            "l0*r0-l1*r1",
+        ),
+        anchor_monomial="l0*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(2, 2),
+        destination_component_count=4,
     ),
     _IntrinsicWitness(
         runtime_template=(
@@ -930,6 +962,8 @@ __all__ = [
     "RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES",
     "RECURRENCE_INTRINSIC_SCALE_KIND",
     "RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND",
+    "WEYL_PAIR_TO_VECTOR_A_TEMPLATE",
+    "WEYL_PAIR_TO_VECTOR_B_TEMPLATE",
     "CertifiedRecurrenceFinalizationIntrinsic",
     "CertifiedRecurrenceIntrinsic",
     "certify_recurrence_contribution_intrinsic",

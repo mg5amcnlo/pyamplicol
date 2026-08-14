@@ -16,6 +16,8 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+    WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
 )
@@ -88,6 +90,22 @@ def _substitute(expression: str) -> str:
                 f"model::prepared::{prefix}_{component}",
             )
     return result
+
+
+_WEYL_PAIR_TO_VECTOR_EXPRESSIONS = {
+    WEYL_PAIR_TO_VECTOR_A_TEMPLATE: (
+        "l0*r0+l1*r1",
+        "-l1*r0-l0*r1",
+        "1\U0001d456*(-l1*r0+l0*r1)",
+        "-l0*r0+l1*r1",
+    ),
+    WEYL_PAIR_TO_VECTOR_B_TEMPLATE: (
+        "l0*r0+l1*r1",
+        "l0*r1+l1*r0",
+        "1\U0001d456*(-l0*r1+l1*r0)",
+        "l0*r0-l1*r1",
+    ),
+}
 
 
 def _reversed_contracts(
@@ -523,6 +541,113 @@ def test_rejects_noncontiguous_reversed_parent_basis() -> None:
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize(
+    "runtime_template",
+    (WEYL_PAIR_TO_VECTOR_A_TEMPLATE, WEYL_PAIR_TO_VECTOR_B_TEMPLATE),
+)
+def test_certifies_weyl_pair_to_vector_from_algebra_and_shape(
+    runtime_template: str,
+) -> None:
+    expressions = _WEYL_PAIR_TO_VECTOR_EXPRESSIONS[runtime_template]
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=tuple(
+            _substitute(f"7.07106781186547e-1\U0001d456*({item})")
+            for item in expressions
+        ),
+        input_contracts=_contracts(2, 2),
+        parent_component_counts=(2, 2),
+        destination_component_count=4,
+        binding_coupling=None,
+        factored_output_parameter_index=73,
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert result is not None
+    assert result.runtime_template == runtime_template
+    assert result.constant_scale == 0.0 + 0.707106781186547j
+    assert result.model_parameter_index == 73
+    assert result.parent_permutation == (0, 1)
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4604544271217802184,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": 73,
+    }
+
+
+@pytest.mark.parametrize(
+    "runtime_template",
+    (WEYL_PAIR_TO_VECTOR_A_TEMPLATE, WEYL_PAIR_TO_VECTOR_B_TEMPLATE),
+)
+def test_weyl_pair_to_vector_preserves_authenticated_parent_permutation(
+    runtime_template: str,
+) -> None:
+    expressions = _WEYL_PAIR_TO_VECTOR_EXPRESSIONS[runtime_template]
+    swapped = tuple(
+        _substitute(item.replace("l", "x").replace("r", "l").replace("x", "r"))
+        for item in expressions
+    )
+
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=swapped,
+            input_contracts=_contracts(2, 2),
+            parent_component_counts=(2, 2),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=swapped,
+        input_contracts=_contracts(2, 2),
+        parent_component_counts=(2, 2),
+        destination_component_count=4,
+        binding_coupling=None,
+        allow_nontrivial_parent_permutation=True,
+    )
+    assert result is not None
+    assert result.runtime_template == runtime_template
+    assert result.parent_permutation == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("coefficient", "chirality-orientation", "shape", "ambiguous-coupling"),
+)
+def test_weyl_pair_to_vector_rejects_contract_drift(mutation: str) -> None:
+    expressions = list(_WEYL_PAIR_TO_VECTOR_EXPRESSIONS[WEYL_PAIR_TO_VECTOR_A_TEMPLATE])
+    contracts = _contracts(2, 2)
+    parent_shape = (2, 2)
+    factored_slot = None
+    if mutation == "coefficient":
+        expressions[0] = expressions[0].replace("l1*r1", "2*l1*r1")
+    elif mutation == "chirality-orientation":
+        expressions[1] = _WEYL_PAIR_TO_VECTOR_EXPRESSIONS[
+            WEYL_PAIR_TO_VECTOR_B_TEMPLATE
+        ][1]
+    elif mutation == "shape":
+        contracts = _contracts(2, 3)
+        parent_shape = (2, 3)
+    else:
+        contracts = _contracts(2, 2, parameter_index=19)
+        expressions = [f"model::prepared::parameter*({item})" for item in expressions]
+        factored_slot = 73
+
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=tuple(_substitute(item) for item in expressions),
+            input_contracts=contracts,
+            parent_component_counts=parent_shape,
+            destination_component_count=4,
+            binding_coupling=None,
+            factored_output_parameter_index=factored_slot,
+            allow_nontrivial_parent_permutation=True,
+        )
+        is None
+    )
 
 
 def test_certifies_one_model_parameter_scale() -> None:

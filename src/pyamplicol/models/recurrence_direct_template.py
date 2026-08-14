@@ -32,6 +32,8 @@ from .recurrence_direct_intrinsics import (
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+    WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
     certify_recurrence_contribution_intrinsic,
@@ -90,6 +92,8 @@ _PREPARED_GRAPH_CONTRIBUTION_TEMPLATES = frozenset(
         DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
         DIRAC_VECTOR_PARTICLE_TEMPLATE,
+        WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+        WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     }
 )
 _PREPARED_GRAPH_FINALIZATION_TEMPLATES = frozenset(

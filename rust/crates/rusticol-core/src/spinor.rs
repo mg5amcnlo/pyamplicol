@@ -2281,6 +2281,34 @@ pub(crate) fn linear_weyl_scale(
     Ok(LinearWeylExpression { terms })
 }
 
+/// Lower the certified opposite-chirality particle/antiparticle bilinear to
+/// the sparse vector representation.  After the component witness is
+/// converted from Cartesian components to a bispinor, the component-source
+/// `D`/epsilon conventions give minus one rank-one dyad for either chirality.
+/// The caller retains the vector `1/sqrt(2)` storage normalization and vertex
+/// scale.
+pub(crate) fn weyl_pair_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    particle_chirality: SpinorChirality,
+    particle: &LinearWeylExpression,
+    antiparticle: &LinearWeylExpression,
+) -> RusticolResult<BispinorExpression> {
+    let mut terms = Vec::with_capacity(particle.terms.len() * antiparticle.terms.len());
+    for (particle_atom, particle_coefficient) in &particle.terms {
+        for (antiparticle_atom, antiparticle_coefficient) in &antiparticle.terms {
+            let coefficient =
+                builder.product([*particle_coefficient, *antiparticle_coefficient])?;
+            let coefficient = builder.negate(coefficient)?;
+            let (undotted, dotted) = match particle_chirality {
+                SpinorChirality::Negative => (*particle_atom, *antiparticle_atom),
+                SpinorChirality::Positive => (*antiparticle_atom, *particle_atom),
+            };
+            terms.push(BispinorExpression::dyad(undotted, dotted, coefficient));
+        }
+    }
+    bispinor_sum(builder, terms)
+}
+
 fn linear_weyl_bracket(
     builder: &mut SpinorDagBuilder,
     kind: SpinorBracketKind,
@@ -4641,6 +4669,90 @@ mod tests {
                     ),
                 ]),
             }
+        );
+    }
+
+    #[test]
+    fn weyl_pair_vector_sparse_witness_preserves_chiral_dyad_order() {
+        let mut builder = SpinorDagBuilder::new(3).unwrap();
+        let particle_coefficient = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(2, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let antiparticle_coefficient = builder
+            .constant(ExactComplexRational::new(
+                ExactRational::new(3, 1).unwrap(),
+                ExactRational::ZERO,
+            ))
+            .unwrap();
+        let particle = LinearWeylExpression::atom(0, particle_coefficient);
+        let antiparticle = LinearWeylExpression::atom(1, antiparticle_coefficient);
+        let coefficient = builder
+            .product([particle_coefficient, antiparticle_coefficient])
+            .unwrap();
+        let coefficient = builder.negate(coefficient).unwrap();
+
+        assert_eq!(
+            weyl_pair_vector_expression(
+                &mut builder,
+                SpinorChirality::Negative,
+                &particle,
+                &antiparticle,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(0, 1, coefficient),
+        );
+        assert_eq!(
+            weyl_pair_vector_expression(
+                &mut builder,
+                SpinorChirality::Positive,
+                &particle,
+                &antiparticle,
+            )
+            .unwrap(),
+            BispinorExpression::dyad(1, 0, coefficient),
+        );
+    }
+
+    #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+    #[test]
+    fn weyl_pair_vector_component_witness_matches_d_epsilon_conventions() {
+        let particle = [c(1.25, -0.5), c(-0.75, 0.375)];
+        let antiparticle = [c(0.625, 0.25), c(-1.5, -0.125)];
+        let epsilon = |[first, second]: WeylSpinor| [-second, first];
+        let negate = |spinor: WeylSpinor| spinor.map(|component| -component);
+
+        // A consumes particle chirality -1 and antiparticle chirality +1.
+        // Their component arrays are D p = epsilon(p) and
+        // -D a = -epsilon(a), respectively.
+        let [l0, l1] = epsilon(particle);
+        let [r0, r1] = negate(epsilon(antiparticle));
+        let component_a = [
+            l0 * r0 + l1 * r1,
+            -l1 * r0 - l0 * r1,
+            I * (-l1 * r0 + l0 * r1),
+            -l0 * r0 + l1 * r1,
+        ];
+        assert_array_close(
+            vector_to_bispinor(component_a),
+            outer(particle, antiparticle).map(|component| -2.0 * component),
+        );
+
+        // B consumes particle chirality +1 directly and antiparticle
+        // chirality -1 with the authenticated minus-D convention.
+        let [l0, l1] = particle;
+        let [r0, r1] = negate(antiparticle);
+        let component_b = [
+            l0 * r0 + l1 * r1,
+            l0 * r1 + l1 * r0,
+            I * (-l0 * r1 + l1 * r0),
+            l0 * r0 - l1 * r1,
+        ];
+        assert_array_close(
+            vector_to_bispinor(component_b),
+            outer(antiparticle, particle).map(|component| -2.0 * component),
         );
     }
 

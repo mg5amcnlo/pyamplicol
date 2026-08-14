@@ -25,7 +25,7 @@ use crate::spinor::{
     massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
     massive_vector_polarization_expression, quark_vector_weyl_bilinear,
     quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
-    three_vector_bispinor_expression,
+    three_vector_bispinor_expression, weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -52,6 +52,12 @@ const WEYL_VECTOR_A_CONTRACT: &str =
 const WEYL_VECTOR_B_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-b.v1";
 const WEYL_VECTOR_B_CONTRACT: &str =
     "488de507671a00baeb23979e51303f1a77e7c4747b733ee51c95b00705ca393b";
+const WEYL_PAIR_VECTOR_A_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-pair-to-vector-a.v1";
+const WEYL_PAIR_VECTOR_A_CONTRACT: &str =
+    "4ba229a983d630393867793ae53d0a6acb9d503e4767a43e0c804cb3cf43bf7a";
+const WEYL_PAIR_VECTOR_B_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-pair-to-vector-b.v1";
+const WEYL_PAIR_VECTOR_B_CONTRACT: &str =
+    "83760c08f5e0af401e2d9667af182884da31123a94b25304ec7f8d4530bf83c7";
 const WEYL_PROPAGATOR_A_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-propagator-a.v1";
 const WEYL_PROPAGATOR_A_CONTRACT: &str =
     "2ca86441343f898281b2848144810275e23b01a032e6bedbdaa6bbdd75d22b88";
@@ -134,6 +140,7 @@ pub fn lower_authenticated_recurrence_to_spinor_payload_v2(
 enum QcdStateKind {
     Scalar,
     Vector,
+    U1SubtractionVector,
     MassiveVector {
         orientation: CurrentOrientation,
         species_string_id: u32,
@@ -174,6 +181,7 @@ enum QcdContributionKind {
     AntisymmetricTensorVector,
     VectorWedgeVector,
     WeylVector(SpinorChirality),
+    WeylPairVector(SpinorChirality),
     DiracVector(CurrentOrientation),
     DiracScalar,
 }
@@ -380,106 +388,122 @@ fn qcd_state_kind(
     };
     let statistics = ParticleStatistics::try_from(state.statistics)?;
     let orientation = CurrentOrientation::try_from(state.orientation)?;
-    let kind = match (
-        statistics,
-        basis,
-        state.dimension,
-        state.chirality,
-        orientation,
-        auxiliary_kind,
-    ) {
-        (ParticleStatistics::Boson, "scalar", 1, 0, CurrentOrientation::SelfConjugate, None)
-            if state.particle_id == state.anti_particle_id
+    let kind = if is_u1_subtraction_vector_state(state, basis, auxiliary_kind, templates)? {
+        QcdStateKind::U1SubtractionVector
+    } else {
+        match (
+            statistics,
+            basis,
+            state.dimension,
+            state.chirality,
+            orientation,
+            auxiliary_kind,
+        ) {
+            (
+                ParticleStatistics::Boson,
+                "scalar",
+                1,
+                0,
+                CurrentOrientation::SelfConjugate,
+                None,
+            ) if state.particle_id == state.anti_particle_id
                 && state.width_parameter_id == MISSING_U32 =>
-        {
-            QcdStateKind::Scalar
-        }
-        (
-            ParticleStatistics::Boson,
-            "lorentz-vector",
-            4,
-            0,
-            CurrentOrientation::SelfConjugate,
-            None,
-        ) if state.mass_parameter_id == MISSING_U32 && state.width_parameter_id == MISSING_U32 => {
-            QcdStateKind::Vector
-        }
-        (ParticleStatistics::Boson, "lorentz-vector", 4, 0, orientation, None)
-            if state.mass_parameter_id != MISSING_U32
+            {
+                QcdStateKind::Scalar
+            }
+            (
+                ParticleStatistics::Boson,
+                "lorentz-vector",
+                4,
+                0,
+                CurrentOrientation::SelfConjugate,
+                None,
+            ) if state.mass_parameter_id == MISSING_U32
                 && state.width_parameter_id == MISSING_U32 =>
-        {
-            let orientation_is_authenticated = match orientation {
-                CurrentOrientation::SelfConjugate => state.particle_id == state.anti_particle_id,
-                CurrentOrientation::Particle | CurrentOrientation::Antiparticle => {
-                    state.particle_id != state.anti_particle_id
-                        && massive_vector_conjugate_state_count(
-                            &templates.input().current_states,
-                            state,
-                        ) == 1
+            {
+                QcdStateKind::Vector
+            }
+            (ParticleStatistics::Boson, "lorentz-vector", 4, 0, orientation, None)
+                if state.mass_parameter_id != MISSING_U32
+                    && state.width_parameter_id == MISSING_U32 =>
+            {
+                let orientation_is_authenticated = match orientation {
+                    CurrentOrientation::SelfConjugate => {
+                        state.particle_id == state.anti_particle_id
+                    }
+                    CurrentOrientation::Particle | CurrentOrientation::Antiparticle => {
+                        state.particle_id != state.anti_particle_id
+                            && massive_vector_conjugate_state_count(
+                                &templates.input().current_states,
+                                state,
+                            ) == 1
+                    }
+                };
+                if !orientation_is_authenticated {
+                    return Err(invalid(format!(
+                        "massive-vector current-state template {state_id} has no unique authenticated charge conjugate"
+                    )));
                 }
-            };
-            if !orientation_is_authenticated {
-                return Err(invalid(format!(
-                    "massive-vector current-state template {state_id} has no unique authenticated charge conjugate"
-                )));
+                let mass_prepared_slot = prepared_real_parameter_slot(
+                    templates,
+                    state.mass_parameter_id,
+                    "massive-vector state mass",
+                )?;
+                QcdStateKind::MassiveVector {
+                    orientation,
+                    species_string_id: state.species_string_id,
+                    mass_parameter_id: state.mass_parameter_id,
+                    mass_prepared_slot,
+                }
             }
-            let mass_prepared_slot = prepared_real_parameter_slot(
-                templates,
-                state.mass_parameter_id,
-                "massive-vector state mass",
-            )?;
-            QcdStateKind::MassiveVector {
+            (
+                ParticleStatistics::Boson,
+                "auxiliary:antisymmetric-tensor",
+                6,
+                0,
+                CurrentOrientation::SelfConjugate,
+                Some("antisymmetric-tensor"),
+            ) if state.mass_parameter_id == MISSING_U32
+                && state.width_parameter_id == MISSING_U32 =>
+            {
+                QcdStateKind::Bivector
+            }
+            (
+                ParticleStatistics::Fermion,
+                "weyl-chiral",
+                2,
+                chirality @ (-1 | 1),
                 orientation,
-                species_string_id: state.species_string_id,
-                mass_parameter_id: state.mass_parameter_id,
-                mass_prepared_slot,
-            }
-        }
-        (
-            ParticleStatistics::Boson,
-            "auxiliary:antisymmetric-tensor",
-            6,
-            0,
-            CurrentOrientation::SelfConjugate,
-            Some("antisymmetric-tensor"),
-        ) if state.mass_parameter_id == MISSING_U32 && state.width_parameter_id == MISSING_U32 => {
-            QcdStateKind::Bivector
-        }
-        (
-            ParticleStatistics::Fermion,
-            "weyl-chiral",
-            2,
-            chirality @ (-1 | 1),
-            orientation,
-            None,
-        ) if matches!(
-            orientation,
-            CurrentOrientation::Particle | CurrentOrientation::Antiparticle
-        ) && state.mass_parameter_id == MISSING_U32
-            && state.width_parameter_id == MISSING_U32 =>
-        {
-            QcdStateKind::Weyl {
-                chirality: if chirality == 1 {
-                    SpinorChirality::Positive
-                } else {
-                    SpinorChirality::Negative
-                },
-                orientation,
-            }
-        }
-        (ParticleStatistics::Fermion, "dirac", 4, 0, orientation, None)
-            if matches!(
+                None,
+            ) if matches!(
                 orientation,
                 CurrentOrientation::Particle | CurrentOrientation::Antiparticle
-            ) && state.mass_parameter_id != MISSING_U32
+            ) && state.mass_parameter_id == MISSING_U32
                 && state.width_parameter_id == MISSING_U32 =>
-        {
-            QcdStateKind::Dirac { orientation }
-        }
-        _ => {
-            return Err(invalid(format!(
-                "current-state template {state_id} is outside the scalar/massless-or-massive-vector/bivector/one-fermion-line QCD slice"
-            )));
+            {
+                QcdStateKind::Weyl {
+                    chirality: if chirality == 1 {
+                        SpinorChirality::Positive
+                    } else {
+                        SpinorChirality::Negative
+                    },
+                    orientation,
+                }
+            }
+            (ParticleStatistics::Fermion, "dirac", 4, 0, orientation, None)
+                if matches!(
+                    orientation,
+                    CurrentOrientation::Particle | CurrentOrientation::Antiparticle
+                ) && state.mass_parameter_id != MISSING_U32
+                    && state.width_parameter_id == MISSING_U32 =>
+            {
+                QcdStateKind::Dirac { orientation }
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "current-state template {state_id} is outside the scalar/vector/bivector/fermion QCD slice"
+                )));
+            }
         }
     };
     let ordering = template_u32_sequence(
@@ -502,6 +526,32 @@ fn qcd_state_kind(
         }
     }
     Ok(kind)
+}
+
+fn is_u1_subtraction_vector_state(
+    state: &super::template::CurrentStateRow,
+    basis: &str,
+    auxiliary_kind: Option<&str>,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<bool> {
+    Ok(
+        ParticleStatistics::try_from(state.statistics)? == ParticleStatistics::Boson
+            && CurrentOrientation::try_from(state.orientation)?
+                == CurrentOrientation::SelfConjugate
+            && state.particle_id == state.anti_particle_id
+            && state.color_representation == 1
+            && basis == "auxiliary:u1-subtraction-color-flow-vector"
+            && state.dimension == 4
+            && state.chirality == 0
+            && template_string(
+                templates,
+                state.lc_color_shape_string_id,
+                "U(1)-subtraction vector LC color shape",
+            )? == "singlet-forest"
+            && auxiliary_kind == Some("u1-subtraction-color-flow-vector")
+            && state.mass_parameter_id == MISSING_U32
+            && state.width_parameter_id == MISSING_U32,
+    )
 }
 
 fn massive_vector_conjugate_state_count(
@@ -695,6 +745,11 @@ fn qcd_source_layout(
                         .map_err(|_| invalid("vector source slot exceeds u16"))?,
                 );
                 (SpinorSourceInputKind::NullSpinor, None)
+            }
+            QcdStateKind::U1SubtractionVector => {
+                return Err(invalid(
+                    "an auxiliary U(1)-subtraction vector cannot be a QCD source",
+                ));
             }
             QcdStateKind::MassiveVector {
                 orientation,
@@ -947,6 +1002,9 @@ fn lower_qcd_source(
                 &polarization,
             )?))
         }
+        QcdStateKind::U1SubtractionVector => Err(invalid(
+            "an auxiliary U(1)-subtraction vector cannot be an external QCD source",
+        )),
         QcdStateKind::MassiveVector {
             mass_parameter_id,
             mass_prepared_slot,
@@ -1123,6 +1181,8 @@ fn qcd_contribution_kind(
         VECTOR_WEDGE_VECTOR_TEMPLATE => VECTOR_WEDGE_VECTOR_CONTRACT,
         WEYL_VECTOR_A_TEMPLATE => WEYL_VECTOR_A_CONTRACT,
         WEYL_VECTOR_B_TEMPLATE => WEYL_VECTOR_B_CONTRACT,
+        WEYL_PAIR_VECTOR_A_TEMPLATE => WEYL_PAIR_VECTOR_A_CONTRACT,
+        WEYL_PAIR_VECTOR_B_TEMPLATE => WEYL_PAIR_VECTOR_B_CONTRACT,
         DIRAC_VECTOR_PARTICLE_TEMPLATE => DIRAC_VECTOR_PARTICLE_CONTRACT,
         DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
         DIRAC_SCALAR_TEMPLATE => DIRAC_SCALAR_CONTRACT,
@@ -1149,6 +1209,12 @@ fn qcd_contribution_kind(
         VECTOR_WEDGE_VECTOR_TEMPLATE => QcdContributionKind::VectorWedgeVector,
         WEYL_VECTOR_A_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Positive),
         WEYL_VECTOR_B_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Negative),
+        WEYL_PAIR_VECTOR_A_TEMPLATE => {
+            QcdContributionKind::WeylPairVector(SpinorChirality::Negative)
+        }
+        WEYL_PAIR_VECTOR_B_TEMPLATE => {
+            QcdContributionKind::WeylPairVector(SpinorChirality::Positive)
+        }
         DIRAC_VECTOR_PARTICLE_TEMPLATE => {
             QcdContributionKind::DiracVector(CurrentOrientation::Particle)
         }
@@ -1426,7 +1492,7 @@ fn qcd_finalization_scale(
         QcdStateKind::Scalar => {
             return Err(invalid("a scalar insertion cannot have a QCD finalizer"));
         }
-        QcdStateKind::Vector => (
+        QcdStateKind::Vector | QcdStateKind::U1SubtractionVector => (
             VECTOR_PROPAGATOR_TEMPLATE,
             VECTOR_PROPAGATOR_CONTRACT,
             false,
@@ -1603,7 +1669,7 @@ fn lower_qcd_current(
         QcdStateKind::MassiveVector { .. } => Err(invalid(
             "the massive-vector slice supports authenticated external sources only",
         )),
-        QcdStateKind::Vector => {
+        QcdStateKind::Vector | QcdStateKind::U1SubtractionVector => {
             let mut terms = Vec::new();
             for contribution in &program.contributions()[range] {
                 if contribution.result_current_id() != current.id() {
@@ -1649,6 +1715,23 @@ fn lower_qcd_current(
                             ExactRational::ZERO,
                         ))?;
                         (numerator, builder.product([two, scale, exact])?)
+                    }
+                    QcdContributionKind::WeylPairVector(particle_chirality) => {
+                        let (particle, antiparticle) =
+                            required_qcd_weyl_pair(current_values, parents, particle_chirality)?;
+                        let numerator = weyl_pair_vector_expression(
+                            builder,
+                            particle_chirality,
+                            particle,
+                            antiparticle,
+                        )?;
+                        // The component witness returns a Cartesian vector,
+                        // while a sparse dyad is that vector divided by two.
+                        // Combining the DAG's V/sqrt(2) convention with the
+                        // authenticated component scale therefore contributes
+                        // one explicit sqrt(2).
+                        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        (numerator, builder.product([sqrt_two, scale, exact])?)
                     }
                     _ => {
                         return Err(invalid(
@@ -2003,6 +2086,29 @@ fn required_qcd_weyl(
             "parent current {id} is not a propagated/source Weyl current"
         ))),
     }
+}
+
+fn required_qcd_weyl_pair(
+    values: &[Option<QcdCurrent>],
+    parents: [u32; 2],
+    particle_chirality: SpinorChirality,
+) -> RusticolResult<(&LinearWeylExpression, &LinearWeylExpression)> {
+    let (left_chirality, left_orientation, particle) = required_qcd_weyl(values, parents[0])?;
+    let (right_chirality, right_orientation, antiparticle) = required_qcd_weyl(values, parents[1])?;
+    let antiparticle_chirality = match particle_chirality {
+        SpinorChirality::Positive => SpinorChirality::Negative,
+        SpinorChirality::Negative => SpinorChirality::Positive,
+    };
+    if left_orientation != CurrentOrientation::Particle
+        || right_orientation != CurrentOrientation::Antiparticle
+        || left_chirality != particle_chirality
+        || right_chirality != antiparticle_chirality
+    {
+        return Err(invalid(
+            "Weyl-pair vector primitive does not have its certified particle/antiparticle chirality order",
+        ));
+    }
+    Ok((particle, antiparticle))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3774,6 +3880,70 @@ mod tests {
         assert_eq!(
             massive_vector_conjugate_state_count(&[particle, antiparticle, duplicate], &particle),
             2
+        );
+    }
+
+    #[test]
+    fn u1_subtraction_vector_requires_its_singlet_auxiliary_contract() {
+        let templates = validated_template_fixture();
+        let mut state = templates.input().current_states[0];
+        state.particle_id = 701;
+        state.anti_particle_id = 701;
+        state.orientation = CurrentOrientation::SelfConjugate as u8;
+        state.statistics = ParticleStatistics::Boson as u8;
+        state.color_representation = 1;
+        state.dimension = 4;
+        state.chirality = 0;
+        state.mass_parameter_id = MISSING_U32;
+        state.width_parameter_id = MISSING_U32;
+
+        let classify = |candidate: &crate::recurrence::template::CurrentStateRow,
+                        basis: &str,
+                        auxiliary: Option<&str>| {
+            is_u1_subtraction_vector_state(candidate, basis, auxiliary, &templates).unwrap()
+        };
+        let basis = "auxiliary:u1-subtraction-color-flow-vector";
+        let auxiliary = Some("u1-subtraction-color-flow-vector");
+        assert!(classify(&state, basis, auxiliary));
+        assert!(!classify(&state, "lorentz-vector", auxiliary));
+        assert!(!classify(&state, basis, Some("antisymmetric-tensor")));
+
+        let mut colored = state;
+        colored.color_representation = 8;
+        assert!(!classify(&colored, basis, auxiliary));
+        let mut massive = state;
+        massive.mass_parameter_id = 0;
+        assert!(!classify(&massive, basis, auxiliary));
+        let mut oriented = state;
+        oriented.orientation = CurrentOrientation::Particle as u8;
+        assert!(!classify(&oriented, basis, auxiliary));
+    }
+
+    #[test]
+    fn weyl_pair_vector_requires_canonical_particle_antiparticle_states() {
+        let builder = SpinorDagBuilder::new(4).unwrap();
+        let particle = QcdCurrent::Weyl {
+            chirality: SpinorChirality::Negative,
+            orientation: CurrentOrientation::Particle,
+            value: Some(LinearWeylExpression::atom(0, builder.one())),
+        };
+        let antiparticle = QcdCurrent::Weyl {
+            chirality: SpinorChirality::Positive,
+            orientation: CurrentOrientation::Antiparticle,
+            value: Some(LinearWeylExpression::atom(1, builder.one())),
+        };
+        let canonical = vec![Some(particle.clone()), Some(antiparticle.clone())];
+        assert!(required_qcd_weyl_pair(&canonical, [0, 1], SpinorChirality::Negative).is_ok());
+        assert!(required_qcd_weyl_pair(&canonical, [0, 1], SpinorChirality::Positive).is_err());
+
+        let raw_antiparticle_first = vec![Some(antiparticle), Some(particle)];
+        assert!(
+            required_qcd_weyl_pair(&raw_antiparticle_first, [1, 0], SpinorChirality::Negative,)
+                .is_ok()
+        );
+        assert!(
+            required_qcd_weyl_pair(&raw_antiparticle_first, [0, 1], SpinorChirality::Negative,)
+                .is_err()
         );
     }
 

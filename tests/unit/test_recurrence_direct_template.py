@@ -22,6 +22,8 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+    WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
 )
@@ -371,6 +373,55 @@ def test_factored_coupling_intrinsic_slot_round_trips_and_is_authenticated() -> 
     ] = 73
     with pytest.raises(RecurrenceDirectTemplateError, match="unsupported fields"):
         RecurrenceDirectPayloadBindingV1.from_dict(malformed)
+
+
+def test_weyl_pair_graph_contract_keeps_prepared_component_execution() -> None:
+    contract_digest = RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+        WEYL_PAIR_TO_VECTOR_A_TEMPLATE
+    ]
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceIntrinsic(
+            runtime_template=WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+            contract_digest=contract_digest,
+            constant_scale=0.0 + 0.707106781186547j,
+            model_parameter_index=73,
+            parent_permutation=(1, 0),
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic)
+    payload = binding.to_dict()
+
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["contribution_parent_permutation"] == [0, 1]
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": contract_digest,
+        "contribution_parent_permutation": [1, 0],
+        "runtime_template": WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 4604544271217802184,
+            "constant_real_bits": 0,
+            "kind": "intrinsic-scale-v1",
+            "parameter_index": 73,
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["runtime_template"] = WEYL_PAIR_TO_VECTOR_B_TEMPLATE
+    with pytest.raises(RecurrenceDirectTemplateError, match="not authenticated"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["contribution_parent_permutation"] = [0, 1]
+    with pytest.raises(RecurrenceDirectTemplateError, match="payload digest"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["parameter_index"] = 74
+    with pytest.raises(RecurrenceDirectTemplateError, match="payload digest"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
 
 
 def test_factored_output_parameter_slot_is_resolved_from_semantic_ownership() -> None:
@@ -809,6 +860,8 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1",
             "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1",
             "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1",
+            WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
+            WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
         }.issubset(
             {
                 item.payload_binding.graph_intrinsic.runtime_template
@@ -819,6 +872,26 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
         assert all(
             item.payload_binding.kind == "prepared-direct-call"
             for item in graph_contributions
+        )
+        weyl_pair_currents = tuple(
+            item
+            for item in graph_contributions
+            if item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            in {WEYL_PAIR_TO_VECTOR_A_TEMPLATE, WEYL_PAIR_TO_VECTOR_B_TEMPLATE}
+        )
+        assert weyl_pair_currents
+        assert all(
+            item.parent_component_counts == (2, 2)
+            and item.destination_component_count == 4
+            and item.payload_binding.kind == "prepared-direct-call"
+            for item in weyl_pair_currents
+        )
+        assert any(
+            item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection["parameter_index"]
+            is not None
+            for item in weyl_pair_currents
         )
         massive_finalizers = tuple(
             item

@@ -4,8 +4,8 @@
     "mode": "candidate"
   },
   "bundle": "built-in-sm-jit-o2-x86_64.pyamplicol-model",
-  "bundle_sha256": "1b7d8072c72e2068154d4f9ba9ae1cc334f4e391a2be0b944e5ce65219649439",
-  "bundle_size": 7855189,
+  "bundle_sha256": "38b44da8bc6305265786cd95d12b00a751d16029d0c740c91c584bc4dbfafd65",
+  "bundle_size": 7871870,
   "dependencies": {
     "symbolica_serialization_abi": "symbolica-bincode2-v1",
     "symbolica_version": "2.2.0",
@@ -22,7 +22,7 @@
   "prepared_model_bundle_schema": 1,
   "producer": {
     "compiled_model_schema": 9,
-    "model_compiler_sha256": "54d93204ee25c835d75f984fbf1e6366147bd2df86a116952a811f0cd91169d7",
+    "model_compiler_sha256": "468a07e9c37f03939c287290a210b1a8fa2c4282f168a82efedd71130539ad92",
     "model_compiler_version": 13,
     "model_source_digest": "9b2ba87ff9ad4c4926c19edbfa415f0e9d5bab273fcbac22690facf813fb5623",
     "package_version": "0.1.4.dev0+candidate.1ab23831e4bf"
