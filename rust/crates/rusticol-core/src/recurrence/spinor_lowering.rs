@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: 0BSD
 
-//! Fail-closed lowering of authenticated recurrences to spinor DAG v2.
+//! Fail-closed lowering of authenticated recurrences to spinor DAG v3.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,16 +16,17 @@ use super::{
 };
 use crate::spinor::{
     BispinorExpression, BivectorExpression, DiracExpression, LinearWeylExpression, SpinorChirality,
-    SpinorDagBuilder, SpinorDagPayloadV2, SpinorKinematicScalar, SpinorPreparedParameterBinding,
+    SpinorDagBuilder, SpinorDagPayloadV3, SpinorKinematicScalar, SpinorPreparedParameterBinding,
     SpinorSourceInputBinding, SpinorSourceInputKind, bispinor_dot_expression, bispinor_scale,
     bispinor_sum, bivector_scale, bivector_sum, bivector_vector_expression,
     bivector_wedge_expression, dirac_bilinear, dirac_propagator_numerator, dirac_scalar_expression,
     dirac_scale, dirac_sum, dirac_vector_expression, external_polarization_expression,
-    linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
-    massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
-    massive_vector_polarization_expression, massive_vector_propagator_expression,
-    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
-    signed_momentum_expression, three_vector_bispinor_expression, weyl_pair_vector_expression,
+    external_polarization_expression_with_reference, linear_weyl_scale, linear_weyl_sum,
+    massive_dirac_propagator_denominator, massive_dirac_source_expression,
+    massive_vector_longitudinal_polarization_expression, massive_vector_polarization_expression,
+    massive_vector_propagator_expression, quark_vector_weyl_bilinear,
+    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
+    three_vector_bispinor_expression, weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -109,10 +110,10 @@ fn invalid(message: impl Into<String>) -> RusticolError {
 /// Eligibility is established solely by the validated one-component source,
 /// transition, closure and prepared-direct intrinsic contracts. Anything
 /// outside this first executable primitive set is rejected.
-pub fn lower_authenticated_recurrence_to_spinor_payload_v2(
+pub fn lower_authenticated_recurrence_to_spinor_payload_v3(
     authenticated: &AuthenticatedRecurrenceBuilderInput,
     direct: &PreparedDirectExecutorCatalog,
-) -> RusticolResult<SpinorDagPayloadV2> {
+) -> RusticolResult<SpinorDagPayloadV3> {
     let program = authenticated.build()?;
     let templates = authenticated.template();
     let source_count = usize::try_from(authenticated.process().summary().external_leg_count())
@@ -206,7 +207,7 @@ fn lower_qcd_program(
     direct: &PreparedDirectExecutorCatalog,
     source_count: usize,
     prepared_parameter_count: u32,
-) -> RusticolResult<SpinorDagPayloadV2> {
+) -> RusticolResult<SpinorDagPayloadV3> {
     if program.strategy() != RecurrenceStrategy::TopologyReplay {
         return Err(invalid("the QCD slice requires topology replay"));
     }
@@ -241,15 +242,10 @@ fn lower_qcd_program(
         parameter_count,
         &source_layout.massive_sources,
     )?;
+    let mut vector_reference_atoms = BTreeMap::new();
     if source_layout.dirac_mass_prepared_slot.is_some() {
-        match source_layout.vector_sources.as_slice() {
-            [] => {}
-            [source] => builder.use_temporal_reference_source(*source)?,
-            _ => {
-                return Err(invalid(
-                    "the generic massive-Dirac slice supports at most one external vector source; multi-vector processes require an authenticated per-vector reference policy",
-                ));
-            }
+        for source in source_layout.vector_sources.iter().copied() {
+            vector_reference_atoms.insert(source, builder.temporal_reference_atom(source)?);
         }
     }
     let mut current_values = vec![None; program.currents().len()];
@@ -268,6 +264,7 @@ fn lower_qcd_program(
                 templates,
                 direct,
                 &dense_parameter_slots,
+                &vector_reference_atoms,
                 &mut builder,
             )?
         } else {
@@ -358,7 +355,7 @@ fn lower_qcd_program(
         .into_iter()
         .map(SpinorPreparedParameterBinding::new)
         .collect();
-    SpinorDagPayloadV2::new(
+    SpinorDagPayloadV3::new(
         dag,
         source_inputs,
         prepared_parameter_count,
@@ -927,6 +924,7 @@ fn lower_qcd_source(
     templates: &ValidatedRecurrenceTemplateInput,
     direct: &PreparedDirectExecutorCatalog,
     dense_parameter_slots: &BTreeMap<u32, u16>,
+    vector_reference_atoms: &BTreeMap<u16, u16>,
     builder: &mut SpinorDagBuilder,
 ) -> RusticolResult<QcdCurrent> {
     let source = qcd_source_row(current, templates)?;
@@ -995,12 +993,15 @@ fn lower_qcd_source(
                     "source template {source_template_id} is not a transverse vector source"
                 )));
             }
-            let polarization = external_polarization_expression(
-                builder,
-                atom,
-                i8::try_from(source.helicity)
-                    .map_err(|_| invalid("vector source helicity exceeds i8"))?,
-            )?;
+            let helicity = i8::try_from(source.helicity)
+                .map_err(|_| invalid("vector source helicity exceeds i8"))?;
+            let polarization = if let Some(reference) = vector_reference_atoms.get(&atom) {
+                external_polarization_expression_with_reference(
+                    builder, atom, *reference, helicity,
+                )?
+            } else {
+                external_polarization_expression(builder, atom, helicity)?
+            };
             Ok(QcdCurrent::Vector(bispinor_scale(
                 builder,
                 source_factor,
@@ -2846,7 +2847,7 @@ fn lower_scalar_program(
     direct: &PreparedDirectExecutorCatalog,
     source_count: usize,
     prepared_parameter_count: u32,
-) -> RusticolResult<SpinorDagPayloadV2> {
+) -> RusticolResult<SpinorDagPayloadV3> {
     if program.strategy() != RecurrenceStrategy::TopologyReplay {
         return Err(invalid("the scalar slice requires topology replay"));
     }
@@ -3008,7 +3009,7 @@ fn lower_scalar_program(
         .into_iter()
         .map(SpinorPreparedParameterBinding::new)
         .collect();
-    SpinorDagPayloadV2::new(
+    SpinorDagPayloadV3::new(
         dag,
         source_inputs,
         prepared_parameter_count,

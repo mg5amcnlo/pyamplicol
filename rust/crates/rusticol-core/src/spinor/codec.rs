@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: 0BSD
 
-//! Deterministic executable-payload codec for spinor DAG v2.
+//! Deterministic executable-payload codec for spinor DAG v3.
 //!
 //! The payload owns the two pieces of runtime information which cannot be
 //! recovered from the scalar expression graph: the mapping from graph source
@@ -17,8 +17,8 @@ use crate::recurrence::{ExactComplexRational, ExactRational};
 use crate::{RusticolError, RusticolResult};
 use std::collections::HashSet;
 
-const MAGIC: &[u8; 8] = b"PACSPDG2";
-const VERSION: u32 = 2;
+const MAGIC: &[u8; 8] = b"PACSPDG3";
+const VERSION: u32 = 3;
 const HEADER_BYTES: usize = 30;
 const SOURCE_BINDING_BYTES: usize = 4;
 const PARAMETER_BINDING_BYTES: usize = 4;
@@ -32,7 +32,7 @@ const MAX_OPERAND_COUNT: usize = 4 * MAX_NODE_COUNT;
 const MAX_ROOT_COUNT: usize = 1 << 20;
 
 /// Semantic ABI of the graph-backed spinor execution payload.
-pub const SPINOR_DAG_BINARY_ABI: &str = "pyamplicol-spinor-dag-binary-v2";
+pub const SPINOR_DAG_BINARY_ABI: &str = "pyamplicol-spinor-dag-binary-v3";
 
 /// Runtime representation required by one graph momentum source.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -55,7 +55,7 @@ impl SpinorSourceInputKind {
             1 => Ok(Self::MassiveSpinorPair),
             2 => Ok(Self::MomentumOnly),
             _ => Err(artifact(format!(
-                "source input kind {value} is outside the v2 domain"
+                "source input kind {value} is outside the v3 domain"
             ))),
         }
     }
@@ -63,7 +63,7 @@ impl SpinorSourceInputKind {
 
 /// Input binding for one graph source slot.
 ///
-/// The row's position in [`SpinorDagPayloadV2::source_inputs`] is the dense
+/// The row's position in [`SpinorDagPayloadV3::source_inputs`] is the dense
 /// graph source slot. `public_source_slot` addresses the caller-visible
 /// momentum input. `momentum_sign` converts that input into the graph's
 /// all-outgoing convention.
@@ -125,14 +125,14 @@ impl SpinorPreparedParameterBinding {
 
 /// A self-contained executable graph and its authenticated-runtime bindings.
 #[derive(Clone, Debug)]
-pub struct SpinorDagPayloadV2 {
+pub struct SpinorDagPayloadV3 {
     dag: SpinorDag,
     source_inputs: Box<[SpinorSourceInputBinding]>,
     prepared_parameter_count: u32,
     parameter_bindings: Box<[SpinorPreparedParameterBinding]>,
 }
 
-impl SpinorDagPayloadV2 {
+impl SpinorDagPayloadV3 {
     pub fn new(
         dag: SpinorDag,
         source_inputs: Vec<SpinorSourceInputBinding>,
@@ -186,8 +186,8 @@ impl SpinorDagPayloadV2 {
     }
 }
 
-/// Encode one validated payload into its canonical little-endian v2 bytes.
-pub fn encode_spinor_dag_v2(payload: &SpinorDagPayloadV2) -> RusticolResult<Vec<u8>> {
+/// Encode one validated payload into its canonical little-endian v3 bytes.
+pub fn encode_spinor_dag_v3(payload: &SpinorDagPayloadV3) -> RusticolResult<Vec<u8>> {
     let encoded_bytes = validate_payload(payload, ValidationBoundary::Input)?;
 
     let node_count = u32::try_from(payload.dag.nodes.len())
@@ -202,7 +202,14 @@ pub fn encode_spinor_dag_v2(payload: &SpinorDagPayloadV2) -> RusticolResult<Vec<
     writer.u32(payload.prepared_parameter_count);
     writer.u32(node_count);
     writer.u32(root_count);
-    writer.u16(payload.dag.temporal_reference_source.unwrap_or(u16::MAX));
+    writer.u16(
+        u16::try_from(payload.dag.reference_sources.len())
+            .map_err(|_| input("temporal reference count exceeds u16"))?,
+    );
+
+    for source in payload.dag.reference_sources.iter().copied() {
+        writer.u16(source.unwrap_or(u16::MAX));
+    }
 
     for binding in payload.source_inputs.iter().copied() {
         writer.u16(binding.public_source_slot);
@@ -225,8 +232,8 @@ pub fn encode_spinor_dag_v2(payload: &SpinorDagPayloadV2) -> RusticolResult<Vec<
     writer.finish()
 }
 
-/// Decode and fully validate one v2 executable spinor payload.
-pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> {
+/// Decode and fully validate one v3 executable spinor payload.
+pub fn decode_spinor_dag_v3(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV3> {
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(artifact(format!(
             "payload contains {} bytes, exceeding the {MAX_PAYLOAD_BYTES}-byte execution limit",
@@ -236,12 +243,12 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
     let mut reader = Reader::new(bytes);
     if reader.take(8, "magic")? != MAGIC {
         return Err(artifact(
-            "unsupported spinor payload magic; regenerate the v2 artifact",
+            "unsupported spinor payload magic; regenerate the v3 artifact",
         ));
     }
     if reader.u32("version")? != VERSION {
         return Err(artifact(
-            "unsupported spinor payload version; regenerate the v2 artifact",
+            "unsupported spinor payload version; regenerate the v3 artifact",
         ));
     }
     let momentum_count = reader.u16("momentum source count")?;
@@ -251,10 +258,7 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
         .map_err(|_| artifact("node count exceeds usize"))?;
     let root_count = usize::try_from(reader.u32("root count")?)
         .map_err(|_| artifact("root count exceeds usize"))?;
-    let temporal_reference_source = match reader.u16("temporal reference source")? {
-        u16::MAX => None,
-        source => Some(source),
-    };
+    let reference_count = usize::from(reader.u16("temporal reference count")?);
 
     validate_count_limits(node_count, root_count, ValidationBoundary::Artifact)?;
     if momentum_count < 2 {
@@ -269,6 +273,9 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
     let source_bytes = usize::from(momentum_count)
         .checked_mul(SOURCE_BINDING_BYTES)
         .ok_or_else(|| artifact("source binding byte count overflows usize"))?;
+    let reference_bytes = reference_count
+        .checked_mul(2)
+        .ok_or_else(|| artifact("temporal reference byte count overflows usize"))?;
     let parameter_bytes = usize::from(parameter_count)
         .checked_mul(PARAMETER_BINDING_BYTES)
         .ok_or_else(|| artifact("parameter binding byte count overflows usize"))?;
@@ -281,8 +288,9 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
     let minimum_node_bytes = node_count
         .checked_mul(MINIMUM_NODE_BYTES)
         .ok_or_else(|| artifact("minimum node byte count overflows usize"))?;
-    let minimum_remaining = source_bytes
-        .checked_add(parameter_bytes)
+    let minimum_remaining = reference_bytes
+        .checked_add(source_bytes)
+        .and_then(|value| value.checked_add(parameter_bytes))
         .and_then(|value| value.checked_add(root_bytes))
         .and_then(|value| value.checked_add(minimum_node_bytes))
         .ok_or_else(|| artifact("payload section byte count overflows usize"))?;
@@ -293,6 +301,19 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
         return Err(artifact(
             "declared source, parameter, node, and root counts cannot fit in the payload",
         ));
+    }
+
+    let mut reference_sources = Vec::new();
+    reserve(
+        &mut reference_sources,
+        reference_count,
+        "temporal reference sources",
+    )?;
+    for _ in 0..reference_count {
+        reference_sources.push(match reader.u16("temporal reference source")? {
+            u16::MAX => None,
+            source => Some(source),
+        });
     }
 
     let mut source_inputs = Vec::new();
@@ -326,7 +347,7 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
     validate_source_inputs(
         momentum_count,
         &source_inputs,
-        temporal_reference_source,
+        &reference_sources,
         ValidationBoundary::Artifact,
     )?;
     validate_root_count(root_count, &source_inputs, ValidationBoundary::Artifact)?;
@@ -376,25 +397,17 @@ pub fn decode_spinor_dag_v2(bytes: &[u8]) -> RusticolResult<SpinorDagPayloadV2> 
     }
     reader.finish()?;
 
-    let uses_reference_atom = nodes.iter().any(|node| {
-        matches!(
-            node,
-            SpinorNode::Bracket { left, right, .. }
-                if *left == spinor_atom_count || *right == spinor_atom_count
-        )
-    });
-    let payload = SpinorDagPayloadV2 {
+    let payload = SpinorDagPayloadV3 {
         dag: SpinorDag {
             momentum_count,
             spinor_atom_count,
             parameter_count,
             massive_sources: massive_sources.into_boxed_slice(),
-            uses_reference_atom,
-            temporal_reference_source,
+            reference_sources: reference_sources.into_boxed_slice(),
             nodes: nodes.into_boxed_slice(),
             roots: roots.into_boxed_slice(),
             // Rewrite counters describe generation, not execution.  They are
-            // intentionally absent from v2 artifact identity.
+            // intentionally absent from v3 artifact identity.
             rewrite_stats: SpinorRewriteStats::default(),
         },
         source_inputs: source_inputs.into_boxed_slice(),
@@ -468,7 +481,7 @@ fn decode_node(
                 source: reader.u16("inverse-mass source")?,
             })),
             tag => Err(artifact(format!(
-                "kinematic scalar tag {tag} is outside the v2 domain"
+                "kinematic scalar tag {tag} is outside the v3 domain"
             ))),
         },
         3 => {
@@ -477,7 +490,7 @@ fn decode_node(
                 1 => SpinorBracketKind::Square,
                 value => {
                     return Err(artifact(format!(
-                        "bracket kind {value} is outside the v2 domain"
+                        "bracket kind {value} is outside the v3 domain"
                     )));
                 }
             };
@@ -498,7 +511,7 @@ fn decode_node(
             remaining_operands,
         )?)),
         6 => Ok(SpinorNode::Reciprocal(reader.u32("reciprocal operand")?)),
-        tag => Err(artifact(format!("node tag {tag} is outside the v2 domain"))),
+        tag => Err(artifact(format!("node tag {tag} is outside the v3 domain"))),
     }
 }
 
@@ -518,7 +531,7 @@ impl ValidationBoundary {
 }
 
 fn validate_payload(
-    payload: &SpinorDagPayloadV2,
+    payload: &SpinorDagPayloadV3,
     boundary: ValidationBoundary,
 ) -> RusticolResult<usize> {
     let dag = &payload.dag;
@@ -530,7 +543,7 @@ fn validate_payload(
     validate_source_inputs(
         dag.momentum_count,
         &payload.source_inputs,
-        dag.temporal_reference_source,
+        &dag.reference_sources,
         boundary,
     )?;
     validate_root_count(dag.roots.len(), &payload.source_inputs, boundary)?;
@@ -603,7 +616,7 @@ fn validate_root_count(
 fn validate_source_inputs(
     momentum_count: u16,
     source_inputs: &[SpinorSourceInputBinding],
-    temporal_reference_source: Option<u16>,
+    reference_sources: &[Option<u16>],
     boundary: ValidationBoundary,
 ) -> RusticolResult<()> {
     if source_inputs.len() != usize::from(momentum_count) {
@@ -637,7 +650,25 @@ fn validate_source_inputs(
     }
     // In-range uniqueness over exactly `momentum_count` rows proves that the
     // public source slots form the complete permutation.
-    if let Some(source) = temporal_reference_source {
+    if reference_sources.len() > usize::from(momentum_count) {
+        return Err(boundary.error(format!(
+            "temporal reference count {} exceeds the {momentum_count}-source graph",
+            reference_sources.len()
+        )));
+    }
+    let mut observed_temporal_sources = HashSet::new();
+    let mut observed_common_reference = false;
+    let mut previous_temporal_source = None;
+    for (reference_index, source) in reference_sources.iter().copied().enumerate() {
+        let Some(source) = source else {
+            if reference_index != 0 || observed_common_reference {
+                return Err(boundary.error(
+                    "the optional common reference must be the first and only unbound reference atom",
+                ));
+            }
+            observed_common_reference = true;
+            continue;
+        };
         let Some(binding) = source_inputs.get(usize::from(source)) else {
             return Err(boundary.error(format!(
                 "temporal reference source {source} is outside the {momentum_count}-source graph"
@@ -648,6 +679,17 @@ fn validate_source_inputs(
                 "temporal reference source {source} must be a null-spinor source"
             )));
         }
+        if !observed_temporal_sources.insert(source) {
+            return Err(boundary.error(format!(
+                "temporal reference source {source} is bound more than once"
+            )));
+        }
+        if previous_temporal_source.is_some_and(|previous| previous >= source) {
+            return Err(boundary.error(
+                "temporal reference sources are not in canonical increasing graph-slot order",
+            ));
+        }
+        previous_temporal_source = Some(source);
     }
     Ok(())
 }
@@ -734,8 +776,12 @@ fn validate_nodes(
     spinor_atom_count: u16,
     boundary: ValidationBoundary,
 ) -> RusticolResult<()> {
-    let reference_atom = spinor_atom_count;
-    let mut observed_reference = false;
+    let reference_count = u16::try_from(dag.reference_sources.len())
+        .map_err(|_| boundary.error("temporal reference count exceeds u16"))?;
+    let spinor_atom_end = spinor_atom_count
+        .checked_add(reference_count)
+        .ok_or_else(|| boundary.error("spinor atom domain overflows u16"))?;
+    let mut observed_references = vec![false; dag.reference_sources.len()];
     let mut observed_parameters = vec![false; usize::from(dag.parameter_count)];
     let mut operand_count = 0_usize;
     let mut observed_nodes = HashSet::new();
@@ -780,7 +826,7 @@ fn validate_nodes(
                     node_index,
                     "left",
                     source_inputs,
-                    reference_atom,
+                    spinor_atom_end,
                     boundary,
                 )?;
                 validate_bracket_atom(
@@ -788,7 +834,7 @@ fn validate_nodes(
                     node_index,
                     "right",
                     source_inputs,
-                    reference_atom,
+                    spinor_atom_end,
                     boundary,
                 )?;
                 if left >= right {
@@ -796,7 +842,11 @@ fn validate_nodes(
                         "node {node_index} bracket atoms are not in canonical increasing order"
                     )));
                 }
-                observed_reference |= *left == reference_atom || *right == reference_atom;
+                for atom in [*left, *right] {
+                    if atom >= spinor_atom_count {
+                        observed_references[usize::from(atom - spinor_atom_count)] = true;
+                    }
+                }
             }
             SpinorNode::Sum(operands) | SpinorNode::Product(operands) => {
                 operand_count = operand_count
@@ -880,12 +930,10 @@ fn validate_nodes(
             }
         }
     }
-    if dag.uses_reference_atom != observed_reference {
-        return Err(boundary.error("DAG reference-spinor flag does not match its bracket nodes"));
-    }
-    if dag.temporal_reference_source.is_some() && !observed_reference {
-        return Err(boundary
-            .error("DAG declares a temporal reference source without using the reference atom"));
+    if let Some(unused) = observed_references.iter().position(|observed| !observed) {
+        return Err(boundary.error(format!(
+            "DAG temporal reference atom {unused} is unreachable from every bracket"
+        )));
     }
     if let Some(parameter) = observed_parameters.iter().position(|observed| !observed) {
         return Err(boundary.error(format!(
@@ -900,12 +948,12 @@ fn validate_bracket_atom(
     node_index: usize,
     side: &str,
     source_inputs: &[SpinorSourceInputBinding],
-    reference_atom: u16,
+    spinor_atom_end: u16,
     boundary: ValidationBoundary,
 ) -> RusticolResult<()> {
-    if atom > reference_atom {
+    if atom >= spinor_atom_end {
         return Err(boundary.error(format!(
-            "node {node_index} bracket {side} atom {atom} exceeds reference atom {reference_atom}"
+            "node {node_index} bracket {side} atom {atom} exceeds the spinor atom domain ending at {spinor_atom_end}"
         )));
     }
     if let Some(binding) = source_inputs.get(usize::from(atom)) {
@@ -1059,7 +1107,7 @@ fn validate_all_nodes_live(dag: &SpinorDag, boundary: ValidationBoundary) -> Rus
 }
 
 fn encoded_payload_size(
-    payload: &SpinorDagPayloadV2,
+    payload: &SpinorDagPayloadV3,
     boundary: ValidationBoundary,
 ) -> RusticolResult<usize> {
     let mut size = HEADER_BYTES;
@@ -1074,6 +1122,15 @@ fn encoded_payload_size(
         }
         Ok(())
     };
+    add(
+        payload
+            .dag
+            .reference_sources
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| boundary.error("temporal reference byte count overflows usize"))?,
+        "temporal references",
+    )?;
     add(
         payload
             .source_inputs
@@ -1144,11 +1201,11 @@ fn reserve<T>(values: &mut Vec<T>, count: usize, label: &str) -> RusticolResult<
 }
 
 fn input(message: impl Into<String>) -> RusticolError {
-    RusticolError::invalid_argument(format!("spinor DAG v2: {}", message.into()))
+    RusticolError::invalid_argument(format!("spinor DAG v3: {}", message.into()))
 }
 
 fn artifact(message: impl Into<String>) -> RusticolError {
-    RusticolError::artifact(format!("spinor DAG v2: {}", message.into()))
+    RusticolError::artifact(format!("spinor DAG v3: {}", message.into()))
 }
 
 struct Writer {
@@ -1173,7 +1230,7 @@ impl Writer {
     fn finish(self) -> RusticolResult<Vec<u8>> {
         if self.bytes.len() != self.expected_bytes {
             return Err(RusticolError::internal(format!(
-                "spinor DAG v2 encoder produced {} bytes, expected {}",
+                "spinor DAG v3 encoder produced {} bytes, expected {}",
                 self.bytes.len(),
                 self.expected_bytes
             )));
@@ -1344,9 +1401,9 @@ mod tests {
         SpinorSourceInputBinding::new(public_source_slot, momentum_sign, kind).unwrap()
     }
 
-    fn gluon_payload() -> SpinorDagPayloadV2 {
+    fn gluon_payload() -> SpinorDagPayloadV3 {
         let dag = build_optimized_helicity_summed_gluon_spinor_dag(4).unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             dag,
             vec![
                 binding(2, 1, SpinorSourceInputKind::NullSpinor),
@@ -1360,9 +1417,9 @@ mod tests {
         .unwrap()
     }
 
-    fn q_z_payload() -> SpinorDagPayloadV2 {
+    fn q_z_payload() -> SpinorDagPayloadV3 {
         let dag = build_helicity_summed_quark_z_gluon_spinor_dag(&[0, 1], 2).unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             dag,
             vec![
                 binding(1, 1, SpinorSourceInputKind::NullSpinor),
@@ -1378,13 +1435,13 @@ mod tests {
         .unwrap()
     }
 
-    fn momentum_only_payload() -> SpinorDagPayloadV2 {
+    fn momentum_only_payload() -> SpinorDagPayloadV3 {
         let mut builder = SpinorDagBuilder::new(2).unwrap();
         let one = builder.one();
         builder
             .add_root(vec![0_i8, 0_i8].into_boxed_slice(), one)
             .unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             builder.finish().unwrap(),
             vec![
                 binding(0, -1, SpinorSourceInputKind::MomentumOnly),
@@ -1396,13 +1453,13 @@ mod tests {
         .unwrap()
     }
 
-    fn null_payload_without_reference() -> SpinorDagPayloadV2 {
+    fn null_payload_without_reference() -> SpinorDagPayloadV3 {
         let mut builder = SpinorDagBuilder::new(2).unwrap();
         let one = builder.one();
         builder
             .add_root(vec![-1_i8, -1_i8].into_boxed_slice(), one)
             .unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             builder.finish().unwrap(),
             vec![
                 binding(0, -1, SpinorSourceInputKind::NullSpinor),
@@ -1414,18 +1471,47 @@ mod tests {
         .unwrap()
     }
 
-    fn temporal_reference_payload() -> SpinorDagPayloadV2 {
+    fn temporal_reference_payload() -> SpinorDagPayloadV3 {
         let mut builder = SpinorDagBuilder::new(2).unwrap();
-        builder.use_temporal_reference_source(1).unwrap();
-        let amplitude = builder.angle(0, builder.reference_atom()).unwrap();
+        let reference = builder.temporal_reference_atom(1).unwrap();
+        let amplitude = builder.angle(0, reference).unwrap();
         builder
             .add_root(vec![-1_i8, -1_i8].into_boxed_slice(), amplitude)
             .unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             builder.finish().unwrap(),
             vec![
                 binding(0, -1, SpinorSourceInputKind::NullSpinor),
                 binding(1, 1, SpinorSourceInputKind::NullSpinor),
+            ],
+            0,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn multiple_temporal_reference_payload() -> SpinorDagPayloadV3 {
+        let mut builder = SpinorDagBuilder::new(3).unwrap();
+        let references = [
+            builder.temporal_reference_atom(0).unwrap(),
+            builder.temporal_reference_atom(1).unwrap(),
+            builder.temporal_reference_atom(2).unwrap(),
+        ];
+        let terms = [
+            builder.angle(0, references[0]).unwrap(),
+            builder.angle(1, references[1]).unwrap(),
+            builder.angle(2, references[2]).unwrap(),
+        ];
+        let amplitude = builder.sum(terms).unwrap();
+        builder
+            .add_root(vec![-1_i8, -1_i8, -1_i8].into_boxed_slice(), amplitude)
+            .unwrap();
+        SpinorDagPayloadV3::new(
+            builder.finish().unwrap(),
+            vec![
+                binding(0, -1, SpinorSourceInputKind::NullSpinor),
+                binding(1, -1, SpinorSourceInputKind::NullSpinor),
+                binding(2, 1, SpinorSourceInputKind::NullSpinor),
             ],
             0,
             Vec::new(),
@@ -1434,13 +1520,13 @@ mod tests {
     }
 
     #[test]
-    fn v2_encoding_is_deterministic_and_round_trips_executable_semantics() {
+    fn v3_encoding_is_deterministic_and_round_trips_executable_semantics() {
         let payload = q_z_payload();
-        let first = encode_spinor_dag_v2(&payload).unwrap();
-        let second = encode_spinor_dag_v2(&payload).unwrap();
+        let first = encode_spinor_dag_v3(&payload).unwrap();
+        let second = encode_spinor_dag_v3(&payload).unwrap();
         assert_eq!(first, second);
 
-        let decoded = decode_spinor_dag_v2(&first).unwrap();
+        let decoded = decode_spinor_dag_v3(&first).unwrap();
         assert_eq!(decoded.source_inputs(), payload.source_inputs());
         assert_eq!(
             decoded.prepared_parameter_count(),
@@ -1455,12 +1541,8 @@ mod tests {
         );
         assert_eq!(decoded.dag().massive_sources, payload.dag().massive_sources);
         assert_eq!(
-            decoded.dag().uses_reference_atom,
-            payload.dag().uses_reference_atom
-        );
-        assert_eq!(
-            decoded.dag().temporal_reference_source,
-            payload.dag().temporal_reference_source
+            decoded.dag().reference_sources,
+            payload.dag().reference_sources
         );
         assert_eq!(decoded.dag().nodes, payload.dag().nodes);
         assert_eq!(decoded.dag().roots, payload.dag().roots);
@@ -1473,90 +1555,126 @@ mod tests {
         let payload = temporal_reference_payload();
         assert!(payload.dag().uses_reference_atom());
 
-        let encoded = encode_spinor_dag_v2(&payload).unwrap();
+        let encoded = encode_spinor_dag_v3(&payload).unwrap();
         assert_eq!(&encoded[28..HEADER_BYTES], &1_u16.to_le_bytes());
-        let decoded = decode_spinor_dag_v2(&encoded).unwrap();
-        assert_eq!(decoded.dag().temporal_reference_source, Some(1));
-        assert_eq!(encode_spinor_dag_v2(&decoded).unwrap(), encoded);
+        assert_eq!(
+            &encoded[HEADER_BYTES..HEADER_BYTES + 2],
+            &1_u16.to_le_bytes()
+        );
+        let decoded = decode_spinor_dag_v3(&encoded).unwrap();
+        assert_eq!(decoded.dag().reference_sources.as_ref(), &[Some(1)]);
+        assert_eq!(encode_spinor_dag_v3(&decoded).unwrap(), encoded);
+    }
+
+    #[test]
+    fn multiple_temporal_reference_sources_round_trip_and_fail_closed() {
+        let payload = multiple_temporal_reference_payload();
+        assert_eq!(
+            payload.dag().reference_sources.as_ref(),
+            &[Some(0), Some(1), Some(2)]
+        );
+        let encoded = encode_spinor_dag_v3(&payload).unwrap();
+        assert_eq!(&encoded[28..HEADER_BYTES], &3_u16.to_le_bytes());
+        let decoded = decode_spinor_dag_v3(&encoded).unwrap();
+        assert_eq!(
+            decoded.dag().reference_sources,
+            payload.dag().reference_sources
+        );
+
+        let mut duplicate = encoded.clone();
+        duplicate[HEADER_BYTES + 2..HEADER_BYTES + 4].copy_from_slice(&0_u16.to_le_bytes());
+        let error = decode_spinor_dag_v3(&duplicate).unwrap_err();
+        assert!(error.message().contains("bound more than once"));
+
+        let mut non_null = encoded;
+        let source_start = source_bindings_start(&payload);
+        non_null[source_start + SOURCE_BINDING_BYTES + 3] =
+            SpinorSourceInputKind::MomentumOnly as u8;
+        let error = decode_spinor_dag_v3(&non_null).unwrap_err();
+        assert!(error.message().contains("must be a null-spinor source"));
     }
 
     #[test]
     fn decoder_rejects_invalid_temporal_reference_sources() {
-        let mut encoded = encode_spinor_dag_v2(&temporal_reference_payload()).unwrap();
-        encoded[28..HEADER_BYTES].copy_from_slice(&2_u16.to_le_bytes());
-        let error = decode_spinor_dag_v2(&encoded).unwrap_err();
+        let mut encoded = encode_spinor_dag_v3(&temporal_reference_payload()).unwrap();
+        encoded[HEADER_BYTES..HEADER_BYTES + 2].copy_from_slice(&2_u16.to_le_bytes());
+        let error = decode_spinor_dag_v3(&encoded).unwrap_err();
         assert!(error.message().contains("outside the 2-source graph"));
 
-        encoded[28..HEADER_BYTES].copy_from_slice(&1_u16.to_le_bytes());
-        encoded[HEADER_BYTES + SOURCE_BINDING_BYTES + 3] =
+        encoded[HEADER_BYTES..HEADER_BYTES + 2].copy_from_slice(&1_u16.to_le_bytes());
+        encoded[HEADER_BYTES + 2 + SOURCE_BINDING_BYTES + 3] =
             SpinorSourceInputKind::MomentumOnly as u8;
-        let error = decode_spinor_dag_v2(&encoded).unwrap_err();
+        let error = decode_spinor_dag_v3(&encoded).unwrap_err();
         assert!(error.message().contains("must be a null-spinor source"));
 
-        let mut unused = encode_spinor_dag_v2(&null_payload_without_reference()).unwrap();
-        unused[28..HEADER_BYTES].copy_from_slice(&0_u16.to_le_bytes());
-        let error = decode_spinor_dag_v2(&unused).unwrap_err();
-        assert!(error.message().contains("without using the reference atom"));
+        let mut unused = encode_spinor_dag_v3(&null_payload_without_reference()).unwrap();
+        unused[28..HEADER_BYTES].copy_from_slice(&1_u16.to_le_bytes());
+        unused.splice(HEADER_BYTES..HEADER_BYTES, u16::MAX.to_le_bytes());
+        let error = decode_spinor_dag_v3(&unused).unwrap_err();
+        assert!(error.message().contains("unreachable from every bracket"));
     }
 
     #[test]
     fn decoder_rejects_truncation_and_trailing_bytes() {
-        let encoded = encode_spinor_dag_v2(&gluon_payload()).unwrap();
-        assert!(decode_spinor_dag_v2(&encoded[..encoded.len() - 1]).is_err());
+        let encoded = encode_spinor_dag_v3(&gluon_payload()).unwrap();
+        assert!(decode_spinor_dag_v3(&encoded[..encoded.len() - 1]).is_err());
 
         let mut trailing = encoded;
         trailing.push(0);
-        assert!(decode_spinor_dag_v2(&trailing).is_err());
+        assert!(decode_spinor_dag_v3(&trailing).is_err());
     }
 
     #[test]
     fn decoder_rejects_invalid_source_permutation_and_kind() {
         let payload = q_z_payload();
-        let encoded = encode_spinor_dag_v2(&payload).unwrap();
+        let encoded = encode_spinor_dag_v3(&payload).unwrap();
 
         let mut repeated = encoded.clone();
-        // Header is followed by fixed four-byte source rows.  Repeat the
-        // first public source slot in the second row.
-        let repeated_slot = repeated[HEADER_BYTES..HEADER_BYTES + 2].to_vec();
-        repeated[HEADER_BYTES + SOURCE_BINDING_BYTES..HEADER_BYTES + SOURCE_BINDING_BYTES + 2]
+        // Reference rows are followed by fixed four-byte source rows. Repeat
+        // the first public source slot in the second row.
+        let source_start = source_bindings_start(&payload);
+        let repeated_slot = repeated[source_start..source_start + 2].to_vec();
+        repeated[source_start + SOURCE_BINDING_BYTES..source_start + SOURCE_BINDING_BYTES + 2]
             .copy_from_slice(&repeated_slot);
-        assert!(decode_spinor_dag_v2(&repeated).is_err());
+        assert!(decode_spinor_dag_v3(&repeated).is_err());
 
         let mut wrong_kind = encoded;
-        wrong_kind[HEADER_BYTES + 2 * SOURCE_BINDING_BYTES + 3] =
+        wrong_kind[source_start + 2 * SOURCE_BINDING_BYTES + 3] =
             SpinorSourceInputKind::MomentumOnly as u8;
-        assert!(decode_spinor_dag_v2(&wrong_kind).is_err());
+        assert!(decode_spinor_dag_v3(&wrong_kind).is_err());
     }
 
     #[test]
     fn decoder_rejects_parameter_binding_outside_prepared_domain() {
         let payload = q_z_payload();
-        let mut encoded = encode_spinor_dag_v2(&payload).unwrap();
-        let first_parameter = HEADER_BYTES + payload.source_inputs().len() * SOURCE_BINDING_BYTES;
+        let mut encoded = encode_spinor_dag_v3(&payload).unwrap();
+        let first_parameter =
+            source_bindings_start(&payload) + payload.source_inputs().len() * SOURCE_BINDING_BYTES;
         encoded[first_parameter..first_parameter + 4]
             .copy_from_slice(&payload.prepared_parameter_count().to_le_bytes());
-        assert!(decode_spinor_dag_v2(&encoded).is_err());
+        assert!(decode_spinor_dag_v3(&encoded).is_err());
     }
 
     #[test]
     fn decoder_rejects_noncanonical_exact_rationals() {
         let payload = gluon_payload();
-        let mut encoded = encode_spinor_dag_v2(&payload).unwrap();
+        let mut encoded = encode_spinor_dag_v3(&payload).unwrap();
         let constant = first_constant_start(&encoded, &payload);
         encoded[constant + 1..constant + 17].copy_from_slice(&2_i128.to_le_bytes());
         encoded[constant + 17..constant + 33].copy_from_slice(&2_i128.to_le_bytes());
-        let error = decode_spinor_dag_v2(&encoded).unwrap_err();
+        let error = decode_spinor_dag_v3(&encoded).unwrap_err();
         assert!(error.message().contains("canonical reduced form"));
     }
 
     #[test]
     fn decoder_rejects_duplicate_prepared_parameter_bindings() {
         let payload = q_z_payload();
-        let mut encoded = encode_spinor_dag_v2(&payload).unwrap();
-        let first_parameter = HEADER_BYTES + payload.source_inputs().len() * SOURCE_BINDING_BYTES;
+        let mut encoded = encode_spinor_dag_v3(&payload).unwrap();
+        let first_parameter =
+            source_bindings_start(&payload) + payload.source_inputs().len() * SOURCE_BINDING_BYTES;
         let first_binding = encoded[first_parameter..first_parameter + 4].to_vec();
         encoded[first_parameter + 4..first_parameter + 8].copy_from_slice(&first_binding);
-        let error = decode_spinor_dag_v2(&encoded).unwrap_err();
+        let error = decode_spinor_dag_v3(&encoded).unwrap_err();
         assert!(
             error
                 .message()
@@ -1566,35 +1684,35 @@ mod tests {
 
     #[test]
     fn decoder_rejects_counts_above_execution_limits_before_allocating() {
-        let encoded = encode_spinor_dag_v2(&gluon_payload()).unwrap();
+        let encoded = encode_spinor_dag_v3(&gluon_payload()).unwrap();
 
         let mut excessive_nodes = encoded.clone();
         excessive_nodes[20..24]
             .copy_from_slice(&(u32::try_from(MAX_NODE_COUNT).unwrap() + 1).to_le_bytes());
-        let error = decode_spinor_dag_v2(&excessive_nodes).unwrap_err();
+        let error = decode_spinor_dag_v3(&excessive_nodes).unwrap_err();
         assert!(error.message().contains("node execution limit"));
 
         let mut excessive_roots = encoded;
         excessive_roots[24..28]
             .copy_from_slice(&(u32::try_from(MAX_ROOT_COUNT).unwrap() + 1).to_le_bytes());
-        let error = decode_spinor_dag_v2(&excessive_roots).unwrap_err();
+        let error = decode_spinor_dag_v3(&excessive_roots).unwrap_err();
         assert!(error.message().contains("root execution limit"));
     }
 
     #[test]
     fn decoder_enforces_source_kind_helicity_domains() {
         let null_payload = gluon_payload();
-        let mut null_encoded = encode_spinor_dag_v2(&null_payload).unwrap();
+        let mut null_encoded = encode_spinor_dag_v3(&null_payload).unwrap();
         let root_start = roots_start(&null_encoded, &null_payload);
         null_encoded[root_start] = 0;
-        let error = decode_spinor_dag_v2(&null_encoded).unwrap_err();
+        let error = decode_spinor_dag_v3(&null_encoded).unwrap_err();
         assert!(error.message().contains("invalid for NullSpinor"));
 
         let momentum_payload = momentum_only_payload();
-        let mut momentum_encoded = encode_spinor_dag_v2(&momentum_payload).unwrap();
+        let mut momentum_encoded = encode_spinor_dag_v3(&momentum_payload).unwrap();
         let root_start = roots_start(&momentum_encoded, &momentum_payload);
         momentum_encoded[root_start] = 1;
-        let error = decode_spinor_dag_v2(&momentum_encoded).unwrap_err();
+        let error = decode_spinor_dag_v3(&momentum_encoded).unwrap_err();
         assert!(error.message().contains("invalid for MomentumOnly"));
     }
 
@@ -1605,8 +1723,7 @@ mod tests {
             spinor_atom_count: 2,
             parameter_count: 0,
             massive_sources: Vec::new().into_boxed_slice(),
-            uses_reference_atom: false,
-            temporal_reference_source: None,
+            reference_sources: Vec::new().into_boxed_slice(),
             nodes: vec![
                 SpinorNode::Constant(ExactComplexRational::ZERO),
                 SpinorNode::Constant(ExactComplexRational::ZERO),
@@ -1629,7 +1746,7 @@ mod tests {
             .into_boxed_slice(),
             rewrite_stats: SpinorRewriteStats::default(),
         };
-        let error = SpinorDagPayloadV2::new(
+        let error = SpinorDagPayloadV3::new(
             dag,
             vec![
                 binding(0, 1, SpinorSourceInputKind::NullSpinor),
@@ -1649,14 +1766,14 @@ mod tests {
     #[test]
     fn decoder_rejects_non_topological_operand() {
         let payload = gluon_payload();
-        let mut encoded = encode_spinor_dag_v2(&payload).unwrap();
-        let node_start = HEADER_BYTES
+        let mut encoded = encode_spinor_dag_v3(&payload).unwrap();
+        let node_start = source_bindings_start(&payload)
             + payload.source_inputs().len() * SOURCE_BINDING_BYTES
             + payload.parameter_bindings().len() * PARAMETER_BINDING_BYTES;
         let (operand_offset, node_index) = first_aggregate_operand(&encoded, node_start);
         encoded[operand_offset..operand_offset + 4]
             .copy_from_slice(&u32::try_from(node_index).unwrap().to_le_bytes());
-        assert!(decode_spinor_dag_v2(&encoded).is_err());
+        assert!(decode_spinor_dag_v3(&encoded).is_err());
     }
 
     fn first_aggregate_operand(bytes: &[u8], mut offset: usize) -> (usize, usize) {
@@ -1688,8 +1805,12 @@ mod tests {
         panic!("test graph contains no aggregate node")
     }
 
-    fn roots_start(bytes: &[u8], payload: &SpinorDagPayloadV2) -> usize {
-        let mut offset = HEADER_BYTES
+    fn source_bindings_start(payload: &SpinorDagPayloadV3) -> usize {
+        HEADER_BYTES + 2 * payload.dag().reference_sources.len()
+    }
+
+    fn roots_start(bytes: &[u8], payload: &SpinorDagPayloadV3) -> usize {
+        let mut offset = source_bindings_start(payload)
             + payload.source_inputs().len() * SOURCE_BINDING_BYTES
             + payload.parameter_bindings().len() * PARAMETER_BINDING_BYTES;
         let node_count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
@@ -1716,8 +1837,8 @@ mod tests {
         offset
     }
 
-    fn first_constant_start(bytes: &[u8], payload: &SpinorDagPayloadV2) -> usize {
-        let mut offset = HEADER_BYTES
+    fn first_constant_start(bytes: &[u8], payload: &SpinorDagPayloadV3) -> usize {
+        let mut offset = source_bindings_start(payload)
             + payload.source_inputs().len() * SOURCE_BINDING_BYTES
             + payload.parameter_bindings().len() * PARAMETER_BINDING_BYTES;
         let node_count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;

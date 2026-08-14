@@ -61,7 +61,7 @@ ON_THE_FLY_CONTRACTED_COLOR_RUNTIME_CAPABILITY = (
     "rusticol.on-the-fly.contracted-color.v1"
 )
 SPINOR_DAG_ABI = "pyamplicol-spinor-dag-v1"
-SPINOR_DAG_BINARY_ABI = "pyamplicol-spinor-dag-binary-v2"
+SPINOR_DAG_BINARY_ABI = "pyamplicol-spinor-dag-binary-v3"
 SPINOR_DAG_F64_RUNTIME_CAPABILITY = "rusticol.spinor-dag.fixed-color-f64.v1"
 COMPILED_RUNTIME_SELECTORS_CAPABILITY = "rusticol.compiled.runtime-selectors.v1"
 COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY = "compiled-plane-arena-v1"

@@ -7,7 +7,7 @@ use super::recurrence_lane::{
 };
 use super::*;
 use crate::spinor::{
-    SpinorBatchWorkspace, SpinorDag, SpinorDagPayloadV2, SpinorSourceInputBinding,
+    SpinorBatchWorkspace, SpinorDag, SpinorDagPayloadV3, SpinorSourceInputBinding,
     SpinorSourceInputKind,
 };
 
@@ -75,7 +75,7 @@ impl SpinorNativeRuntime {
     }
 
     pub(super) fn new_payload(
-        payload: SpinorDagPayloadV2,
+        payload: SpinorDagPayloadV3,
         prepared_parameter_defaults: Vec<crate::EagerComplex64>,
         parameter_projection: Vec<PreparedParameterProjectionEntry>,
     ) -> RusticolResult<Self> {
@@ -353,11 +353,11 @@ mod tests {
         build_optimized_helicity_summed_gluon_spinor_dag,
     };
 
-    fn scalar_contact_payload(prepared_parameter_count: u32) -> SpinorDagPayloadV2 {
+    fn scalar_contact_payload(prepared_parameter_count: u32) -> SpinorDagPayloadV3 {
         let mut builder = SpinorDagBuilder::new_with_parameters(4, 1).unwrap();
         let coupling = builder.parameter(0).unwrap();
         builder.add_root(vec![0_i8; 4], coupling).unwrap();
-        SpinorDagPayloadV2::new(
+        SpinorDagPayloadV3::new(
             builder.finish().unwrap(),
             vec![
                 SpinorSourceInputBinding::new(0, -1, SpinorSourceInputKind::MomentumOnly).unwrap(),

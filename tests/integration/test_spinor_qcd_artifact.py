@@ -177,8 +177,8 @@ def test_graph_spinor_qcd_recurrences(tmp_path: Path) -> None:
             )
         )
         assert execution["graph_payload"] == {
-            "abi": "pyamplicol-spinor-dag-binary-v2",
-            "path": "spinor-dag-v2.bin",
+            "abi": "pyamplicol-spinor-dag-binary-v3",
+            "path": "spinor-dag-v3.bin",
         }
         assert "process_family" not in execution
         assert "kernel_pack" not in execution

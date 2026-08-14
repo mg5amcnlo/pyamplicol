@@ -480,8 +480,8 @@ def test_graph_spinor_manifest_is_family_free_and_payload_backed(tmp_path) -> No
     manifest = artifact_writer._spinor_execution_manifest(artifact)
 
     assert manifest["graph_payload"] == {
-        "abi": "pyamplicol-spinor-dag-binary-v2",
-        "path": "spinor-dag-v2.bin",
+        "abi": "pyamplicol-spinor-dag-binary-v3",
+        "path": "spinor-dag-v3.bin",
     }
     assert manifest["kernel_pack"] == {
         "manifest_path": "model/eager-kernel-pack.json",

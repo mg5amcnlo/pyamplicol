@@ -11,7 +11,7 @@ use crate::spinor::{
     build_helicity_summed_massive_quark_two_gluon_spinor_dag,
     build_helicity_summed_quark_gluon_bg_spinor_dag,
     build_helicity_summed_quark_z_gluon_spinor_dag,
-    build_optimized_helicity_summed_gluon_spinor_dag, decode_spinor_dag_v2,
+    build_optimized_helicity_summed_gluon_spinor_dag, decode_spinor_dag_v3,
 };
 use serde::Deserialize;
 
@@ -90,7 +90,7 @@ fn load_graph_spinor_native_runtime(
             "spinor graph payload is not process-owned evaluator state",
         ));
     }
-    let payload = decode_spinor_dag_v2(&artifact.read_payload(graph_path)?)?;
+    let payload = decode_spinor_dag_v3(&artifact.read_payload(graph_path)?)?;
     if usize::from(payload.dag().momentum_count()) != manifest.external_pdg_order.len() {
         return Err(RusticolError::integrity(
             "spinor graph source count disagrees with the execution manifest",

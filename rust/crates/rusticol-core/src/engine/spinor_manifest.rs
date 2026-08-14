@@ -371,7 +371,7 @@ mod tests {
             "coupling_stripped": false,
             "graph_payload": {
                 "abi": SPINOR_DAG_BINARY_ABI,
-                "path": "spinor-dag-v2.bin"
+                "path": "spinor-dag-v3.bin"
             },
             "kernel_pack": {
                 "manifest_path": RECURRENCE_KERNEL_PACK_MANIFEST_PATH,

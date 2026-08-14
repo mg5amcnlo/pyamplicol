@@ -144,8 +144,8 @@ def test_graph_spinor_two_massless_fermion_lines(tmp_path: Path) -> None:
                         ).read_text(encoding="utf-8")
                     )
                     assert execution["graph_payload"] == {
-                        "abi": "pyamplicol-spinor-dag-binary-v2",
-                        "path": "spinor-dag-v2.bin",
+                        "abi": "pyamplicol-spinor-dag-binary-v3",
+                        "path": "spinor-dag-v3.bin",
                     }
                     assert "process_family" not in execution
                 runtimes[mode] = Runtime.load(artifact, process=case.process_id)

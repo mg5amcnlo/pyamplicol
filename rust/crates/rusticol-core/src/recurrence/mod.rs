@@ -118,7 +118,7 @@ pub use relation::{
     RecurrenceRelationDiscoveryReport, authenticate_recurrence_numerical_relation_provenance,
     recurrence_numerical_source_semantics_sha256, relation_certificate_algorithm,
 };
-pub use spinor_lowering::lower_authenticated_recurrence_to_spinor_payload_v2;
+pub use spinor_lowering::lower_authenticated_recurrence_to_spinor_payload_v3;
 /// Semantic prepared-model companion ABI.
 pub const RECURRENCE_TEMPLATE_ABI: &str = "pyamplicol-recurrence-template-v1";
 /// Python-to-Rust recurrence builder input ABI.

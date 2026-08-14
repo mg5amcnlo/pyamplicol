@@ -42,8 +42,8 @@ use rusticol_core::{
 };
 use rusticol_core::{
     NativeRecurrenceExactExecutor, NativeRecurrenceExactFactor, NativeRecurrenceExactSections,
-    RusticolError, RusticolResult, recurrence::lower_authenticated_recurrence_to_spinor_payload_v2,
-    spinor::encode_spinor_dag_v2,
+    RusticolError, RusticolResult, recurrence::lower_authenticated_recurrence_to_spinor_payload_v3,
+    spinor::encode_spinor_dag_v3,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
@@ -928,10 +928,10 @@ struct AuthenticatedDirectTemplateCatalog {
 }
 
 /// Private cold-path bridge for the authenticated recurrence-to-spinor slice.
-/// The return value is the complete executable v2 payload; no parallel graph
+/// The return value is the complete executable v3 payload; no parallel graph
 /// metadata or digest is synthesized at this boundary.
 #[pyfunction]
-pub(crate) fn _lower_recurrence_spinor_dag_v2(
+pub(crate) fn _lower_recurrence_spinor_dag_v3(
     py: Python<'_>,
     builder_input: &Bound<'_, PyAny>,
     prepared_template_input: &Bound<'_, PyAny>,
@@ -957,11 +957,11 @@ pub(crate) fn _lower_recurrence_spinor_dag_v2(
                 authenticated.template().summary().catalog_digest,
                 authenticated.template().summary().compiled_model_digest,
             )?;
-            let payload = lower_authenticated_recurrence_to_spinor_payload_v2(
+            let payload = lower_authenticated_recurrence_to_spinor_payload_v3(
                 &authenticated,
                 &direct.catalog,
             )?;
-            encode_spinor_dag_v2(&payload)
+            encode_spinor_dag_v3(&payload)
         })
         .map_err(python_error)?;
     Ok(PyBytes::new(py, &payload).unbind())

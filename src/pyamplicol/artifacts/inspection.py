@@ -1613,7 +1613,7 @@ def _execution_inspection(
                 or graph_payload
                 != {
                     "abi": SPINOR_DAG_BINARY_ABI,
-                    "path": "spinor-dag-v2.bin",
+                    "path": "spinor-dag-v3.bin",
                 }
                 or (
                     kernel_pack is not None

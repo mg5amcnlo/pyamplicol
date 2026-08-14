@@ -170,7 +170,7 @@ ON_THE_FLY_PUBLIC_METADATA_KIND = "pyamplicol-on-the-fly-public-metadata"
 _ON_THE_FLY_RUNTIME_CONTAINER_PATH = "on-the-fly-runtime.pacbin"
 _ON_THE_FLY_PROCESS_SEED_MEMBER_PATH = "on-the-fly/process-seed-v1.bin"
 _ON_THE_FLY_COLOR_CONTRACTION_PATH = "on-the-fly-color.bin"
-_SPINOR_GRAPH_PAYLOAD_PATH = "spinor-dag-v2.bin"
+_SPINOR_GRAPH_PAYLOAD_PATH = "spinor-dag-v3.bin"
 _SAFE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _SUPPORTED_ARTIFACT_TARGETS = frozenset(
     {

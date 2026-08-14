@@ -86,7 +86,7 @@ of silently falling back to a guessed spinor identity. Compiler-emitted
 binary64 common scales are accepted only when their expanded canonical
 expressions agree; a perturbed coefficient remains rejected.
 
-The resulting `PACSPDG2` payload stores the simplified semantic DAG, explicit
+The resulting `PACSPDG3` payload stores the simplified semantic DAG, explicit
 source permutation/sign/kind rows, and dense DAG-to-prepared-parameter
 bindings. It does not store workspace layout or a second identity. The normal
 artifact payload checksum authenticates the bytes.
@@ -118,13 +118,15 @@ widthful propagator
 
 `i (slash(P) + m) / (P^2 - m^2 + i m Gamma)`.
 
-For a massive Dirac graph with one external massless vector, the payload also
-authenticates which graph source defines the temporal-gauge reference
-`q = (p0, -p_vec)`. This matches the retained component evaluator at nonzero
-width. The source is part of the executable graph bytes, must be a null-spinor
-source, and is rejected when the graph does not use a reference atom. Generic
-massive-Dirac graphs with more than one external vector remain fail-closed
-until they have an authenticated per-vector policy.
+For a massive Dirac graph, the v3 payload authenticates a canonical list of
+massless-vector graph sources. Each source owns a separate temporal-gauge
+reference `q_i = (p_i^0, -p_i_vec)`. This matches the retained component
+evaluator even at nonzero fermion width: `q_i` is null and
+`p_i.q_i = 2 (p_i^0)^2`, so the spinor polarization never acquires a collinear
+reference pole. Reference owners are graph-slot ordered null-spinor sources;
+the codec rejects duplicates, unused atoms, and noncanonical lists. This
+supports any authenticated number of external massless vectors on the same
+massive Dirac line without a process-specific gauge choice.
 
 The graph builder applies bracket antisymmetry, self-zero rules, exact
 coefficient combination, Schouten rewriting, common-factor extraction, and
@@ -334,16 +336,16 @@ The result establishes a model-driven mixed-process execution path, but not a
 universal replacement for the component recurrence. The next generic
 boundaries are:
 
-1. arbitrary massive-vector insertions rather than the current certified Z
-   slice;
-2. authenticated per-vector reference policies for massive-Dirac processes
-   with two or more external vectors;
-3. fermion-pair-to-vector transitions and more than one open quark line;
-4. more than one retained colour flow in one graph payload;
-5. common-subexpression, fusion, and liveness lowering for generic contact and
+1. additional certified interaction algebras, including chiral or
+   mass-changing Dirac-vector transitions and genuine multi-field contact
+   vertices;
+2. broader source and propagator contracts, including external massive-state
+   width ownership, massless Dirac states, and additional scalar sectors;
+3. more than one retained colour flow in one graph payload;
+4. common-subexpression, fusion, and liveness lowering for generic contact and
    higher-multiplicity graphs, which are currently slower than the component
    evaluator;
-6. a numerically safe dynamic BCFW shift or fallback for the specialized
+5. a numerically safe dynamic BCFW shift or fallback for the specialized
    pure-gluon graphs.
 
 Until those are implemented and measured, unsupported recurrences continue to

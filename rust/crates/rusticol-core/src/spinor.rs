@@ -9,8 +9,8 @@
 mod codec;
 
 pub use codec::{
-    SPINOR_DAG_BINARY_ABI, SpinorDagPayloadV2, SpinorPreparedParameterBinding,
-    SpinorSourceInputBinding, SpinorSourceInputKind, decode_spinor_dag_v2, encode_spinor_dag_v2,
+    SPINOR_DAG_BINARY_ABI, SpinorDagPayloadV3, SpinorPreparedParameterBinding,
+    SpinorSourceInputBinding, SpinorSourceInputKind, decode_spinor_dag_v3, encode_spinor_dag_v3,
 };
 
 use crate::recurrence::{ExactComplexRational, ExactRational};
@@ -151,8 +151,7 @@ pub struct SpinorDag {
     spinor_atom_count: u16,
     parameter_count: u16,
     massive_sources: Box<[MassiveSpinorSource]>,
-    uses_reference_atom: bool,
-    temporal_reference_source: Option<u16>,
+    reference_sources: Box<[Option<u16>]>,
     nodes: Box<[SpinorNode]>,
     roots: Box<[SpinorAmplitudeRoot]>,
     rewrite_stats: SpinorRewriteStats,
@@ -168,7 +167,11 @@ impl SpinorDag {
     }
 
     pub const fn uses_reference_atom(&self) -> bool {
-        self.uses_reference_atom
+        !self.reference_sources.is_empty()
+    }
+
+    fn spinor_slot_capacity(&self) -> usize {
+        usize::from(self.spinor_atom_count) + self.reference_sources.len()
     }
 
     pub fn nodes(&self) -> &[SpinorNode] {
@@ -357,14 +360,16 @@ impl SpinorDag {
                 workspace.spinors[usize::from(massive.k_atom) * stride + point_index] = k;
                 workspace.spinors[usize::from(massive.r_atom) * stride + point_index] = r;
             }
-            if self.uses_reference_atom
-                && usize::from(self.spinor_atom_count) < required_spinor_slots
-            {
-                let reference = match self.temporal_reference_source {
+            for (reference_index, source) in self.reference_sources.iter().copied().enumerate() {
+                let atom = usize::from(self.spinor_atom_count) + reference_index;
+                if atom >= required_spinor_slots {
+                    continue;
+                }
+                let reference = match source {
                     Some(source) => temporal_reference_flat(point, source)?,
                     None => select_common_reference_flat(point)?,
                 };
-                workspace.spinors[usize::from(self.spinor_atom_count) * stride + point_index] =
+                workspace.spinors[atom * stride + point_index] =
                     MasslessSpinors::from_momentum(reference)?;
             }
         }
@@ -557,13 +562,16 @@ impl SpinorDag {
             workspace.spinors[usize::from(massive.k_atom)] = k;
             workspace.spinors[usize::from(massive.r_atom)] = r;
         }
-        if self.uses_reference_atom && usize::from(self.spinor_atom_count) < required_spinor_slots {
-            let reference = match self.temporal_reference_source {
+        for (reference_index, source) in self.reference_sources.iter().copied().enumerate() {
+            let atom = usize::from(self.spinor_atom_count) + reference_index;
+            if atom >= required_spinor_slots {
+                continue;
+            }
+            let reference = match source {
                 Some(source) => temporal_reference_momentum(momenta, source)?,
                 None => select_common_reference_momentum(momenta)?,
             };
-            workspace.spinors[usize::from(self.spinor_atom_count)] =
-                MasslessSpinors::from_momentum(reference)?;
+            workspace.spinors[atom] = MasslessSpinors::from_momentum(reference)?;
         }
         for (node_index, node) in self.nodes.iter().enumerate() {
             let node_value = match node {
@@ -748,7 +756,7 @@ pub struct SpinorBatchWorkspace {
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 impl SpinorBatchWorkspace {
     fn new(dag: &SpinorDag, point_capacity: usize) -> RusticolResult<Self> {
-        Self::new_with_spinor_slots(dag, point_capacity, usize::from(dag.spinor_atom_count) + 1)
+        Self::new_with_spinor_slots(dag, point_capacity, dag.spinor_slot_capacity())
     }
 
     fn new_with_spinor_slots(
@@ -782,11 +790,7 @@ impl SpinorBatchWorkspace {
     }
 
     fn validate_for(&self, dag: &SpinorDag, point_count: usize) -> RusticolResult<()> {
-        self.validate_for_with_spinor_slots(
-            dag,
-            point_count,
-            usize::from(dag.spinor_atom_count) + 1,
-        )
+        self.validate_for_with_spinor_slots(dag, point_count, dag.spinor_slot_capacity())
     }
 
     fn validate_for_with_spinor_slots(
@@ -802,7 +806,7 @@ impl SpinorBatchWorkspace {
             )));
         }
         if self.spinors.len() < required_spinor_slots * self.point_capacity
-            || self.spinors.len() > (usize::from(dag.spinor_atom_count) + 1) * self.point_capacity
+            || self.spinors.len() > dag.spinor_slot_capacity() * self.point_capacity
             || self.spinors.len() % self.point_capacity != 0
             || self.node_slots.len() != dag.nodes.len()
             || self.values.len() != self.value_slot_count * self.point_capacity
@@ -929,7 +933,7 @@ fn disjoint_value_planes(
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 impl SpinorWorkspace {
     fn new(dag: &SpinorDag) -> Self {
-        Self::new_with_spinor_slots(dag, usize::from(dag.spinor_atom_count) + 1)
+        Self::new_with_spinor_slots(dag, dag.spinor_slot_capacity())
     }
 
     fn new_with_spinor_slots(dag: &SpinorDag, spinor_slot_count: usize) -> Self {
@@ -946,7 +950,7 @@ impl SpinorWorkspace {
     }
 
     fn validate_for(&self, dag: &SpinorDag) -> RusticolResult<()> {
-        self.validate_for_with_spinor_slots(dag, usize::from(dag.spinor_atom_count) + 1)
+        self.validate_for_with_spinor_slots(dag, dag.spinor_slot_capacity())
     }
 
     fn validate_for_with_spinor_slots(
@@ -955,7 +959,7 @@ impl SpinorWorkspace {
         required_spinor_slots: usize,
     ) -> RusticolResult<()> {
         if self.spinors.len() < required_spinor_slots
-            || self.spinors.len() > usize::from(dag.spinor_atom_count) + 1
+            || self.spinors.len() > dag.spinor_slot_capacity()
             || self.values.len() != dag.nodes.len()
             || self.amplitudes.len() != dag.roots.len()
         {
@@ -998,7 +1002,7 @@ pub struct SpinorDagBuilder {
     spinor_atom_count: u16,
     parameter_count: u16,
     massive_sources: Vec<MassiveSpinorSource>,
-    temporal_reference_source: Option<u16>,
+    reference_sources: Vec<Option<u16>>,
     nodes: Vec<SpinorNode>,
     interner: BTreeMap<SpinorNode, SpinorNodeId>,
     roots: Vec<SpinorAmplitudeRoot>,
@@ -1101,7 +1105,10 @@ impl SpinorDagBuilder {
             spinor_atom_count,
             parameter_count,
             massive_sources,
-            temporal_reference_source: None,
+            // Slot zero is the legacy/common reference atom.  It is retained
+            // only when a live bracket uses it; model-driven lowering can
+            // instead bind it, and additional atoms, to temporal references.
+            reference_sources: vec![None],
             nodes: Vec::new(),
             interner: BTreeMap::new(),
             roots: Vec::new(),
@@ -1122,16 +1129,14 @@ impl SpinorDagBuilder {
         self.one
     }
 
-    /// The one shared null reference spinor used by external polarizations.
-    /// It is deliberately outside the physical momentum-source domain.
+    /// The default shared null reference spinor used by external
+    /// polarizations. It is deliberately outside the physical
+    /// momentum-source domain.
     pub const fn reference_atom(&self) -> u16 {
         self.spinor_atom_count
     }
 
-    /// Derive the shared polarization reference from the parity-reversed
-    /// null momentum of one physical source.  This is the spinor form of the
-    /// temporal gauge used by the retained component evaluator.
-    pub(crate) fn use_temporal_reference_source(&mut self, source: u16) -> RusticolResult<()> {
+    fn validate_temporal_reference_source(&self, source: u16) -> RusticolResult<()> {
         if source >= self.momentum_count {
             return Err(invalid(format!(
                 "temporal reference source {source} is outside a {}-source graph",
@@ -1147,16 +1152,42 @@ impl SpinorDagBuilder {
                 "temporal polarization reference must be derived from a null source",
             ));
         }
-        if self
-            .temporal_reference_source
-            .is_some_and(|previous| previous != source)
-        {
-            return Err(invalid(
-                "spinor DAG already has a different temporal reference source",
-            ));
-        }
-        self.temporal_reference_source = Some(source);
         Ok(())
+    }
+
+    /// Return one reference atom derived from this source's parity-reversed
+    /// null momentum.  Distinct external vectors receive distinct atoms, so
+    /// each polarization exactly follows the component evaluator's temporal
+    /// gauge rather than sharing a process-dependent gauge choice.
+    pub(crate) fn temporal_reference_atom(&mut self, source: u16) -> RusticolResult<u16> {
+        self.validate_temporal_reference_source(source)?;
+        if let Some(index) = self
+            .reference_sources
+            .iter()
+            .position(|candidate| *candidate == Some(source))
+        {
+            return self
+                .spinor_atom_count
+                .checked_add(
+                    u16::try_from(index)
+                        .map_err(|_| invalid("temporal reference index exceeds u16"))?,
+                )
+                .ok_or_else(|| invalid("temporal reference atom count overflows u16"));
+        }
+        let index = if self.reference_sources == [None] {
+            self.reference_sources[0] = Some(source);
+            0
+        } else {
+            let index = self.reference_sources.len();
+            self.reference_sources.push(Some(source));
+            index
+        };
+        self.spinor_atom_count
+            .checked_add(
+                u16::try_from(index)
+                    .map_err(|_| invalid("temporal reference index exceeds u16"))?,
+            )
+            .ok_or_else(|| invalid("temporal reference atom count overflows u16"))
     }
 
     pub fn constant(&mut self, value: ExactComplexRational) -> RusticolResult<SpinorNodeId> {
@@ -1633,25 +1664,35 @@ impl SpinorDagBuilder {
         self.roots
             .sort_unstable_by(|left, right| left.helicities.cmp(&right.helicities));
         self.prune_dead_nodes()?;
-        let reference_atom = self.reference_atom();
-        let uses_reference_atom = self.nodes.iter().any(|node| {
-            matches!(
-                node,
-                SpinorNode::Bracket { left, right, .. }
-                    if *left == reference_atom || *right == reference_atom
-            )
-        });
+        let reference_start = self.reference_atom();
+        let mut used_references = BTreeSet::new();
+        for node in &self.nodes {
+            let SpinorNode::Bracket { left, right, .. } = node else {
+                continue;
+            };
+            for atom in [*left, *right] {
+                if atom >= reference_start {
+                    used_references.insert(usize::from(atom - reference_start));
+                }
+            }
+        }
+        let reference_sources = if let Some(last) = used_references.last().copied() {
+            if used_references.len() != last + 1 || last >= self.reference_sources.len() {
+                return Err(invalid(
+                    "live temporal reference atoms do not form one canonical dense prefix",
+                ));
+            }
+            self.reference_sources.truncate(last + 1);
+            self.reference_sources
+        } else {
+            Vec::new()
+        };
         Ok(SpinorDag {
             momentum_count: self.momentum_count,
             spinor_atom_count: self.spinor_atom_count,
             parameter_count: self.parameter_count,
             massive_sources: self.massive_sources.into_boxed_slice(),
-            uses_reference_atom,
-            temporal_reference_source: if uses_reference_atom {
-                self.temporal_reference_source
-            } else {
-                None
-            },
+            reference_sources: reference_sources.into_boxed_slice(),
             nodes: self.nodes.into_boxed_slice(),
             roots: self.roots.into_boxed_slice(),
             rewrite_stats: self.rewrite_stats,
@@ -1659,11 +1700,18 @@ impl SpinorDagBuilder {
     }
 
     fn validate_spinor_atom(&self, atom: u16) -> RusticolResult<()> {
-        if atom > self.reference_atom() {
+        let reference_count = u16::try_from(self.reference_sources.len())
+            .map_err(|_| invalid("temporal reference count exceeds u16"))?;
+        let end = self
+            .reference_atom()
+            .checked_add(reference_count)
+            .ok_or_else(|| invalid("spinor atom count overflows u16"))?;
+        if atom >= end {
             return Err(invalid(format!(
-                "spinor atom {atom} is outside a graph with {} physical sources, {} derived atoms, and one reference atom",
+                "spinor atom {atom} is outside a graph with {} physical sources, {} massive-derived atoms, and {} reference atoms",
                 self.momentum_count,
                 self.spinor_atom_count - self.momentum_count,
+                self.reference_sources.len(),
             )));
         }
         Ok(())
@@ -2050,7 +2098,7 @@ pub(crate) fn external_polarization_expression(
     external_polarization_expression_with_reference(builder, leg, reference, helicity)
 }
 
-fn external_polarization_expression_with_reference(
+pub(crate) fn external_polarization_expression_with_reference(
     builder: &mut SpinorDagBuilder,
     leg: u16,
     reference: u16,
@@ -4799,9 +4847,53 @@ mod tests {
 
         let mut builder =
             SpinorDagBuilder::new_with_parameters_and_massive_sources(3, 0, &[0, 2]).unwrap();
-        assert!(builder.use_temporal_reference_source(0).is_err());
-        builder.use_temporal_reference_source(1).unwrap();
-        assert!(builder.use_temporal_reference_source(2).is_err());
+        assert!(builder.temporal_reference_atom(0).is_err());
+        assert_eq!(builder.temporal_reference_atom(1).unwrap(), 7);
+        assert!(builder.temporal_reference_atom(2).is_err());
+    }
+
+    #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+    #[test]
+    fn per_vector_temporal_reference_is_null_nonsingular_and_temporal() {
+        for momentum in [[-5.0, -3.0, 0.0, -4.0], [5.0, 3.0, 0.0, 4.0]] {
+            let reference = [momentum[0], -momentum[1], -momentum[2], -momentum[3]];
+            let square = |value: [f64; 4]| {
+                value[0] * value[0]
+                    - value[1] * value[1]
+                    - value[2] * value[2]
+                    - value[3] * value[3]
+            };
+            let dot = |left: [f64; 4], right: [f64; 4]| {
+                left[0] * right[0] - left[1] * right[1] - left[2] * right[2] - left[3] * right[3]
+            };
+            assert_eq!(square(momentum), 0.0);
+            assert_eq!(square(reference), 0.0);
+            assert_eq!(dot(momentum, reference), 2.0 * momentum[0] * momentum[0]);
+
+            let momentum_spinors = MasslessSpinors::from_momentum(momentum).unwrap();
+            let reference_spinors = MasslessSpinors::from_momentum(reference).unwrap();
+            let polarizations = [-1, 1].map(|helicity| {
+                bispinor_to_vector(
+                    massless_polarization_bispinor(momentum_spinors, reference_spinors, helicity)
+                        .unwrap(),
+                )
+            });
+            for polarization in polarizations {
+                assert_close(polarization[0], c(0.0, 0.0));
+                let contraction = c(momentum[0], 0.0) * polarization[0]
+                    - c(momentum[1], 0.0) * polarization[1]
+                    - c(momentum[2], 0.0) * polarization[2]
+                    - c(momentum[3], 0.0) * polarization[3];
+                assert_close(contraction, c(0.0, 0.0));
+            }
+            assert_close(
+                polarizations[0][0] * polarizations[1][0]
+                    - polarizations[0][1] * polarizations[1][1]
+                    - polarizations[0][2] * polarizations[1][2]
+                    - polarizations[0][3] * polarizations[1][3],
+                c(-1.0, 0.0),
+            );
+        }
     }
 
     #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]

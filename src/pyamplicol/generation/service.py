@@ -1436,7 +1436,7 @@ def _invoke_rust_on_the_fly_seed_inspector_v1(
     return _validate_on_the_fly_process_seed_identity_v1(decoded)
 
 
-def _invoke_rust_spinor_graph_lowering_v2(
+def _invoke_rust_spinor_graph_lowering_v3(
     builder_input: RecurrenceBuilderInputV1,
     template_input: RecurrenceTemplateInputV1,
     direct_template_catalog_json: bytes,
@@ -1448,13 +1448,13 @@ def _invoke_rust_spinor_graph_lowering_v2(
     except (ImportError, OSError, RuntimeError) as exc:
         raise GenerationError(
             "spinor graph generation requires the current native "
-            "_lower_recurrence_spinor_dag_v2 binding"
+            "_lower_recurrence_spinor_dag_v3 binding"
         ) from exc
-    candidate = getattr(module, "_lower_recurrence_spinor_dag_v2", None)
+    candidate = getattr(module, "_lower_recurrence_spinor_dag_v3", None)
     if not callable(candidate):
         raise GenerationError(
             "pyamplicol._rusticol does not provide the private "
-            "_lower_recurrence_spinor_dag_v2 binding"
+            "_lower_recurrence_spinor_dag_v3 binding"
         )
     binding = cast(_RustSpinorGraphLoweringBinding, candidate)
     try:
@@ -3887,7 +3887,7 @@ class GenerationBackend:
                         selected_public_flow_ids=selected_public_flow_ids,
                     )
                 try:
-                    graph_payload = _invoke_rust_spinor_graph_lowering_v2(
+                    graph_payload = _invoke_rust_spinor_graph_lowering_v3(
                         build_recurrence_builder_input_v1(logical),
                         model_inputs.template_input,
                         model_inputs.direct_template_catalog_json,
