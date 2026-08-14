@@ -22,7 +22,8 @@ use crate::spinor::{
     bivector_wedge_expression, dirac_bilinear, dirac_propagator_numerator, dirac_scalar_expression,
     dirac_scale, dirac_sum, dirac_vector_expression, external_polarization_expression,
     linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
-    massive_dirac_source_expression, quark_vector_weyl_bilinear,
+    massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
+    massive_vector_polarization_expression, quark_vector_weyl_bilinear,
     quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
     three_vector_bispinor_expression,
 };
@@ -133,6 +134,12 @@ pub fn lower_authenticated_recurrence_to_spinor_payload_v2(
 enum QcdStateKind {
     Scalar,
     Vector,
+    MassiveVector {
+        orientation: CurrentOrientation,
+        species_string_id: u32,
+        mass_parameter_id: u32,
+        mass_prepared_slot: u32,
+    },
     Bivector,
     Weyl {
         chirality: SpinorChirality,
@@ -176,6 +183,7 @@ struct QcdSourceLayout {
     input_kinds: Vec<SpinorSourceInputKind>,
     massive_sources: Vec<u16>,
     vector_sources: Vec<u16>,
+    source_parameter_slots: Vec<u32>,
     dirac_mass_prepared_slot: Option<u32>,
 }
 
@@ -190,8 +198,8 @@ fn lower_qcd_program(
     if program.strategy() != RecurrenceStrategy::TopologyReplay {
         return Err(invalid("the QCD slice requires topology replay"));
     }
-    if source_count < 4 {
-        return Err(invalid("the QCD slice requires at least four sources"));
+    if source_count < 3 {
+        return Err(invalid("the QCD slice requires at least three sources"));
     }
     let representative_signs = qcd_representative_signs(program, source_count)?;
     let source_layout = qcd_source_layout(program, templates, source_count)?;
@@ -199,6 +207,7 @@ fn lower_qcd_program(
         program,
         templates,
         direct,
+        &source_layout.source_parameter_slots,
         source_layout.dirac_mass_prepared_slot,
     )?;
     let dense_parameter_slots = prepared_slots
@@ -395,6 +404,37 @@ fn qcd_state_kind(
         ) if state.mass_parameter_id == MISSING_U32 && state.width_parameter_id == MISSING_U32 => {
             QcdStateKind::Vector
         }
+        (ParticleStatistics::Boson, "lorentz-vector", 4, 0, orientation, None)
+            if state.mass_parameter_id != MISSING_U32
+                && state.width_parameter_id == MISSING_U32 =>
+        {
+            let orientation_is_authenticated = match orientation {
+                CurrentOrientation::SelfConjugate => state.particle_id == state.anti_particle_id,
+                CurrentOrientation::Particle | CurrentOrientation::Antiparticle => {
+                    state.particle_id != state.anti_particle_id
+                        && massive_vector_conjugate_state_count(
+                            &templates.input().current_states,
+                            state,
+                        ) == 1
+                }
+            };
+            if !orientation_is_authenticated {
+                return Err(invalid(format!(
+                    "massive-vector current-state template {state_id} has no unique authenticated charge conjugate"
+                )));
+            }
+            let mass_prepared_slot = prepared_real_parameter_slot(
+                templates,
+                state.mass_parameter_id,
+                "massive-vector state mass",
+            )?;
+            QcdStateKind::MassiveVector {
+                orientation,
+                species_string_id: state.species_string_id,
+                mass_parameter_id: state.mass_parameter_id,
+                mass_prepared_slot,
+            }
+        }
         (
             ParticleStatistics::Boson,
             "auxiliary:antisymmetric-tensor",
@@ -438,7 +478,7 @@ fn qcd_state_kind(
         }
         _ => {
             return Err(invalid(format!(
-                "current-state template {state_id} is outside the scalar/vector/bivector/one-fermion-line QCD slice"
+                "current-state template {state_id} is outside the scalar/massless-or-massive-vector/bivector/one-fermion-line QCD slice"
             )));
         }
     };
@@ -462,6 +502,42 @@ fn qcd_state_kind(
         }
     }
     Ok(kind)
+}
+
+fn massive_vector_conjugate_state_count(
+    states: &[super::template::CurrentStateRow],
+    state: &super::template::CurrentStateRow,
+) -> usize {
+    states
+        .iter()
+        .filter(|candidate| massive_vector_states_are_mutually_conjugate(state, candidate))
+        .count()
+}
+
+fn massive_vector_states_are_mutually_conjugate(
+    state: &super::template::CurrentStateRow,
+    candidate: &super::template::CurrentStateRow,
+) -> bool {
+    let opposite_orientation = match CurrentOrientation::try_from(state.orientation) {
+        Ok(CurrentOrientation::Particle) => CurrentOrientation::Antiparticle,
+        Ok(CurrentOrientation::Antiparticle) => CurrentOrientation::Particle,
+        Ok(CurrentOrientation::SelfConjugate) | Err(_) => return false,
+    };
+    candidate.id != state.id
+        && candidate.particle_id == state.anti_particle_id
+        && candidate.anti_particle_id == state.particle_id
+        && candidate.species_string_id == state.species_string_id
+        && candidate.orientation == opposite_orientation as u8
+        && candidate.statistics == state.statistics
+        && candidate.color_representation == state.color_representation
+        && candidate.basis_string_id == state.basis_string_id
+        && candidate.tensor_ordering_sequence_id == state.tensor_ordering_sequence_id
+        && candidate.dimension == state.dimension
+        && candidate.chirality == state.chirality
+        && candidate.lc_color_shape_string_id == state.lc_color_shape_string_id
+        && candidate.auxiliary_kind_string_id == state.auxiliary_kind_string_id
+        && candidate.mass_parameter_id == state.mass_parameter_id
+        && candidate.width_parameter_id == MISSING_U32
 }
 
 fn qcd_representative_signs(
@@ -527,6 +603,7 @@ fn qcd_source_layout(
     let mut input_kinds = vec![None; source_count];
     let mut massive_sources = BTreeSet::new();
     let mut vector_sources = BTreeSet::new();
+    let mut source_parameter_slots = BTreeSet::new();
     let mut particle_endpoints = BTreeSet::new();
     let mut antiparticle_endpoints = BTreeSet::new();
 
@@ -619,6 +696,37 @@ fn qcd_source_layout(
                 );
                 (SpinorSourceInputKind::NullSpinor, None)
             }
+            QcdStateKind::MassiveVector {
+                orientation,
+                species_string_id,
+                mass_parameter_id,
+                mass_prepared_slot,
+            } => {
+                let source_state = qcd_state_kind(templates, source.state_template_id)?;
+                if source_state
+                    != (QcdStateKind::MassiveVector {
+                        orientation,
+                        species_string_id,
+                        mass_parameter_id,
+                        mass_prepared_slot,
+                    })
+                    || source.mass_parameter_id != mass_parameter_id
+                    || source.width_parameter_id != MISSING_U32
+                {
+                    return Err(invalid(format!(
+                        "massive-vector source template {} disagrees with its authenticated oriented state",
+                        source.id
+                    )));
+                }
+                if source.helicity == 0 && source.spin_state == 0 {
+                    source_parameter_slots.insert(mass_prepared_slot);
+                }
+                massive_sources.insert(
+                    u16::try_from(*source_slot)
+                        .map_err(|_| invalid("massive-vector source slot exceeds u16"))?,
+                );
+                (SpinorSourceInputKind::MassiveSpinorPair, None)
+            }
             QcdStateKind::Weyl { .. } => (SpinorSourceInputKind::NullSpinor, None),
             QcdStateKind::Bivector => {
                 return Err(invalid(
@@ -675,6 +783,7 @@ fn qcd_source_layout(
         input_kinds,
         massive_sources: massive_sources.into_iter().collect(),
         vector_sources: vector_sources.into_iter().collect(),
+        source_parameter_slots: source_parameter_slots.into_iter().collect(),
         dirac_mass_prepared_slot,
     })
 }
@@ -838,6 +947,44 @@ fn lower_qcd_source(
                 &polarization,
             )?))
         }
+        QcdStateKind::MassiveVector {
+            mass_parameter_id,
+            mass_prepared_slot,
+            ..
+        } => {
+            if family != "vector"
+                || !descriptor
+                    .runtime_template()
+                    .starts_with(VECTOR_SOURCE_PREFIX)
+                || !matches!(source.helicity, -1 | 0 | 1)
+                || source.spin_state != source.helicity
+                || source.mass_parameter_id != mass_parameter_id
+                || source.width_parameter_id != MISSING_U32
+            {
+                return Err(invalid(format!(
+                    "source template {source_template_id} is not an authenticated massive-vector source"
+                )));
+            }
+            let helicity = i8::try_from(source.helicity)
+                .map_err(|_| invalid("massive-vector source helicity exceeds i8"))?;
+            let polarization = if helicity == 0 {
+                let dense_mass = dense_parameter_slots
+                    .get(&mass_prepared_slot)
+                    .copied()
+                    .ok_or_else(|| {
+                        invalid("longitudinal massive-vector source mass has no graph binding")
+                    })?;
+                let mass = builder.parameter(dense_mass)?;
+                massive_vector_longitudinal_polarization_expression(builder, atom, mass)?
+            } else {
+                massive_vector_polarization_expression(builder, atom, helicity)?
+            };
+            Ok(QcdCurrent::Vector(bispinor_scale(
+                builder,
+                source_factor,
+                &polarization,
+            )?))
+        }
         QcdStateKind::Bivector => Err(invalid(
             "an auxiliary antisymmetric tensor cannot be an external QCD source",
         )),
@@ -907,9 +1054,13 @@ fn qcd_parameter_slots(
     program: &RecurrenceProgram,
     templates: &ValidatedRecurrenceTemplateInput,
     direct: &PreparedDirectExecutorCatalog,
+    source_parameter_slots: &[u32],
     dirac_mass_prepared_slot: Option<u32>,
 ) -> RusticolResult<Vec<u32>> {
-    let mut slots = BTreeSet::new();
+    let mut slots = source_parameter_slots
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     if let Some(slot) = dirac_mass_prepared_slot {
         slots.insert(slot);
     }
@@ -1280,6 +1431,11 @@ fn qcd_finalization_scale(
             VECTOR_PROPAGATOR_CONTRACT,
             false,
         ),
+        QcdStateKind::MassiveVector { .. } => {
+            return Err(invalid(
+                "an internal massive vector requires an authenticated massive-vector propagator",
+            ));
+        }
         QcdStateKind::Bivector => {
             return Err(invalid(
                 "an auxiliary antisymmetric tensor cannot have an active propagator",
@@ -1443,6 +1599,9 @@ fn lower_qcd_current(
     match state {
         QcdStateKind::Scalar => Err(invalid(
             "the mixed QCD slice supports scalar insertions only as authenticated sources",
+        )),
+        QcdStateKind::MassiveVector { .. } => Err(invalid(
+            "the massive-vector slice supports authenticated external sources only",
         )),
         QcdStateKind::Vector => {
             let mut terms = Vec::new();
@@ -3553,6 +3712,69 @@ mod tests {
             [-1, 1, -1, 1]
         );
         assert!(qcd_graph_helicities(&[-1, 1], Some(&[0])).is_err());
+    }
+
+    #[test]
+    fn charged_massive_vector_requires_one_exact_conjugate_state() {
+        let templates = validated_template_fixture();
+        let mut particle = templates.input().current_states[0];
+        particle.id = 10;
+        particle.particle_id = 701;
+        particle.anti_particle_id = -909;
+        particle.orientation = CurrentOrientation::Particle as u8;
+        particle.statistics = ParticleStatistics::Boson as u8;
+        particle.dimension = 4;
+        particle.chirality = 0;
+        particle.mass_parameter_id = 7;
+        particle.width_parameter_id = MISSING_U32;
+
+        let mut antiparticle = particle;
+        antiparticle.id = 11;
+        antiparticle.particle_id = particle.anti_particle_id;
+        antiparticle.anti_particle_id = particle.particle_id;
+        antiparticle.orientation = CurrentOrientation::Antiparticle as u8;
+        assert!(massive_vector_states_are_mutually_conjugate(
+            &particle,
+            &antiparticle
+        ));
+        assert!(massive_vector_states_are_mutually_conjugate(
+            &antiparticle,
+            &particle
+        ));
+        assert_eq!(
+            massive_vector_conjugate_state_count(&[particle, antiparticle], &particle),
+            1
+        );
+
+        let mut wrong_species = antiparticle;
+        wrong_species.species_string_id = wrong_species.species_string_id.wrapping_add(1);
+        assert!(!massive_vector_states_are_mutually_conjugate(
+            &particle,
+            &wrong_species
+        ));
+        let mut wrong_mass = antiparticle;
+        wrong_mass.mass_parameter_id = wrong_mass.mass_parameter_id.wrapping_add(1);
+        assert!(!massive_vector_states_are_mutually_conjugate(
+            &particle,
+            &wrong_mass
+        ));
+        let mut has_width = antiparticle;
+        has_width.width_parameter_id = 9;
+        assert!(!massive_vector_states_are_mutually_conjugate(
+            &particle, &has_width
+        ));
+        let mut wrong_orientation = antiparticle;
+        wrong_orientation.orientation = CurrentOrientation::Particle as u8;
+        assert!(!massive_vector_states_are_mutually_conjugate(
+            &particle,
+            &wrong_orientation
+        ));
+        let mut duplicate = antiparticle;
+        duplicate.id = 12;
+        assert_eq!(
+            massive_vector_conjugate_state_count(&[particle, antiparticle, duplicate], &particle),
+            2
+        );
     }
 
     #[test]

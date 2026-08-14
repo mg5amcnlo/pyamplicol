@@ -2071,7 +2071,7 @@ fn external_polarization_expression_with_reference(
     }
 }
 
-fn massive_vector_polarization_expression(
+pub(crate) fn massive_vector_polarization_expression(
     builder: &mut SpinorDagBuilder,
     source: u16,
     helicity: i8,
@@ -2090,31 +2090,53 @@ fn massive_vector_polarization_expression(
         }
         0 => {
             let inverse_mass = builder.kinematic(SpinorKinematicScalar::InverseMass { source })?;
-            let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
-            let inverse_sqrt_two = builder.reciprocal(sqrt_two)?;
-            let coefficient = builder.product([inverse_mass, inverse_sqrt_two])?;
-            let minus_coefficient = builder.negate(coefficient)?;
-            Ok(BispinorExpression {
-                terms: BTreeMap::from([
-                    (
-                        SpinorDyad {
-                            undotted: k,
-                            dotted: k,
-                        },
-                        coefficient,
-                    ),
-                    (
-                        SpinorDyad {
-                            undotted: r,
-                            dotted: r,
-                        },
-                        minus_coefficient,
-                    ),
-                ]),
-            })
+            massive_vector_longitudinal_with_inverse_mass(builder, k, r, inverse_mass)
         }
         _ => Err(invalid("massive-vector helicity must be -1, 0, or +1")),
     }
+}
+
+/// Build the longitudinal polarization of an authenticated on-shell massive
+/// vector using its model-owned mass parameter. The source momentum still
+/// owns the deterministic `(k, r)` null decomposition.
+pub(crate) fn massive_vector_longitudinal_polarization_expression(
+    builder: &mut SpinorDagBuilder,
+    source: u16,
+    mass: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let (k, r) = builder.massive_vector_atoms(source)?;
+    let inverse_mass = builder.reciprocal(mass)?;
+    massive_vector_longitudinal_with_inverse_mass(builder, k, r, inverse_mass)
+}
+
+fn massive_vector_longitudinal_with_inverse_mass(
+    builder: &mut SpinorDagBuilder,
+    k: u16,
+    r: u16,
+    inverse_mass: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+    let inverse_sqrt_two = builder.reciprocal(sqrt_two)?;
+    let coefficient = builder.product([inverse_mass, inverse_sqrt_two])?;
+    let minus_coefficient = builder.negate(coefficient)?;
+    Ok(BispinorExpression {
+        terms: BTreeMap::from([
+            (
+                SpinorDyad {
+                    undotted: k,
+                    dotted: k,
+                },
+                coefficient,
+            ),
+            (
+                SpinorDyad {
+                    undotted: r,
+                    dotted: r,
+                },
+                minus_coefficient,
+            ),
+        ]),
+    })
 }
 
 fn interval_momentum_expression(start: u16, end: u16, one: SpinorNodeId) -> BispinorExpression {
@@ -4584,6 +4606,42 @@ mod tests {
         let fused_closure =
             massive_dirac_vector_closure(&mut builder, &particle, &vector, &antiparticle).unwrap();
         assert_eq!(direct, fused_closure);
+    }
+
+    #[test]
+    fn massive_vector_longitudinal_polarization_uses_the_owned_mass_node() {
+        let mut builder = SpinorDagBuilder::new_with_massive_vector(2, 1, 1).unwrap();
+        let mass = builder.parameter(0).unwrap();
+        let polarization =
+            massive_vector_longitudinal_polarization_expression(&mut builder, 1, mass).unwrap();
+        let (k, r) = builder.massive_vector_atoms(1).unwrap();
+        let inverse_mass = builder.reciprocal(mass).unwrap();
+        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo).unwrap();
+        let inverse_sqrt_two = builder.reciprocal(sqrt_two).unwrap();
+        let coefficient = builder.product([inverse_mass, inverse_sqrt_two]).unwrap();
+        let negative_coefficient = builder.negate(coefficient).unwrap();
+
+        assert_eq!(
+            polarization,
+            BispinorExpression {
+                terms: BTreeMap::from([
+                    (
+                        SpinorDyad {
+                            undotted: k,
+                            dotted: k,
+                        },
+                        coefficient,
+                    ),
+                    (
+                        SpinorDyad {
+                            undotted: r,
+                            dotted: r,
+                        },
+                        negative_coefficient,
+                    ),
+                ]),
+            }
+        );
     }
 
     #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
