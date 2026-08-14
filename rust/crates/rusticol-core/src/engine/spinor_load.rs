@@ -158,13 +158,16 @@ fn load_graph_spinor_native_runtime(
             Ok((pack, payload_root))
         })
         .transpose()?;
-    if prepared_pack.is_none() && !payload.parameter_bindings().is_empty() {
+    let runtime_parameters = super::recurrence_load::recurrence_runtime_parameters(metadata);
+    if prepared_pack.is_none()
+        && runtime_parameters
+            .iter()
+            .any(|parameter| parameter.kind == "derived_parameter_component")
+    {
         return Err(RusticolError::integrity(
-            "a parameterized spinor graph has no prepared kernel pack",
+            "a spinor graph with derived parameters has no prepared kernel pack",
         ));
     }
-
-    let runtime_parameters = super::recurrence_load::recurrence_runtime_parameters(metadata);
     let model_parameter_runtime_slots =
         super::recurrence_load::runtime_parameter_slots(&runtime_parameters)?;
     let model_parameter_values_f64 = runtime_parameters

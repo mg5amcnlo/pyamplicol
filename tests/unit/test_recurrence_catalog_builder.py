@@ -255,6 +255,38 @@ def test_builtin_massive_sources_and_currents_bind_fallback_mass_only() -> None:
         assert {source.mass_parameter_id for source in sources} == {None}
 
 
+def test_factored_yukawa_output_owns_one_mutable_prepared_parameter() -> None:
+    model = BuiltinSMModel()
+    catalog = build_recurrence_template_catalog(
+        model,
+        build_prepared_kernel_catalog(model),
+        compiled_model_digest=_MODEL_DIGEST,
+        prepared_kernel_pack_digest=_PACK_DIGEST,
+    )
+
+    coupling = next(
+        parameter
+        for parameter in catalog.parameters
+        if parameter.name == "coupling.16.6_25_6.component_0"
+    )
+    assert coupling.mutable
+    assert coupling.parameter_kind == "external"
+    assert coupling.prepared_parameter_id is not None
+
+    yukawa = tuple(
+        transition
+        for transition in catalog.transitions
+        if transition.equivalence_class
+        == "pyamplicol.models.builtin.model.BuiltinSMModel:16"
+        and transition.output_factor_source == "coupling-real"
+    )
+    assert yukawa
+    assert all(
+        coupling.template_id in transition.coupling_parameter_ids
+        for transition in yukawa
+    )
+
+
 def test_verified_auxiliary_transition_mirrors_are_not_double_counted() -> None:
     model = BuiltinSMModel()
     catalog = build_recurrence_template_catalog(

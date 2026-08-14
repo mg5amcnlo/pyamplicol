@@ -9,7 +9,13 @@ from fractions import Fraction
 import pytest
 
 from pyamplicol.models.recurrence_direct_intrinsics import (
+    DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+    DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+    DIRAC_VECTOR_PARTICLE_TEMPLATE,
+    MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+    MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     RECURRENCE_INTRINSIC_SCALE_KIND,
+    RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
 )
@@ -139,6 +145,25 @@ def _substitute_reversed(expression: str) -> str:
     return result
 
 
+def _substitute_reversed_shape(
+    expression: str,
+    canonical_left_components: int,
+    canonical_right_components: int,
+) -> str:
+    result = expression
+    for component in range(canonical_left_components):
+        result = result.replace(
+            f"l{component}",
+            f"ufo::prepared::weyl_{component}",
+        )
+    for component in range(canonical_right_components):
+        result = result.replace(
+            f"r{component}",
+            f"ufo::prepared::vector_{component}",
+        )
+    return result
+
+
 def _three_vector_contracts() -> tuple[str, ...]:
     values = [
         {
@@ -224,6 +249,72 @@ def _substitute_finalization(expression: str, components: int) -> str:
             f"model::prepared::momentum_{component}",
         )
     return result
+
+
+def _massive_finalization_contracts(
+    first_parameter_index: int,
+    second_parameter_index: int,
+) -> tuple[str, ...]:
+    values = [json.loads(item) for item in _finalization_contracts(4)]
+    values.extend(
+        (
+            {
+                "component": 0,
+                "model_parameter_index": first_parameter_index,
+                "model_parameter_name": "opaque.alpha",
+                "role": "model-parameter",
+                "symbol": "model::prepared::alpha",
+            },
+            {
+                "component": 0,
+                "model_parameter_index": second_parameter_index,
+                "model_parameter_name": "opaque.beta",
+                "role": "model-parameter",
+                "symbol": "model::prepared::beta",
+            },
+        )
+    )
+    return tuple(
+        json.dumps(
+            item,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for item in values
+    )
+
+
+def _massive_finalization_expressions(
+    orientation: str,
+    *,
+    mass_symbol: str = "model::prepared::alpha",
+    width_symbol: str = "model::prepared::beta",
+) -> tuple[str, ...]:
+    denominator = (
+        "(p0^2-p1^2-p2^2-p3^2"
+        f"-{mass_symbol}^2+1.00000000000000\U0001d456*"
+        f"{mass_symbol}*{width_symbol})^(-1)"
+    )
+    if orientation == "particle":
+        numerators = (
+            f"(p0+p3)*l2+(p1+1\U0001d456*p2)*l3+{mass_symbol}*l0",
+            f"(p0-p3)*l3+(p1-1\U0001d456*p2)*l2+{mass_symbol}*l1",
+            f"(p0-p3)*l0-(p1+1\U0001d456*p2)*l1+{mass_symbol}*l2",
+            f"(p0+p3)*l1-(p1-1\U0001d456*p2)*l0+{mass_symbol}*l3",
+        )
+    else:
+        numerators = (
+            f"(-p0+p3)*l2+(p1-1\U0001d456*p2)*l3+{mass_symbol}*l0",
+            f"(-p0-p3)*l3+(p1+1\U0001d456*p2)*l2+{mass_symbol}*l1",
+            f"(-p0-p3)*l0+(-p1+1\U0001d456*p2)*l1+{mass_symbol}*l2",
+            f"(-p0+p3)*l1+(-p1-1\U0001d456*p2)*l0+{mass_symbol}*l3",
+        )
+    return tuple(
+        _substitute_finalization(f"1\U0001d456*{denominator}*({numerator})", 4)
+        for numerator in numerators
+    )
 
 
 @pytest.mark.parametrize(
@@ -584,6 +675,180 @@ def test_rejects_near_match_with_extra_tensor_term() -> None:
 
 
 @pytest.mark.parametrize(
+    ("orientation", "expressions", "expected_template"),
+    (
+        (
+            "particle",
+            (
+                "(r0+r3)*l2+(r1+1\U0001d456*r2)*l3",
+                "(r0-r3)*l3+(r1-1\U0001d456*r2)*l2",
+                "(r0-r3)*l0-(r1+1\U0001d456*r2)*l1",
+                "(r0+r3)*l1-(r1-1\U0001d456*r2)*l0",
+            ),
+            DIRAC_VECTOR_PARTICLE_TEMPLATE,
+        ),
+        (
+            "antiparticle",
+            (
+                "(-r0+r3)*l2+(r1-1\U0001d456*r2)*l3",
+                "(-r0-r3)*l3+(r1+1\U0001d456*r2)*l2",
+                "(-r0-r3)*l0+(-r1+1\U0001d456*r2)*l1",
+                "(-r0+r3)*l1+(-r1-1\U0001d456*r2)*l0",
+            ),
+            DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+        ),
+    ),
+)
+def test_certifies_both_oriented_dirac_vector_transitions(
+    orientation: str,
+    expressions: tuple[str, ...],
+    expected_template: str,
+) -> None:
+    del orientation
+    scale = "7.07106781186547e-1\U0001d456"
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=tuple(
+            _substitute(f"{scale}*({expression})") for expression in expressions
+        ),
+        input_contracts=_contracts(4, 4),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+    )
+
+    assert result is not None
+    assert result.runtime_template == expected_template
+    assert result.constant_scale == 0.0 + 0.707106781186547j
+    assert result.model_parameter_index is None
+    assert result.parent_permutation == (0, 1)
+
+
+def test_dirac_vector_transition_accepts_only_authenticated_parent_permutation() -> (
+    None
+):
+    expressions = (
+        "(r0+r3)*l2+(r1+1\U0001d456*r2)*l3",
+        "(r0-r3)*l3+(r1-1\U0001d456*r2)*l2",
+        "(r0-r3)*l0-(r1+1\U0001d456*r2)*l1",
+        "(r0+r3)*l1-(r1-1\U0001d456*r2)*l0",
+    )
+    prepared = tuple(
+        _substitute_reversed_shape(f"1\U0001d456*({item})", 4, 4)
+        for item in expressions
+    )
+
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=prepared,
+            input_contracts=_reversed_contracts(4, 4),
+            parent_component_counts=(4, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=prepared,
+        input_contracts=_reversed_contracts(4, 4),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+        allow_nontrivial_parent_permutation=True,
+    )
+    assert result is not None
+    assert result.runtime_template == DIRAC_VECTOR_PARTICLE_TEMPLATE
+    assert result.parent_permutation == (1, 0)
+
+
+def test_certifies_dirac_scalar_transition_without_particle_identity() -> None:
+    expressions = tuple(
+        _substitute(f"-7.07106781186547e-1\U0001d456*l{component}*r0")
+        for component in range(4)
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_contracts(4, 1),
+        parent_component_counts=(4, 1),
+        destination_component_count=4,
+        binding_coupling=None,
+    )
+
+    assert result is not None
+    assert result.runtime_template == DIRAC_SCALAR_TO_DIRAC_TEMPLATE
+    assert result.constant_scale == 0.0 - 0.707106781186547j
+    assert result.model_parameter_index is None
+
+    perturbed = (f"{expressions[0]}+model::prepared::left_1", *expressions[1:])
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=perturbed,
+            input_contracts=_contracts(4, 1),
+            parent_component_counts=(4, 1),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
+
+
+def test_dirac_scalar_transition_retains_factored_dynamic_coupling_slot() -> None:
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=tuple(
+            _substitute(f"-7.07106781186547e-1\U0001d456*l{component}*r0")
+            for component in range(4)
+        ),
+        input_contracts=_contracts(4, 1),
+        parent_component_counts=(4, 1),
+        destination_component_count=4,
+        binding_coupling=None,
+        factored_output_parameter_index=73,
+    )
+
+    assert result is not None
+    assert result.runtime_template == DIRAC_SCALAR_TO_DIRAC_TEMPLATE
+    assert result.constant_scale == 0.0 - 0.707106781186547j
+    assert result.model_parameter_index == 73
+    assert result.scale_projection() == {
+        "constant_imag_bits": 13827916308072577992,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": 73,
+    }
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=tuple(
+                _substitute(f"-1\U0001d456*l{component}*r0") for component in range(4)
+            ),
+            input_contracts=_contracts(4, 1, parameter_index=12),
+            parent_component_counts=(4, 1),
+            destination_component_count=4,
+            binding_coupling=None,
+            factored_output_parameter_index=73,
+        )
+        is None
+    )
+
+
+def test_reversed_dirac_scalar_transition_records_prepared_parent_order() -> None:
+    prepared = tuple(
+        _substitute_reversed_shape(f"-1\U0001d456*l{component}*r0", 4, 1)
+        for component in range(4)
+    )
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=prepared,
+        input_contracts=_reversed_contracts(4, 1),
+        parent_component_counts=(1, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+        allow_nontrivial_parent_permutation=True,
+    )
+
+    assert result is not None
+    assert result.runtime_template == DIRAC_SCALAR_TO_DIRAC_TEMPLATE
+    assert result.parent_permutation == (1, 0)
+
+
+@pytest.mark.parametrize(
     ("expressions", "components", "expected_template"),
     (
         (
@@ -682,6 +947,143 @@ def test_rejects_finalization_intrinsic_with_wrong_global_scale() -> None:
         certify_recurrence_finalization_intrinsic(
             exact_expressions=expressions,
             input_contracts=_finalization_contracts(4),
+            component_count=4,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expected_template"),
+    (
+        ("particle", MASSIVE_DIRAC_PARTICLE_TEMPLATE),
+        ("antiparticle", MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE),
+    ),
+)
+def test_certifies_massive_dirac_finalizer_and_discovers_opaque_parameter_roles(
+    orientation: str,
+    expected_template: str,
+) -> None:
+    contracts = list(_massive_finalization_contracts(41, 9))
+    contracts[-2:] = reversed(contracts[-2:])
+    result = certify_recurrence_finalization_intrinsic(
+        exact_expressions=_massive_finalization_expressions(orientation),
+        input_contracts=tuple(contracts),
+        component_count=4,
+    )
+
+    assert result is not None
+    assert result.runtime_template == expected_template
+    assert result.constant_scale == 1.0j
+    assert result.orientation == orientation
+    assert result.mass_parameter_index == 41
+    assert result.width_parameter_index == 9
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4607182418800017408,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+        "mass_parameter_index": 41,
+        "orientation": orientation,
+        "width_parameter_index": 9,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "numerator-sign",
+        "mass-sign",
+        "width-sign",
+        "denominator-sign",
+        "extra-parameter",
+        "duplicate-parameter-index",
+    ),
+)
+def test_massive_dirac_finalizer_fails_closed_on_algebra_and_parameter_drift(
+    mutation: str,
+) -> None:
+    expressions = list(_massive_finalization_expressions("particle"))
+    contracts = list(_massive_finalization_contracts(41, 9))
+    if mutation == "numerator-sign":
+        expressions[0] = expressions[0].replace(
+            "+model::prepared::momentum_3",
+            "-model::prepared::momentum_3",
+            1,
+        )
+    elif mutation == "mass-sign":
+        expressions[0] = expressions[0].replace(
+            "+model::prepared::alpha*model::prepared::current_0",
+            "-model::prepared::alpha*model::prepared::current_0",
+            1,
+        )
+    elif mutation == "width-sign":
+        expressions = [
+            item.replace(
+                "+1.00000000000000\U0001d456*model::prepared::alpha*"
+                "model::prepared::beta",
+                "-1.00000000000000\U0001d456*model::prepared::alpha*"
+                "model::prepared::beta",
+            )
+            for item in expressions
+        ]
+    elif mutation == "denominator-sign":
+        expressions = [
+            item.replace(
+                "-model::prepared::momentum_1^2",
+                "+model::prepared::momentum_1^2",
+            )
+            for item in expressions
+        ]
+    elif mutation == "extra-parameter":
+        contracts.append(
+            json.dumps(
+                {
+                    "component": 0,
+                    "model_parameter_index": 77,
+                    "model_parameter_name": "opaque.gamma",
+                    "role": "model-parameter",
+                    "symbol": "model::prepared::gamma",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    else:
+        second = json.loads(contracts[-1])
+        second["model_parameter_index"] = 41
+        contracts[-1] = json.dumps(second, separators=(",", ":"), sort_keys=True)
+
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=tuple(expressions),
+            input_contracts=tuple(contracts),
+            component_count=4,
+        )
+        is None
+    )
+
+
+def test_massive_dirac_finalizer_rejects_wrong_orientation_formula() -> None:
+    particle = certify_recurrence_finalization_intrinsic(
+        exact_expressions=_massive_finalization_expressions("particle"),
+        input_contracts=_massive_finalization_contracts(3, 8),
+        component_count=4,
+    )
+    antiparticle = certify_recurrence_finalization_intrinsic(
+        exact_expressions=_massive_finalization_expressions("antiparticle"),
+        input_contracts=_massive_finalization_contracts(3, 8),
+        component_count=4,
+    )
+
+    assert particle is not None and antiparticle is not None
+    assert particle.orientation == "particle"
+    assert antiparticle.orientation == "antiparticle"
+    mixed = list(_massive_finalization_expressions("particle"))
+    mixed[0] = _massive_finalization_expressions("antiparticle")[0]
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=tuple(mixed),
+            input_contracts=_massive_finalization_contracts(3, 8),
             component_count=4,
         )
         is None

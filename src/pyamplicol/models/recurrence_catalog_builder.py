@@ -26,6 +26,7 @@ from .base import (
     RecurrenceQuantumFlowContract,
     Vertex,
     _runtime_particle_parameter_name,
+    runtime_coupling_parameter_names,
 )
 from .lc_color_port_wiring import compile_lc_color_port_wirings
 from .prepared_catalog import (
@@ -599,12 +600,25 @@ def _build_parameters(
                 "runtime_derived_parameter_definitions is nondeterministic"
             )
 
+    output_factor_parameter_names: set[str] = set()
+    for binding in (
+        *prepared_catalog.vertex_bindings,
+        *prepared_catalog.closure_bindings,
+    ):
+        name = _output_factor_parameter_name(model, binding)
+        if name is None:
+            continue
+        component = 0 if binding.output_factor_source == "coupling-real" else 1
+        add_default(name, binding.key.coupling[component], kind="external")
+        output_factor_parameter_names.add(name)
+
     required_names = {
         str(item.model_parameter_name)
         for kernel in prepared_catalog.kernels
         for item in kernel.inputs
         if item.model_parameter_name is not None
     }
+    required_names.update(output_factor_parameter_names)
     required_names.update(
         str(name)
         for binding in prepared_catalog.propagator_bindings
@@ -736,6 +750,27 @@ def _build_parameters(
             )
         )
     return tuple(records)
+
+
+def _output_factor_parameter_name(
+    model: Model,
+    binding: PreparedVertexBinding | PreparedClosureBinding,
+) -> str | None:
+    source = binding.output_factor_source
+    if source == "none":
+        return None
+    component = 0 if source == "coupling-real" else 1
+    names = runtime_coupling_parameter_names(
+        binding.key.kind,
+        binding.key.particles,
+        binding.key.coupling,
+        model=model,
+    )
+    if len(names) != len(binding.key.coupling):
+        raise RecurrenceTemplateError(
+            "runtime coupling names do not cover every binding component"
+        )
+    return names[component]
 
 
 def _canonical_binary64_mapping(values: Mapping[object, object]) -> str:
@@ -1532,7 +1567,11 @@ def _build_transitions(
                 "prepared vertex binding is not admitted by the live quantum-flow "
                 f"contract: kind={binding.key.kind}, key={binding.key!r}"
             )
-        coupling_parameters = _kernel_parameter_ids(kernel, parameter_ids)
+        coupling_parameters = set(_kernel_parameter_ids(kernel, parameter_ids))
+        output_factor_parameter = _output_factor_parameter_name(model, binding)
+        if output_factor_parameter is not None:
+            coupling_parameters.add(parameter_ids[output_factor_parameter])
+        coupling_parameters = tuple(sorted(coupling_parameters))
         coupling_orders = _canonical_coupling_orders(
             model.vertex_coupling_orders(vertex),
             f"vertex kind {vertex.kind} coupling orders",
@@ -3045,6 +3084,10 @@ def _build_closures(
                 "projection": contraction.to_json_dict(),
             },
         )
+        coupling_parameters = set(_kernel_parameter_ids(kernel, parameter_ids))
+        output_factor_parameter = _output_factor_parameter_name(model, binding)
+        if output_factor_parameter is not None:
+            coupling_parameters.add(parameter_ids[output_factor_parameter])
         record = ClosureTemplateV1(
             template_id=template_id,
             input_state_template_ids=input_state_ids,
@@ -3056,7 +3099,7 @@ def _build_closures(
             ],
             evaluator_resolver_key=resolver_key,
             canonical_input_order=tuple(binding.canonical_input_order),
-            coupling_parameter_ids=_kernel_parameter_ids(kernel, parameter_ids),
+            coupling_parameter_ids=tuple(sorted(coupling_parameters)),
             coupling_orders=coupling_orders,
             eligible_quantum_flow_template_ids=tuple(
                 sorted(flow.template_id for flow in eligible_flows)

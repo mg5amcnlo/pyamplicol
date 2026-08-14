@@ -22,6 +22,15 @@ const PREPARED_INDEPENDENT_BLOCK_PROOF: &str = "prepared-kernel-independent-curr
 const SYMJIT_APPLICATION_STORAGE_V3_ABI: &str = "symjit-application-storage-v3";
 const PREPARED_JIT_PORTABLE_OPTIMIZATION_LEVEL: u64 = 2;
 const PREPARED_JIT_PORTABLE_TARGET: &str = "symjit-storage-v3-portable";
+const MASSIVE_DIRAC_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1";
+const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
+const DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1";
+const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1";
+const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const RECURRENCE_DIRECT_TEMPLATE_ABI_V1: &str = "pyamplicol-recurrence-direct-template-v1";
 const RECURRENCE_DIRECT_BACKEND_ABI_V1: &str = "rusticol.recurrence-direct-backend.v1";
 const RECURRENCE_DIRECT_CANONICALIZATION_ABI_V1: &str = "pyamplicol-canonical-json-v1";
@@ -325,6 +334,16 @@ pub(super) struct RecurrenceDirectPayloadBindingManifest {
     pub(super) scalar_projections: Vec<RecurrenceDirectScalarProjectionManifest>,
     pub(super) intrinsic_contract_digest: Option<String>,
     pub(super) prepared_template_semantic_digest: Option<String>,
+    pub(super) graph_intrinsic: Option<RecurrenceDirectGraphIntrinsicManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecurrenceDirectGraphIntrinsicManifest {
+    runtime_template: String,
+    contract_digest: String,
+    scalar_projection: RecurrenceDirectScalarProjectionManifest,
+    contribution_parent_permutation: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -375,6 +394,21 @@ pub(super) enum RecurrenceDirectScalarProjectionManifest {
         constant_imag_bits: u64,
         parameter_index: Option<u32>,
     },
+    #[serde(rename = "massive-dirac-propagator-v1")]
+    MassiveDiracPropagator {
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_parameter_index: u32,
+        orientation: RecurrenceDirectDiracOrientationManifest,
+        width_parameter_index: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum RecurrenceDirectDiracOrientationManifest {
+    Particle,
+    Antiparticle,
 }
 
 impl EagerExecutionManifest {
@@ -1192,7 +1226,8 @@ impl RecurrenceDirectPayloadBindingManifest {
                     || self.input_plane_count != 0
                     || !self.output_alias_inputs.is_empty()
                     || !self.input_plane_projections.is_empty()
-                    || self.prepared_template_semantic_digest.is_some();
+                    || self.prepared_template_semantic_digest.is_some()
+                    || self.graph_intrinsic.is_some();
                 if prepared_metadata_present {
                     return Err(RusticolError::integrity(
                         "Rusticol Direct-Arena intrinsics carry prepared-call metadata",
@@ -1222,21 +1257,10 @@ impl RecurrenceDirectPayloadBindingManifest {
                 } else if template.role == "finalization"
                     && runtime_template != "rusticol.identity-finalize-in-place.v1"
                 {
-                    let Some(RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
-                        constant_real_bits,
-                        constant_imag_bits,
-                        parameter_index,
-                    }) = self.scalar_projections.first()
-                    else {
-                        return Err(RusticolError::integrity(
-                            "Direct-Arena finalization intrinsic has no certified scale",
-                        ));
-                    };
                     if self.role.as_deref() != Some("finalization")
                         || self.destination_operation.as_deref() != Some("finalize-in-place")
                         || self.scalar_input_count != 1
                         || self.scalar_projections.len() != 1
-                        || parameter_index.is_some()
                     {
                         return Err(RusticolError::integrity(
                             "Direct-Arena finalization intrinsic metadata is inconsistent",
@@ -1248,10 +1272,13 @@ impl RecurrenceDirectPayloadBindingManifest {
                             .unwrap_or_default(),
                         "Direct-Arena finalization intrinsic contract digest",
                     )?;
-                    let expected_scale =
-                        match RecurrenceFinalizationIntrinsicKind::from_runtime_template(
-                            runtime_template,
-                        )? {
+                    match self.scalar_projections.first() {
+                        Some(RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
+                            constant_real_bits,
+                            constant_imag_bits,
+                            parameter_index: None,
+                        }) => {
+                            let expected_scale = match RecurrenceFinalizationIntrinsicKind::from_runtime_template(runtime_template)? {
                             RecurrenceFinalizationIntrinsicKind::WeylPropagatorPositive
                             | RecurrenceFinalizationIntrinsicKind::WeylPropagatorNegative => {
                                 (1.0_f64.to_bits(), 0.0_f64.to_bits())
@@ -1259,11 +1286,18 @@ impl RecurrenceDirectPayloadBindingManifest {
                             RecurrenceFinalizationIntrinsicKind::FeynmanVectorPropagator => {
                                 (0.0_f64.to_bits(), (-1.0_f64).to_bits())
                             }
-                        };
-                    if (*constant_real_bits, *constant_imag_bits) != expected_scale {
-                        return Err(RusticolError::integrity(
-                            "Direct-Arena finalization intrinsic scale disagrees with its runtime primitive",
-                        ));
+                            };
+                            if (*constant_real_bits, *constant_imag_bits) != expected_scale {
+                                return Err(RusticolError::integrity(
+                                    "Direct-Arena finalization intrinsic scale disagrees with its runtime primitive",
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(RusticolError::integrity(
+                                "Direct-Arena finalization intrinsic has no certified typed scale",
+                            ));
+                        }
                     }
                 } else if self.role.is_some()
                     || self.destination_operation.is_some()
@@ -1305,6 +1339,20 @@ impl RecurrenceDirectPayloadBindingManifest {
                     return Err(RusticolError::integrity(
                         "prepared Direct-Arena callable metadata is inconsistent",
                     ));
+                }
+                if self.scalar_projections.iter().any(|projection| {
+                    matches!(
+                        projection,
+                        RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
+                            | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
+                    )
+                }) {
+                    return Err(RusticolError::integrity(
+                        "prepared Direct-Arena callable carries a runtime-intrinsic scalar projection",
+                    ));
+                }
+                if let Some(graph_intrinsic) = &self.graph_intrinsic {
+                    graph_intrinsic.validate(&template.role)?;
                 }
                 let kernel_id = self.prepared_kernel_id.ok_or_else(|| {
                     RusticolError::artifact("prepared Direct-Arena callable has no kernel ID")
@@ -1482,6 +1530,86 @@ impl RecurrenceDirectPayloadBindingManifest {
             other => {
                 return Err(RusticolError::compatibility(format!(
                     "unsupported Direct-Arena payload binding kind {other:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RecurrenceDirectGraphIntrinsicManifest {
+    fn validate(&self, role: &str) -> RusticolResult<()> {
+        if self.runtime_template.is_empty()
+            || !matches!(
+                self.contribution_parent_permutation.as_slice(),
+                [0, 1] | [1, 0]
+            )
+            || (role != "contribution" && self.contribution_parent_permutation.as_slice() != [0, 1])
+        {
+            return Err(RusticolError::integrity(
+                "prepared graph intrinsic has an invalid runtime template or parent permutation",
+            ));
+        }
+        validate_sha256_text(
+            &self.contract_digest,
+            "prepared graph-intrinsic contract digest",
+        )?;
+        match (role, &self.scalar_projection) {
+            (
+                "contribution",
+                RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    ..
+                },
+            ) if matches!(
+                self.runtime_template.as_str(),
+                DIRAC_VECTOR_PARTICLE_TEMPLATE
+                    | DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
+                    | DIRAC_SCALAR_TEMPLATE
+            ) =>
+            {
+                let real = f64::from_bits(*constant_real_bits);
+                let imaginary = f64::from_bits(*constant_imag_bits);
+                if !real.is_finite() || !imaginary.is_finite() || (real == 0.0 && imaginary == 0.0)
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared contribution graph intrinsic has a non-finite or zero scale",
+                    ));
+                }
+            }
+            (
+                "finalization",
+                RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    mass_parameter_index,
+                    orientation,
+                    width_parameter_index,
+                },
+            ) => {
+                let expected_template = match orientation {
+                    RecurrenceDirectDiracOrientationManifest::Particle => {
+                        MASSIVE_DIRAC_PARTICLE_TEMPLATE
+                    }
+                    RecurrenceDirectDiracOrientationManifest::Antiparticle => {
+                        MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE
+                    }
+                };
+                if self.runtime_template != expected_template
+                    || (*constant_real_bits, *constant_imag_bits)
+                        != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+                    || mass_parameter_index == width_parameter_index
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared massive-Dirac graph intrinsic disagrees with its runtime primitive",
+                    ));
+                }
+            }
+            _ => {
+                return Err(RusticolError::integrity(format!(
+                    "unsupported prepared graph intrinsic {:?} for role {role:?}",
+                    self.runtime_template
                 )));
             }
         }
@@ -2444,4 +2572,59 @@ fn contiguous_widths(name: &str, mut pairs: Vec<(usize, usize)>) -> RusticolResu
                 .map_err(|_| RusticolError::artifact(format!("eager {name} width exceeds u32")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod typed_finalizer_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn massive_dirac_projection_deserializes_to_closed_typed_metadata() {
+        let projection: RecurrenceDirectScalarProjectionManifest = serde_json::from_value(json!({
+            "constant_imag_bits": 1.0_f64.to_bits(),
+            "constant_real_bits": 0.0_f64.to_bits(),
+            "kind": "massive-dirac-propagator-v1",
+            "mass_parameter_index": 6,
+            "orientation": "particle",
+            "width_parameter_index": 7,
+        }))
+        .unwrap();
+        assert!(matches!(
+            projection,
+            RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator {
+                orientation: RecurrenceDirectDiracOrientationManifest::Particle,
+                mass_parameter_index: 6,
+                width_parameter_index: 7,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::from_value::<RecurrenceDirectScalarProjectionManifest>(json!({
+                "constant_imag_bits": 1.0_f64.to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-dirac-propagator-v1",
+                "mass_parameter_index": 6,
+                "orientation": "self-conjugate",
+                "width_parameter_index": 7,
+            }))
+            .is_err()
+        );
+
+        let graph: RecurrenceDirectGraphIntrinsicManifest = serde_json::from_value(json!({
+            "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": 1.0_f64.to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-dirac-propagator-v1",
+                "mass_parameter_index": 6,
+                "orientation": "antiparticle",
+                "width_parameter_index": 7,
+            },
+        }))
+        .unwrap();
+        graph.validate("finalization").unwrap();
+    }
 }

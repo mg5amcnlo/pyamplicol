@@ -4,10 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import marshal
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from ..models.base import Model
+from ..models.base import Model, runtime_coupling_parameter_names
 from .dag_types import GenericDAG
 
 LC_SECTOR_SELECTOR_PARAMETER = "runtime.lc_sector_id"
@@ -105,37 +105,6 @@ class StageCompilationInput:
             raise TypeError(
                 "stage compilation input requires a RuntimeExpressionSchema"
             )
-
-
-def runtime_coupling_parameter_names(
-    vertex_kind: int,
-    vertex_particles: Sequence[int],
-    coupling: Sequence[object],
-    *,
-    model: Model | None = None,
-) -> list[str | None]:
-    runtime_names = getattr(model, "runtime_parameter_names_for_vertex", None)
-    if callable(runtime_names):
-        return [str(name) for name in runtime_names(int(vertex_kind))]
-    lowering_rule = getattr(model, "vertex_lowering_rule", None)
-    if callable(lowering_rule):
-        rule = lowering_rule(int(vertex_kind))
-        if rule.coupling_mode in {"fixed", "none"}:
-            return [None for _value in coupling]
-    particles = "_".join(str(int(pdg)) for pdg in vertex_particles)
-    base = f"coupling.{int(vertex_kind)}.{particles}"
-    names: list[str | None] = []
-    for component, value in enumerate(coupling):
-        if not isinstance(value, str | int | float):
-            raise TypeError(
-                f"runtime coupling components must be numeric, got {value!r}"
-            )
-        numeric_value = float(value)
-        if component == 1 and numeric_value == -10.0:
-            names.append(None)
-        else:
-            names.append(f"{base}.component_{component}")
-    return names
 
 
 __all__ = [

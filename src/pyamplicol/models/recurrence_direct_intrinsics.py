@@ -11,6 +11,7 @@ import math
 import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 from .recurrence_template import ExactComplexRationalV1
 
@@ -29,15 +30,36 @@ class _LazyCompilerSymbolica:
 _sym = _LazyCompilerSymbolica()
 
 RECURRENCE_INTRINSIC_SCALE_KIND = "intrinsic-scale-v1"
+RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND = "massive-dirac-propagator-v1"
 WEYL_PROPAGATOR_POSITIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-a.v1"
 WEYL_PROPAGATOR_NEGATIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-b.v1"
 FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE = (
     "rusticol.recurrence-intrinsic.vector-propagator-feynman.v1"
 )
+DIRAC_VECTOR_PARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1"
+)
+DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1"
+)
+DIRAC_SCALAR_TO_DIRAC_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1"
+)
+MASSIVE_DIRAC_PARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1"
+)
+MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1"
+)
+
+DiracOrientation: TypeAlias = Literal["particle", "antiparticle"]
 
 
 def _f64_bits(value: float) -> int:
     return struct.unpack("<Q", struct.pack("<d", value))[0]
+
+
+MASSIVE_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +90,45 @@ class CertifiedRecurrenceFinalizationIntrinsic:
     runtime_template: str
     contract_digest: str
     constant_scale: complex
+    orientation: DiracOrientation | None = None
+    mass_parameter_index: int | None = None
+    width_parameter_index: int | None = None
+
+    def __post_init__(self) -> None:
+        parameterized = (
+            self.orientation,
+            self.mass_parameter_index,
+            self.width_parameter_index,
+        )
+        if parameterized == (None, None, None):
+            return
+        if (
+            self.orientation not in {"particle", "antiparticle"}
+            or type(self.mass_parameter_index) is not int
+            or self.mass_parameter_index < 0
+            or type(self.width_parameter_index) is not int
+            or self.width_parameter_index < 0
+            or self.mass_parameter_index == self.width_parameter_index
+        ):
+            raise ValueError(
+                "massive Dirac finalization requires an orientation and distinct "
+                "nonnegative mass/width parameter indices"
+            )
 
     def scale_projection(self) -> dict[str, object]:
         real = 0.0 if self.constant_scale.real == 0.0 else self.constant_scale.real
         imag = 0.0 if self.constant_scale.imag == 0.0 else self.constant_scale.imag
+        if self.orientation is not None:
+            assert self.mass_parameter_index is not None
+            assert self.width_parameter_index is not None
+            return {
+                "constant_imag_bits": _f64_bits(imag),
+                "constant_real_bits": _f64_bits(real),
+                "kind": RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+                "mass_parameter_index": self.mass_parameter_index,
+                "orientation": self.orientation,
+                "width_parameter_index": self.width_parameter_index,
+            }
         return {
             "constant_imag_bits": _f64_bits(imag),
             "constant_real_bits": _f64_bits(real),
@@ -195,6 +252,40 @@ _WITNESSES = (
         parent_component_counts=(4, 4),
         destination_component_count=6,
     ),
+    _IntrinsicWitness(
+        runtime_template=DIRAC_VECTOR_PARTICLE_TEMPLATE,
+        expressions=(
+            "(r0+r3)*l2+(r1+1\U0001d456*r2)*l3",
+            "(r0-r3)*l3+(r1-1\U0001d456*r2)*l2",
+            "(r0-r3)*l0-(r1+1\U0001d456*r2)*l1",
+            "(r0+r3)*l1-(r1-1\U0001d456*r2)*l0",
+        ),
+        anchor_monomial="l2*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+    ),
+    _IntrinsicWitness(
+        runtime_template=DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+        expressions=(
+            "(-r0+r3)*l2+(r1-1\U0001d456*r2)*l3",
+            "(-r0-r3)*l3+(r1+1\U0001d456*r2)*l2",
+            "(-r0-r3)*l0+(-r1+1\U0001d456*r2)*l1",
+            "(-r0+r3)*l1+(-r1-1\U0001d456*r2)*l0",
+        ),
+        anchor_monomial="l2*r0",
+        inverse_anchor_coefficient="-1",
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+    ),
+    _IntrinsicWitness(
+        runtime_template=DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+        expressions=("l0*r0", "l1*r0", "l2*r0", "l3*r0"),
+        anchor_monomial="l0*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(4, 1),
+        destination_component_count=4,
+    ),
 )
 
 RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES = frozenset(
@@ -278,6 +369,78 @@ _FINALIZATION_WITNESSES = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _MassiveDiracFinalizationWitness:
+    runtime_template: str
+    orientation: DiracOrientation
+    expressions: tuple[str, str, str, str]
+    runtime_owned_scale: complex = 0.0 + 1.0j
+    contract_digest: str = ""
+
+    def __post_init__(self) -> None:
+        payload = {
+            "component_count": 4,
+            "expressions": list(self.expressions),
+            "orientation": self.orientation,
+            "parameter_roles": ["mass", "width"],
+            "runtime_owned_scale_bits": [
+                _f64_bits(self.runtime_owned_scale.real),
+                _f64_bits(self.runtime_owned_scale.imag),
+            ],
+            "runtime_template": self.runtime_template,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        object.__setattr__(self, "contract_digest", digest)
+
+
+_MASSIVE_DIRAC_FINALIZATION_WITNESSES = (
+    _MassiveDiracFinalizationWitness(
+        runtime_template=MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+        orientation="particle",
+        expressions=(
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((p0+p3)*l2+(p1+1\U0001d456*p2)*l3+m*l0)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((p0-p3)*l3+(p1-1\U0001d456*p2)*l2+m*l1)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((p0-p3)*l0-(p1+1\U0001d456*p2)*l1+m*l2)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((p0+p3)*l1-(p1-1\U0001d456*p2)*l0+m*l3)",
+        ),
+    ),
+    _MassiveDiracFinalizationWitness(
+        runtime_template=MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+        orientation="antiparticle",
+        expressions=(
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((-p0+p3)*l2+(p1-1\U0001d456*p2)*l3+m*l0)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((-p0-p3)*l3+(p1+1\U0001d456*p2)*l2+m*l1)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((-p0-p3)*l0+(-p1+1\U0001d456*p2)*l1+m*l2)",
+            "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+            "*((-p0+p3)*l1+(-p1-1\U0001d456*p2)*l0+m*l3)",
+        ),
+    ),
+)
+
+RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS = {
+    witness.runtime_template: witness.contract_digest
+    for witness in (
+        *_FINALIZATION_WITNESSES,
+        *_MASSIVE_DIRAC_FINALIZATION_WITNESSES,
+    )
+}
+
+
 def certify_recurrence_contribution_intrinsic(
     *,
     exact_expressions: Sequence[str],
@@ -285,6 +448,7 @@ def certify_recurrence_contribution_intrinsic(
     parent_component_counts: tuple[int, ...],
     destination_component_count: int,
     binding_coupling: ExactComplexRationalV1 | None,
+    factored_output_parameter_index: int | None = None,
     allow_nontrivial_parent_permutation: bool = False,
 ) -> CertifiedRecurrenceIntrinsic | None:
     """Prove that one prepared kernel is exactly one known arena primitive.
@@ -293,6 +457,11 @@ def certify_recurrence_contribution_intrinsic(
     witness identity. Coupling inputs are first replaced by the exact
     recurrence binding. A remaining scalar may be either a finite numerical
     constant or that constant times one model parameter.
+
+    A coupling factored out of the prepared kernel remains a live parameter.
+    Its prepared slot is supplied only after the semantic transition catalog
+    has authenticated the output-factor owner; it cannot coexist with another
+    scalar parameter retained by the exact kernel algebra.
 
     A prepared model may expose the same commutative vertex with its two
     parents in the opposite order. Such a certificate records the exact
@@ -305,6 +474,13 @@ def certify_recurrence_contribution_intrinsic(
         len(parent_component_counts) != 2
         or not exact_expressions
         or len(exact_expressions) != destination_component_count
+        or (
+            factored_output_parameter_index is not None
+            and (
+                type(factored_output_parameter_index) is not int
+                or factored_output_parameter_index < 0
+            )
+        )
     ):
         return None
     try:
@@ -325,6 +501,8 @@ def certify_recurrence_contribution_intrinsic(
         parent_permutation,
         normalized_shape,
     ) in candidates:
+        if factored_output_parameter_index is not None and parameter_symbols:
+            continue
         for witness in _WITNESSES:
             if (
                 witness.parent_component_counts != normalized_shape
@@ -343,6 +521,13 @@ def certify_recurrence_contribution_intrinsic(
             if scalar is None:
                 continue
             constant, parameter_index = scalar
+            if (
+                parameter_index is not None
+                and factored_output_parameter_index is not None
+            ):
+                continue
+            if factored_output_parameter_index is not None:
+                parameter_index = factored_output_parameter_index
             return CertifiedRecurrenceIntrinsic(
                 runtime_template=witness.runtime_template,
                 contract_digest=witness.contract_digest,
@@ -372,7 +557,17 @@ def certify_recurrence_finalization_intrinsic(
     except (TypeError, ValueError):
         return None
     if parameter_symbols:
-        return None
+        try:
+            parameter_indices = _massive_dirac_parameter_indices(input_contracts)
+        except (TypeError, ValueError):
+            return None
+        if set(parameter_symbols.values()) != set(parameter_indices):
+            return None
+        return _certify_massive_dirac_finalization(
+            normalized,
+            parameter_indices=parameter_indices,
+            component_count=component_count,
+        )
 
     _sym._ensure_symbolica()
     for witness in _FINALIZATION_WITNESSES:
@@ -404,6 +599,105 @@ def certify_recurrence_finalization_intrinsic(
             constant_scale=constant,
         )
     return None
+
+
+def _certify_massive_dirac_finalization(
+    normalized: Sequence[object],
+    *,
+    parameter_indices: tuple[int, int],
+    component_count: int,
+) -> CertifiedRecurrenceFinalizationIntrinsic | None:
+    if component_count != 4:
+        return None
+    _sym._ensure_symbolica()
+    generic_mass = _sym.E("m")
+    generic_width = _sym.E("w")
+    for witness in _MASSIVE_DIRAC_FINALIZATION_WITNESSES:
+        for mass_index, width_index in (
+            parameter_indices,
+            tuple(reversed(parameter_indices)),
+        ):
+            mass = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{mass_index}"
+            )
+            width = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{width_index}"
+            )
+            replacements = (
+                _sym.Replacement(generic_mass, mass),
+                _sym.Replacement(generic_width, width),
+            )
+            references = tuple(
+                _sym.E(expression).replace_multiple(replacements).expand()
+                for expression in witness.expressions
+            )
+            if any(
+                not _symbolically_equal(candidate, 1j * reference)
+                for candidate, reference in zip(
+                    normalized,
+                    references,
+                    strict=True,
+                )
+            ):
+                continue
+            return CertifiedRecurrenceFinalizationIntrinsic(
+                runtime_template=witness.runtime_template,
+                contract_digest=witness.contract_digest,
+                constant_scale=witness.runtime_owned_scale,
+                orientation=witness.orientation,
+                mass_parameter_index=mass_index,
+                width_parameter_index=width_index,
+            )
+    return None
+
+
+def _massive_dirac_parameter_indices(
+    input_contracts: Sequence[str],
+) -> tuple[int, int]:
+    """Validate the unary Dirac input shape and return its unnamed parameters."""
+
+    components: dict[str, set[int]] = {
+        "current": set(),
+        "momentum": set(),
+    }
+    parameter_indices: list[int] = []
+    declared_symbols: set[str] = set()
+    for raw in input_contracts:
+        contract = json.loads(raw)
+        if not isinstance(contract, Mapping):
+            raise ValueError("prepared input contract is not an object")
+        role = contract.get("role")
+        component = contract.get("component")
+        symbol = contract.get("symbol")
+        if (
+            not isinstance(role, str)
+            or type(component) is not int
+            or component < 0
+            or not isinstance(symbol, str)
+            or not symbol
+            or symbol in declared_symbols
+        ):
+            raise ValueError("massive Dirac input contract is malformed")
+        declared_symbols.add(symbol)
+        if role in components:
+            if component in components[role]:
+                raise ValueError("massive Dirac input component is duplicated")
+            components[role].add(component)
+        elif role == "model-parameter":
+            parameter_index = contract.get("model_parameter_index")
+            if type(parameter_index) is not int or parameter_index < 0:
+                raise ValueError("massive Dirac parameter has no stable index")
+            parameter_indices.append(parameter_index)
+        else:
+            raise ValueError("massive Dirac input has an unsupported role")
+    if components != {
+        "current": {0, 1, 2, 3},
+        "momentum": {0, 1, 2, 3},
+    }:
+        raise ValueError("massive Dirac input has the wrong current/momentum shape")
+    if len(parameter_indices) != 2 or parameter_indices[0] == parameter_indices[1]:
+        raise ValueError("massive Dirac input requires two distinct parameters")
+    return parameter_indices[0], parameter_indices[1]
 
 
 def _normalized_expressions(
@@ -625,9 +919,17 @@ def _symbolically_equal(left: object, right: object) -> bool:
 
 
 __all__ = [
+    "DIRAC_SCALAR_TO_DIRAC_TEMPLATE",
+    "DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE",
+    "DIRAC_VECTOR_PARTICLE_TEMPLATE",
+    "MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE",
+    "MASSIVE_DIRAC_PARTICLE_TEMPLATE",
+    "MASSIVE_DIRAC_RUNTIME_SCALE_BITS",
+    "RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES",
     "RECURRENCE_INTRINSIC_SCALE_KIND",
+    "RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND",
     "CertifiedRecurrenceFinalizationIntrinsic",
     "CertifiedRecurrenceIntrinsic",
     "certify_recurrence_contribution_intrinsic",

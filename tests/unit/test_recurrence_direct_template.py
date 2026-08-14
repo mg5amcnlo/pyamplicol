@@ -17,9 +17,16 @@ from pyamplicol.models.recurrence_catalog_builder import (
     build_recurrence_template_catalog,
 )
 from pyamplicol.models.recurrence_direct_intrinsics import (
+    DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+    MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
+    RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
+    RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
 )
 from pyamplicol.models.recurrence_direct_template import (
+    _UNCERTIFIABLE_OUTPUT_FACTOR,
     NATIVE_DIRECT_APPLICATION_ABI,
     RECURRENCE_DIRECT_BACKEND_ABI,
     RECURRENCE_DIRECT_IDENTITY_FINALIZER,
@@ -28,13 +35,16 @@ from pyamplicol.models.recurrence_direct_template import (
     PreparedJitDirectSourceV1,
     PreparedNativeDirectCallableSpecV1,
     PreparedNativeDirectSourceV1,
+    RecurrenceDirectGraphIntrinsicV1,
     RecurrenceDirectPayloadBindingV1,
     RecurrenceDirectTemplateCatalogV1,
     RecurrenceDirectTemplateError,
     RecurrenceDirectTemplateV1,
+    _build_certified_graph_intrinsic,
     _build_certified_intrinsic_binding,
     _build_prepared_jit_direct_binding,
     _uniform_binding_coupling,
+    _uniform_output_factor_parameter_index,
     build_prepared_native_direct_callable_specs,
     build_recurrence_direct_template_catalog,
     native_direct_entry_point,
@@ -147,6 +157,48 @@ def _catalog(
         prepared_kernel_contract_digest=_DIGEST_D,
         prepared_kernel_payload_digest=_DIGEST_E,
         optimization_settings_digest=_DIGEST_F,
+    )
+
+
+def _prepared_graph_binding(
+    graph_intrinsic: RecurrenceDirectGraphIntrinsicV1,
+    *,
+    role: str = "contribution",
+) -> RecurrenceDirectPayloadBindingV1:
+    contracts = (
+        (
+            {"component": 0, "role": "left-current"},
+            {"component": 0, "role": "right-current"},
+        )
+        if role == "contribution"
+        else ({"component": 0, "role": "current"},)
+    )
+    source = PreparedJitDirectSourceV1(
+        prepared_kernel_id=7,
+        source_application_path="kernels/000007/application.plane.symjit",
+        source_application_sha256=_DIGEST_A,
+        source_application_abi=SYMJIT_DIRECT_APPLICATION_ABI,
+        input_contracts=tuple(
+            json.dumps(
+                contract,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            for contract in contracts
+        ),
+        exact_expressions=("pyamplicol::prepared_output",),
+        output_arity=1,
+    )
+    return _build_prepared_jit_direct_binding(
+        source=source,
+        role=role,  # type: ignore[arg-type]
+        parent_component_counts=(1, 1) if role == "contribution" else (4,),
+        destination_component_count=4,
+        binding_coupling=None,
+        prepared_template_semantic_digest=_DIGEST_B,
+        graph_intrinsic=graph_intrinsic,
     )
 
 
@@ -266,6 +318,183 @@ def test_certified_intrinsic_parent_permutation_round_trips_and_is_authenticated
         RecurrenceDirectTemplateError,
         match="payload digest does not match",
     ):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+
+def test_factored_coupling_intrinsic_slot_round_trips_and_is_authenticated() -> None:
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceIntrinsic(
+            runtime_template=DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+            contract_digest=RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+                DIRAC_SCALAR_TO_DIRAC_TEMPLATE
+            ],
+            constant_scale=0.0 - 0.707106781186547j,
+            model_parameter_index=73,
+            parent_permutation=(1, 0),
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic)
+
+    payload = binding.to_dict()
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["prepared_kernel_id"] == 7
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[
+            DIRAC_SCALAR_TO_DIRAC_TEMPLATE
+        ],
+        "contribution_parent_permutation": [1, 0],
+        "runtime_template": DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 13827916308072577992,
+            "constant_real_bits": 0,
+            "kind": "intrinsic-scale-v1",
+            "parameter_index": 73,
+        },
+    }
+    assert payload["contribution_parent_permutation"] == [0, 1]
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    payload["graph_intrinsic"]["scalar_projection"]["parameter_index"] = 74
+    with pytest.raises(RecurrenceDirectTemplateError, match="payload digest"):
+        RecurrenceDirectPayloadBindingV1.from_dict(payload)
+
+    malformed = binding.to_dict()
+    malformed["graph_intrinsic"]["scalar_projection"]["parameter_index"] = "73"
+    with pytest.raises(RecurrenceDirectTemplateError, match="nonnegative integer"):
+        RecurrenceDirectPayloadBindingV1.from_dict(malformed)
+
+    malformed = binding.to_dict()
+    malformed["graph_intrinsic"]["scalar_projection"][
+        "unowned_parameter_index"
+    ] = 73
+    with pytest.raises(RecurrenceDirectTemplateError, match="unsupported fields"):
+        RecurrenceDirectPayloadBindingV1.from_dict(malformed)
+
+
+def test_factored_output_parameter_slot_is_resolved_from_semantic_ownership() -> None:
+    coupling = ExactComplexRationalV1.from_fractions(Fraction(7, 3))
+    records = {
+        template_id: SimpleNamespace(
+            binding_coupling=coupling,
+            coupling_parameter_ids=("parameter:opaque",),
+            output_factor_source="coupling-real",
+        )
+        for template_id in ("transition:first", "transition:second")
+    }
+    parameter = SimpleNamespace(
+        default_value=ExactComplexRationalV1.from_fractions(Fraction(7, 3)),
+        mutable=True,
+        parameter_kind="external",
+        prepared_parameter_id=73,
+        value_type="real",
+    )
+
+    assert (
+        _uniform_output_factor_parameter_index(
+            tuple(records),
+            records,
+            {"parameter:opaque": parameter},
+        )
+        == 73
+    )
+
+    retained_parameter_records = {
+        template_id: SimpleNamespace(
+            binding_coupling=coupling,
+            coupling_parameter_ids=("parameter:opaque", "parameter:retained"),
+            output_factor_source="coupling-real",
+        )
+        for template_id in records
+    }
+    assert (
+        _uniform_output_factor_parameter_index(
+            tuple(retained_parameter_records),
+            retained_parameter_records,
+            {"parameter:opaque": parameter},
+        )
+        is _UNCERTIFIABLE_OUTPUT_FACTOR
+    )
+
+    with pytest.raises(RecurrenceDirectTemplateError, match="default disagrees"):
+        _uniform_output_factor_parameter_index(
+            tuple(records),
+            records,
+            {
+                "parameter:opaque": SimpleNamespace(
+                    default_value=ExactComplexRationalV1.one(),
+                    mutable=True,
+                    parameter_kind="external",
+                    prepared_parameter_id=73,
+                    value_type="real",
+                )
+            },
+        )
+
+
+def test_massive_dirac_finalizer_projection_round_trips_and_is_authenticated() -> None:
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceFinalizationIntrinsic(
+            runtime_template=MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+            contract_digest=RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[
+                MASSIVE_DIRAC_PARTICLE_TEMPLATE
+            ],
+            constant_scale=1.0j,
+            orientation="particle",
+            mass_parameter_index=41,
+            width_parameter_index=9,
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic, role="finalization")
+
+    payload = binding.to_dict()
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[
+            MASSIVE_DIRAC_PARTICLE_TEMPLATE
+        ],
+        "contribution_parent_permutation": [0, 1],
+        "runtime_template": MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 4607182418800017408,
+            "constant_real_bits": 0,
+            "kind": RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+            "mass_parameter_index": 41,
+            "orientation": "particle",
+            "width_parameter_index": 9,
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"][
+        "width_parameter_index"
+    ] = 41
+    with pytest.raises(RecurrenceDirectTemplateError, match="must be distinct"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["orientation"] = (
+        "antiparticle"
+    )
+    with pytest.raises(RecurrenceDirectTemplateError, match="disagrees"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["constant_imag_bits"] = 0
+    with pytest.raises(RecurrenceDirectTemplateError, match=r"certified \+i"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["scalar_projection"]["constant_real_bits"] = False
+    with pytest.raises(RecurrenceDirectTemplateError, match="nonnegative integer"):
+        RecurrenceDirectPayloadBindingV1.from_dict(tampered)
+
+    tampered = binding.to_dict()
+    tampered["graph_intrinsic"]["contract_digest"] = _DIGEST_A
+    with pytest.raises(RecurrenceDirectTemplateError, match="not authenticated"):
         RecurrenceDirectPayloadBindingV1.from_dict(tampered)
 
 
@@ -569,10 +798,75 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
         "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-a.v1",
         "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-b.v1",
     }.issubset(intrinsic_families)
+    if model_source == "built-in":
+        graph_contributions = tuple(
+            item
+            for item in direct.templates
+            if item.role == "contribution"
+            and item.payload_binding.graph_intrinsic is not None
+        )
+        assert {
+            "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1",
+            "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1",
+            "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1",
+        }.issubset(
+            {
+                item.payload_binding.graph_intrinsic.runtime_template
+                for item in graph_contributions
+                if item.payload_binding.graph_intrinsic is not None
+            }
+        )
+        assert all(
+            item.payload_binding.kind == "prepared-direct-call"
+            for item in graph_contributions
+        )
+        massive_finalizers = tuple(
+            item
+            for item in direct.templates
+            if item.role == "finalization"
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection.get("kind")
+            == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND
+        )
+        assert {
+            item.payload_binding.graph_intrinsic.runtime_template
+            for item in massive_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {
+            "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1",
+            "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1",
+        }
+        assert all(
+            item.payload_binding.kind == "prepared-direct-call"
+            for item in massive_finalizers
+        )
+        assert {
+            (
+                item.payload_binding.graph_intrinsic.projection[
+                    "mass_parameter_index"
+                ],
+                item.payload_binding.graph_intrinsic.projection[
+                    "width_parameter_index"
+                ],
+            )
+            for item in massive_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {(6, 7)}
     if model_source == "ufo-sm":
         assert any(
-            item.payload_binding.contribution_parent_permutation == (1, 0)
-            for item in contribution_intrinsics
+            (
+                item.payload_binding.contribution_parent_permutation == (1, 0)
+                or (
+                    getattr(
+                        item.payload_binding.graph_intrinsic,
+                        "contribution_parent_permutation",
+                        None,
+                    )
+                    == (1, 0)
+                )
+            )
+            for item in direct.templates
+            if item.role == "contribution"
         )
     prepared_templates = tuple(
         item

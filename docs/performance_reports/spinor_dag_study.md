@@ -14,8 +14,9 @@ It now has two complementary construction paths:
 
 - a model-driven recurrence lowerer which consumes the authenticated semantic
   recurrence and prepared-kernel catalogue. It currently publishes generic
-  scalar-contact graphs, `u u~ > g g`, `u u~ > g g g`, and selected-flow
-  `g g > g g` without a process-family tag or a PDG-specific lowering switch;
+  scalar-contact graphs, `u u~ > g g`, `u u~ > g g g`, selected-flow
+  `g g > g g`, and the massive Yukawa process `g h > t t~` without a
+  process-family tag or a PDG-specific lowering switch;
 - compact specialized builders for four through six external gluons, one
   massless quark line plus two through four gluons, a massless quark line plus
   `Z + 0, 1, 2 gluons`, and `g g > t t~` in either LC ordering.
@@ -25,14 +26,16 @@ normal pyAmpliCol `Runtime`. The graph-backed path is an artifact format and
 runtime architecture, not merely a private numerical prototype.
 
 The first model-driven mixed-QCD cell is faster than the corresponding
-selected-flow component recurrence. The newly covered contact and five-point
-cells are correct but not yet competitive with the component evaluator:
+selected-flow component recurrence. The newly covered contact, five-point,
+and massive-Yukawa cells are correct but not yet competitive with the
+component evaluator:
 
 | Process and fixed LC flow | Spinor us/point (RSE) | Component us/point (RSE) | Paired speedup (RSE) |
 | --- | ---: | ---: | ---: |
 | `u u~ > g g`, `flow:2,3,4,1` | 0.4025 (0.93%) | 0.5291 (0.68%) | 1.315x (1.14%) |
 | `g g > g g`, `flow:1,2,3,4` | 0.7542 (0.54%) | 0.6169 (1.50%) | 0.818x (1.54%) |
 | `u u~ > g g g`, `flow:2,3,4,5,1` | 1.9359 (1.11%) | 1.2619 (0.67%) | 0.652x (1.30%) |
+| `g h > t t~`, `flow:3,1,4` | 0.8948 (0.33%) | 0.5118 (0.24%) | 0.572x (0.27%) |
 
 The earlier optimized all-gluon builders remain substantially faster:
 
@@ -71,7 +74,10 @@ The initial primitive set includes:
 - massless Weyl and Feynman-vector propagators;
 - metric-vector and opposite-chirality Weyl closures, including
   identity-finalized terminal vectors;
-- scalar, vector, and fermion source contracts with authenticated crossing.
+- both orientations of Dirac-vector transitions, scalar--Dirac Yukawa
+  transitions, widthful massive-Dirac propagation, and direct Dirac closure;
+- scalar, vector, Weyl, and massive-Dirac source contracts with authenticated
+  crossing and mass ownership.
 
 The certificate retains the runtime primitive, exact contract digest, parent
 permutation, and exact constant or prepared-parameter scale. An unknown state,
@@ -112,6 +118,14 @@ widthful propagator
 
 `i (slash(P) + m) / (P^2 - m^2 + i m Gamma)`.
 
+For a massive Dirac graph with one external massless vector, the payload also
+authenticates which graph source defines the temporal-gauge reference
+`q = (p0, -p_vec)`. This matches the retained component evaluator at nonzero
+width. The source is part of the executable graph bytes, must be a null-spinor
+source, and is rejected when the graph does not use a reference atom. Generic
+massive-Dirac graphs with more than one external vector remain fail-closed
+until they have an authenticated per-vector policy.
+
 The graph builder applies bracket antisymmetry, self-zero rules, exact
 coefficient combination, Schouten rewriting, common-factor extraction, and
 dead-node elimination. The component/bispinor identity
@@ -138,19 +152,27 @@ execution graph from the 7,482-node raw BG oracle to 415 live semantic nodes.
 
 ## Correctness
 
-The graph-backed QCD candidates and component recurrence use the same saved
-seed-12345 momentum points and fixed flows:
+The graph-backed candidates and component recurrence use the same fixed flows.
+The massless cells use their saved seed-12345 momentum points:
 
 | Process and fixed flow | Spinor DAG | Component recurrence | Relative difference |
 | --- | ---: | ---: | ---: |
 | `u u~ > g g`, `flow:2,3,4,1` | 4.459883460083079 | 4.459883460083116 | 8.36e-15 |
 | `g g > g g`, `flow:1,2,3,4` | 24.344900673179623 | 24.344900673179900 | 1.14e-14 |
 | `u u~ > g g g`, `flow:2,3,4,5,1` | 0.0035919538077271934 | 0.0035919538077272050 | 3.26e-15 |
+| `g h > t t~`, `flow:3,1,4` | 1.385959004714291 | 1.3859590047142938 | 2.08e-15 |
 
 A single integration test regenerates the prepared model and all three graph
 artifacts, checks the retained component authorities (including the tracked
 four-gluon LC fixture value `1.7527418719125202` at its generic-1 point), and
 verifies that doubling `alpha_s` multiplies each result by `2**QCD_power`.
+
+The massive-Yukawa integration independently generates graph and component
+artifacts for `g h > t t~`. Besides the default `m_t = 173` and
+`Gamma_t = 1.4915` comparison above, it doubles the live Yukawa coupling,
+sets the width to zero, and changes the mass to 180 with a new on-shell point.
+All four graph/component comparisons use `2e-12` relative tolerance; doubling
+the Yukawa coupling scales the result by exactly four.
 
 The generic scalar integration covers two independently normalized processes:
 
@@ -183,7 +205,7 @@ zeros, parity multiplicities, scalar/batch parity, and liveness slot reuse.
 
 ## Structural size
 
-The model-driven QCD payloads remain compact, although the unfused generic DAG
+The model-driven payloads remain compact, although the unfused generic DAG
 grows faster than the component recurrence:
 
 | Process | Spinor payload bytes | Component payload bytes | DAG nodes | Recurrence currents | DAG operands / contribution rows |
@@ -191,8 +213,12 @@ grows faster than the component recurrence:
 | `u u~ > g g` | 431,458 | 7,266,670 | 69 | 16 | 202 / 14 |
 | `g g > g g` | 430,354 | 725,823 | 189 | 9 | 612 / 8 |
 | `u u~ > g g g` | 442,084 | 975,928 | 531 | 13 | 1,963 / 14 |
+| `g h > t t~` | 529,655 | 686,688 | 231 | 7 | 770 / 4 |
 
 The operation counts are structural proxies, not machine-instruction counts.
+The massive-Yukawa executable graph itself is 4,483 bytes and stores eight
+helicity roots; the larger artifact totals above include ordinary model,
+execution, and physics metadata.
 The two-gluon quark graph's greater scalar-node count still wins at runtime
 because its nodes are simple shared bracket/scalar operations and avoid
 repeated four-component current kernels. The current generic contact and
@@ -209,24 +235,27 @@ nodes for four, five, and six external gluons, with 8, 16, and 32 stored roots.
 - Host: Intel Core i7-8700K, 6 cores / 12 threads, Linux x86_64,
   Python 3.12.3.
 - Model: prepared built-in SM, leading colour, selected sector 0.
-- Processes: `u u~ > g g`, `g g > g g`, and `u u~ > g g g`, each with one
-  explicit fixed flow.
-- Input: each artifact's deterministic seed-12345 validation point, cycled to
-  batch 128.
+- Processes: `u u~ > g g`, `g g > g g`, `u u~ > g g g`, and
+  `g h > t t~`, each with one explicit fixed flow.
+- Input: each massless artifact's deterministic seed-12345 validation point,
+  cycled to batch 128. The massive-Yukawa cell instead uses the physical 1 TeV
+  centre-of-mass point in its integration test because the generic seed-12345
+  file does not place its massive legs on shell.
 - Sampling: two warmups and five paired/interleaved blocks per evaluator;
   each block was calibrated to approximately one second.
 - Timer: native `Runtime._benchmark_f64_wall_time` for both implementations.
-- Candidate RSE range: 0.54--1.11%; reference RSE range: 0.67--1.50%.
+- Candidate RSE range: 0.33--1.11%; reference RSE range: 0.24--1.50%.
 
-Memory was guarded throughout the current mixed/scalar checkpoint:
+Memory was guarded throughout the current mixed/scalar/massive checkpoint:
 
 | Operation | Peak process-tree RSS |
 | --- | ---: |
 | Prepared built-in model | 0.189 GiB |
-| Coordinated release restage plus focused Rust test | 3.389 GiB |
+| Coordinated release restage plus focused Rust tests | 3.402 GiB |
 | Fresh three-process QCD integration test | 0.241 GiB |
 | Four candidate/reference artifact generations | 0.210 GiB |
 | Fresh parameterized-scalar integration test | 1.293 GiB |
+| Fresh massive-Yukawa integration test | 0.245 GiB |
 | Paired mixed benchmark | 0.136 GiB |
 
 The largest focused debug build observed during the generic-lowering work was
@@ -305,10 +334,10 @@ The result establishes a model-driven mixed-process execution path, but not a
 universal replacement for the component recurrence. The next generic
 boundaries are:
 
-1. scalar--Dirac/Yukawa and Dirac-vector transitions plus general
-   massive-Dirac propagation;
-2. arbitrary massive-vector insertions rather than the current certified Z
+1. arbitrary massive-vector insertions rather than the current certified Z
    slice;
+2. authenticated per-vector reference policies for massive-Dirac processes
+   with two or more external vectors;
 3. fermion-pair-to-vector transitions and more than one open quark line;
 4. more than one retained colour flow in one graph payload;
 5. common-subexpression, fusion, and liveness lowering for generic contact and

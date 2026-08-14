@@ -17,7 +17,8 @@ use rusticol_core::recurrence::{
     AuthenticatedRecurrenceBuilderInput, CheckedTableRange, DIRECT_NONE_U32, DirectExecutorRole,
     DirectRecurrencePlan, DirectRecurrenceRuntimeOptions, DirectSelectorWorkSummary,
     PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog, PreparedDirectExecutorKey,
-    PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale, RECURRENCE_BUILDER_INPUT_ABI,
+    PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale,
+    PreparedDirectMassiveDiracFinalizer, RECURRENCE_BUILDER_INPUT_ABI,
     RECURRENCE_CONTRACTED_COLOR_CAPABILITY, RECURRENCE_DIRECT_PLAN_ABI,
     RECURRENCE_DIRECT_RUNTIME_CAPABILITY, RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI,
     RECURRENCE_DIRECT_SCHEDULE_MEMBER, RECURRENCE_DIRECT_TEMPLATE_ABI,
@@ -65,6 +66,14 @@ const DIRECT_CANONICALIZATION_ABI: &str = "pyamplicol-canonical-json-v1";
 const DIRECT_BACKEND_ABI: &str = "rusticol.recurrence-direct-backend.v1";
 const DIRECT_PAYLOAD_BINDING_ABI: &str = "pyamplicol-recurrence-plane-binding-v2";
 const DIRECT_IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1";
+
+struct ParsedGraphIntrinsic {
+    runtime_template: String,
+    contract_digest: SemanticDigest,
+    scale: Option<PreparedDirectIntrinsicScale>,
+    massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    parent_permutation: [u8; 2],
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PrimitiveKind {
@@ -2608,7 +2617,7 @@ fn parse_direct_template_catalog(
                 "source_application_sha256",
                 "state_plane_indices",
             ],
-            &["native_entry_point"],
+            &["graph_intrinsic", "native_entry_point"],
             &format!("{context} payload binding"),
         )?;
         require_json_string_value(
@@ -2636,31 +2645,29 @@ fn parse_direct_template_catalog(
                 "{context} has no executable Direct-Arena payload; rebuild the prepared model"
             )));
         }
+        let graph_intrinsic = match payload.get("graph_intrinsic") {
+            None | Some(JsonValue::Null) => None,
+            Some(value) if payload_kind == "prepared-direct-call" => Some(parse_graph_intrinsic(
+                value,
+                role,
+                &format!("{context} graph intrinsic"),
+            )?),
+            Some(_) => {
+                return Err(invalid(format!(
+                    "{context} only a prepared direct call may carry graph-intrinsic side metadata"
+                )));
+            }
+        };
         let parent_permutation_values = json_array(
             payload,
             "contribution_parent_permutation",
             &format!("{context} parent permutation"),
         )?;
-        if parent_permutation_values.len() != 2 {
+        let parent_permutation =
+            parse_binary_parent_permutation(parent_permutation_values, role, &context)?;
+        if payload_kind != "rusticol-intrinsic" && parent_permutation != [0, 1] {
             return Err(invalid(format!(
-                "{context} parent permutation must contain two entries"
-            )));
-        }
-        let mut parent_permutation = [0_u8; 2];
-        for (index, value) in parent_permutation_values.iter().enumerate() {
-            parent_permutation[index] = u8::try_from(json_value_u32(
-                value,
-                &format!("{context} parent permutation entry {index}"),
-            )?)
-            .map_err(|_| invalid(format!("{context} parent permutation exceeds u8")))?;
-        }
-        if !matches!(parent_permutation, [0, 1] | [1, 0])
-            || (parent_permutation != [0, 1]
-                && !(payload_kind == "rusticol-intrinsic"
-                    && role == DirectExecutorRole::Contribution))
-        {
-            return Err(invalid(format!(
-                "{context} has an invalid parent permutation"
+                "{context} prepared direct call has a nonidentity executor parent permutation"
             )));
         }
         let runtime_template = json_optional_string(
@@ -2754,7 +2761,7 @@ fn parse_direct_template_catalog(
                 "{context} scalar-input count does not match its projections"
             )));
         }
-        let intrinsic_scale = if payload_kind == "rusticol-intrinsic"
+        let (intrinsic_scale, massive_dirac_finalizer) = if payload_kind == "rusticol-intrinsic"
             && matches!(
                 role,
                 DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
@@ -2766,32 +2773,24 @@ fn parse_direct_template_catalog(
                     "{context} executable scalar intrinsic must carry one scale projection"
                 )));
             }
-            let scale_context = format!("{context} intrinsic scale");
-            let scale = json_object(&scalar_projections[0], &scale_context)?;
-            require_json_fields(
-                scale,
-                &[
-                    "constant_imag_bits",
-                    "constant_real_bits",
-                    "kind",
-                    "parameter_index",
-                ],
-                &scale_context,
-            )?;
-            require_json_string_value(scale, "kind", "intrinsic-scale-v1", &scale_context)?;
-            Some(PreparedDirectIntrinsicScale::new(
-                json_u64(scale, "constant_real_bits", &scale_context)?,
-                json_u64(scale, "constant_imag_bits", &scale_context)?,
-                json_optional_u32(scale, "parameter_index", &scale_context)?,
-            ))
+            parse_intrinsic_scalar_projection(
+                &scalar_projections[0],
+                role,
+                &format!("{context} intrinsic scale"),
+            )?
         } else {
             if payload_kind == "rusticol-intrinsic" && !scalar_projections.is_empty() {
                 return Err(invalid(format!(
                     "{context} non-scalar intrinsic carries scalar projections"
                 )));
             }
-            None
+            (None, None)
         };
+        if payload_kind == "rusticol-intrinsic" && massive_dirac_finalizer.is_some() {
+            return Err(RusticolError::compatibility(format!(
+                "{context} massive Dirac algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
+            )));
+        }
         if identity_finalizer {
             if identity_finalizer_seen {
                 return Err(invalid(
@@ -2833,27 +2832,61 @@ fn parse_direct_template_catalog(
                 ),
             );
             if payload_kind == "rusticol-intrinsic" {
-                intrinsic_descriptors.push(PreparedDirectIntrinsicDescriptor::new(
-                    key,
-                    runtime_template
-                        .ok_or_else(|| {
-                            invalid(format!("{context} intrinsic has no runtime template"))
-                        })?
-                        .to_owned(),
-                    if matches!(
-                        role,
-                        DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
-                    ) {
-                        intrinsic_contract_digest
-                    } else {
-                        Some(exact_expression_digest)
-                    },
-                    intrinsic_scale,
-                ));
+                let runtime_template = runtime_template
+                    .ok_or_else(|| invalid(format!("{context} intrinsic has no runtime template")))?
+                    .to_owned();
+                let contract_digest = if matches!(
+                    role,
+                    DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
+                ) {
+                    intrinsic_contract_digest
+                } else {
+                    Some(exact_expression_digest)
+                };
+                intrinsic_descriptors.push(if let Some(finalizer) = massive_dirac_finalizer {
+                    PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+                        key,
+                        runtime_template,
+                        contract_digest.ok_or_else(|| {
+                            invalid(format!(
+                                "{context} massive Dirac intrinsic has no contract digest"
+                            ))
+                        })?,
+                        finalizer,
+                    )
+                    .with_parent_permutation(parent_permutation)
+                } else {
+                    PreparedDirectIntrinsicDescriptor::new(
+                        key,
+                        runtime_template,
+                        contract_digest,
+                        intrinsic_scale,
+                    )
+                    .with_parent_permutation(parent_permutation)
+                });
             } else if runtime_template.is_some() {
                 return Err(invalid(format!(
                     "{context} non-intrinsic payload names a runtime template"
                 )));
+            } else if let Some(graph) = graph_intrinsic {
+                intrinsic_descriptors.push(
+                    if let Some(finalizer) = graph.massive_dirac_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+                            key,
+                            graph.runtime_template,
+                            graph.contract_digest,
+                            finalizer,
+                        )
+                    } else {
+                        PreparedDirectIntrinsicDescriptor::new(
+                            key,
+                            graph.runtime_template,
+                            Some(graph.contract_digest),
+                            graph.scale,
+                        )
+                    }
+                    .with_parent_permutation(graph.parent_permutation),
+                );
             }
         }
     }
@@ -3001,6 +3034,152 @@ fn direct_executor_role(value: &str, context: &str) -> RusticolResult<DirectExec
             "{context} has unsupported direct role {value:?}"
         ))),
     }
+}
+
+fn parse_binary_parent_permutation(
+    values: &[JsonValue],
+    role: DirectExecutorRole,
+    context: &str,
+) -> RusticolResult<[u8; 2]> {
+    if values.len() != 2 {
+        return Err(invalid(format!(
+            "{context} parent permutation must contain two entries"
+        )));
+    }
+    let mut permutation = [0_u8; 2];
+    for (index, value) in values.iter().enumerate() {
+        permutation[index] = u8::try_from(json_value_u32(
+            value,
+            &format!("{context} parent permutation entry {index}"),
+        )?)
+        .map_err(|_| invalid(format!("{context} parent permutation exceeds u8")))?;
+    }
+    if !matches!(permutation, [0, 1] | [1, 0])
+        || (permutation != [0, 1] && role != DirectExecutorRole::Contribution)
+    {
+        return Err(invalid(format!(
+            "{context} has an invalid parent permutation"
+        )));
+    }
+    Ok(permutation)
+}
+
+fn parse_intrinsic_scalar_projection(
+    value: &JsonValue,
+    role: DirectExecutorRole,
+    context: &str,
+) -> RusticolResult<(
+    Option<PreparedDirectIntrinsicScale>,
+    Option<PreparedDirectMassiveDiracFinalizer>,
+)> {
+    let projection = json_object(value, context)?;
+    match json_string(projection, "kind", &format!("{context} kind"))? {
+        "intrinsic-scale-v1" => {
+            require_json_fields(
+                projection,
+                &[
+                    "constant_imag_bits",
+                    "constant_real_bits",
+                    "kind",
+                    "parameter_index",
+                ],
+                context,
+            )?;
+            Ok((
+                Some(PreparedDirectIntrinsicScale::new(
+                    json_u64(projection, "constant_real_bits", context)?,
+                    json_u64(projection, "constant_imag_bits", context)?,
+                    json_optional_u32(projection, "parameter_index", context)?,
+                )),
+                None,
+            ))
+        }
+        "massive-dirac-propagator-v1" if role == DirectExecutorRole::Finalization => {
+            require_json_fields(
+                projection,
+                &[
+                    "constant_imag_bits",
+                    "constant_real_bits",
+                    "kind",
+                    "mass_parameter_index",
+                    "orientation",
+                    "width_parameter_index",
+                ],
+                context,
+            )?;
+            let orientation =
+                match json_string(projection, "orientation", &format!("{context} orientation"))? {
+                    "particle" => template::CurrentOrientation::Particle,
+                    "antiparticle" => template::CurrentOrientation::Antiparticle,
+                    other => {
+                        return Err(invalid(format!(
+                            "{context} has unsupported orientation {other:?}"
+                        )));
+                    }
+                };
+            Ok((
+                None,
+                Some(PreparedDirectMassiveDiracFinalizer::new(
+                    orientation,
+                    json_u64(projection, "constant_real_bits", context)?,
+                    json_u64(projection, "constant_imag_bits", context)?,
+                    json_u32(projection, "mass_parameter_index", context)?,
+                    json_u32(projection, "width_parameter_index", context)?,
+                )),
+            ))
+        }
+        other => Err(invalid(format!(
+            "{context} has unsupported projection kind {other:?}"
+        ))),
+    }
+}
+
+fn parse_graph_intrinsic(
+    value: &JsonValue,
+    role: DirectExecutorRole,
+    context: &str,
+) -> RusticolResult<ParsedGraphIntrinsic> {
+    let graph = json_object(value, context)?;
+    require_json_fields(
+        graph,
+        &[
+            "contract_digest",
+            "contribution_parent_permutation",
+            "runtime_template",
+            "scalar_projection",
+        ],
+        context,
+    )?;
+    let parent_permutation = parse_binary_parent_permutation(
+        json_array(
+            graph,
+            "contribution_parent_permutation",
+            &format!("{context} parent permutation"),
+        )?,
+        role,
+        context,
+    )?;
+    let (scale, massive_dirac_finalizer) = parse_intrinsic_scalar_projection(
+        json_field(graph, "scalar_projection", context)?,
+        role,
+        &format!("{context} scalar projection"),
+    )?;
+    Ok(ParsedGraphIntrinsic {
+        runtime_template: json_nonempty_string(
+            graph,
+            "runtime_template",
+            &format!("{context} runtime template"),
+        )?
+        .to_owned(),
+        contract_digest: json_sha256(
+            graph,
+            "contract_digest",
+            &format!("{context} contract digest"),
+        )?,
+        scale,
+        massive_dirac_finalizer,
+        parent_permutation,
+    })
 }
 
 pub(super) fn canonical_json_bytes(value: &JsonValue, context: &str) -> RusticolResult<Vec<u8>> {

@@ -28,8 +28,8 @@ use super::relation::{
     RelationTermInput, discover_recurrence_current_relations, relation_certificate_algorithm,
 };
 use super::template::{
-    EvaluatorContractKind, MISSING_U32, OwnedRecurrenceTemplateInput, RuntimeHelicityVariantRow,
-    ValidatedRecurrenceTemplateInput,
+    CurrentOrientation, EvaluatorContractKind, MISSING_U32, OwnedRecurrenceTemplateInput,
+    RuntimeHelicityVariantRow, ValidatedRecurrenceTemplateInput,
 };
 use super::{
     CanonicalMomentumLinearForm, ClosureProofMetadataV2, CurrentSourceBinding,
@@ -110,6 +110,59 @@ pub struct PreparedDirectIntrinsicScale {
     prepared_parameter_slot: Option<u32>,
 }
 
+/// Authenticated runtime inputs for one massive Dirac propagator intrinsic.
+///
+/// Unlike an ordinary intrinsic scale, the two prepared slots are semantic
+/// operands of the finalizer itself.  They are retained together with the
+/// certified line orientation so lowering cannot reconstruct those roles
+/// from particle IDs, process names, or parameter names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedDirectMassiveDiracFinalizer {
+    orientation: CurrentOrientation,
+    constant_real_bits: u64,
+    constant_imag_bits: u64,
+    mass_prepared_parameter_slot: u32,
+    width_prepared_parameter_slot: u32,
+}
+
+impl PreparedDirectMassiveDiracFinalizer {
+    pub const fn new(
+        orientation: CurrentOrientation,
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_prepared_parameter_slot: u32,
+        width_prepared_parameter_slot: u32,
+    ) -> Self {
+        Self {
+            orientation,
+            constant_real_bits,
+            constant_imag_bits,
+            mass_prepared_parameter_slot,
+            width_prepared_parameter_slot,
+        }
+    }
+
+    pub const fn orientation(self) -> CurrentOrientation {
+        self.orientation
+    }
+
+    pub const fn constant_real_bits(self) -> u64 {
+        self.constant_real_bits
+    }
+
+    pub const fn constant_imag_bits(self) -> u64 {
+        self.constant_imag_bits
+    }
+
+    pub const fn mass_prepared_parameter_slot(self) -> u32 {
+        self.mass_prepared_parameter_slot
+    }
+
+    pub const fn width_prepared_parameter_slot(self) -> u32 {
+        self.width_prepared_parameter_slot
+    }
+}
+
 impl PreparedDirectIntrinsicScale {
     pub const fn new(
         constant_real_bits: u64,
@@ -143,6 +196,8 @@ pub struct PreparedDirectIntrinsicDescriptor {
     runtime_template: Box<str>,
     contract_digest: Option<SemanticDigest>,
     scale: Option<PreparedDirectIntrinsicScale>,
+    massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    parent_permutation: [u8; 2],
 }
 
 impl PreparedDirectIntrinsicDescriptor {
@@ -157,7 +212,30 @@ impl PreparedDirectIntrinsicDescriptor {
             runtime_template: runtime_template.into_boxed_str(),
             contract_digest,
             scale,
+            massive_dirac_finalizer: None,
+            parent_permutation: [0, 1],
         }
+    }
+
+    pub fn new_with_massive_dirac_finalizer(
+        key: PreparedDirectExecutorKey,
+        runtime_template: String,
+        contract_digest: SemanticDigest,
+        finalizer: PreparedDirectMassiveDiracFinalizer,
+    ) -> Self {
+        Self {
+            key,
+            runtime_template: runtime_template.into_boxed_str(),
+            contract_digest: Some(contract_digest),
+            scale: None,
+            massive_dirac_finalizer: Some(finalizer),
+            parent_permutation: [0, 1],
+        }
+    }
+
+    pub fn with_parent_permutation(mut self, parent_permutation: [u8; 2]) -> Self {
+        self.parent_permutation = parent_permutation;
+        self
     }
 
     pub const fn key(&self) -> PreparedDirectExecutorKey {
@@ -174,6 +252,14 @@ impl PreparedDirectIntrinsicDescriptor {
 
     pub const fn scale(&self) -> Option<PreparedDirectIntrinsicScale> {
         self.scale
+    }
+
+    pub const fn massive_dirac_finalizer(&self) -> Option<PreparedDirectMassiveDiracFinalizer> {
+        self.massive_dirac_finalizer
+    }
+
+    pub const fn parent_permutation(&self) -> [u8; 2] {
+        self.parent_permutation
     }
 }
 
@@ -311,18 +397,43 @@ impl PreparedDirectExecutorCatalog {
                     "prepared intrinsic descriptor has an empty runtime template",
                 ));
             }
-            let requires_scale = matches!(
-                key,
-                PreparedDirectExecutorKey::Evaluator {
-                    role: DirectExecutorRole::Contribution | DirectExecutorRole::Finalization,
-                    ..
-                }
-            ) && descriptor.runtime_template.as_ref()
-                != "rusticol.identity-finalize-in-place.v1";
-            let requires_contract = !matches!(key, PreparedDirectExecutorKey::IdentityFinalizer);
-            if requires_contract != descriptor.contract_digest.is_some()
-                || requires_scale != descriptor.scale.is_some()
+            if !matches!(descriptor.parent_permutation, [0, 1] | [1, 0])
+                || (descriptor.parent_permutation != [0, 1]
+                    && key.role() != DirectExecutorRole::Contribution)
             {
+                return Err(invalid(format!(
+                    "prepared intrinsic descriptor for key {key:?} has an invalid parent permutation"
+                )));
+            }
+            let complete = match key {
+                PreparedDirectExecutorKey::IdentityFinalizer => {
+                    descriptor.contract_digest.is_none()
+                        && descriptor.scale.is_none()
+                        && descriptor.massive_dirac_finalizer.is_none()
+                }
+                PreparedDirectExecutorKey::Evaluator {
+                    role: DirectExecutorRole::Contribution,
+                    ..
+                } => {
+                    descriptor.contract_digest.is_some()
+                        && descriptor.scale.is_some()
+                        && descriptor.massive_dirac_finalizer.is_none()
+                }
+                PreparedDirectExecutorKey::Evaluator {
+                    role: DirectExecutorRole::Finalization,
+                    ..
+                } => {
+                    descriptor.contract_digest.is_some()
+                        && (descriptor.scale.is_some()
+                            ^ descriptor.massive_dirac_finalizer.is_some())
+                }
+                PreparedDirectExecutorKey::Evaluator { .. } => {
+                    descriptor.contract_digest.is_some()
+                        && descriptor.scale.is_none()
+                        && descriptor.massive_dirac_finalizer.is_none()
+                }
+            };
+            if !complete {
                 return Err(invalid(format!(
                     "prepared intrinsic descriptor for key {key:?} has incomplete execution metadata"
                 )));
@@ -335,6 +446,20 @@ impl PreparedDirectExecutorCatalog {
                 return Err(invalid(format!(
                     "prepared non-contribution intrinsic for key {key:?} binds a model parameter"
                 )));
+            }
+            if let Some(finalizer) = descriptor.massive_dirac_finalizer {
+                if key.role() != DirectExecutorRole::Finalization
+                    || !matches!(
+                        finalizer.orientation,
+                        CurrentOrientation::Particle | CurrentOrientation::Antiparticle
+                    )
+                    || finalizer.mass_prepared_parameter_slot
+                        == finalizer.width_prepared_parameter_slot
+                {
+                    return Err(invalid(format!(
+                        "prepared massive-Dirac finalizer for key {key:?} has invalid typed metadata"
+                    )));
+                }
             }
             if descriptors_by_key.insert(key, descriptor).is_some() {
                 return Err(invalid(format!(

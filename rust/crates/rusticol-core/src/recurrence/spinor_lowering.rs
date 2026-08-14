@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::template::{
     CurrentOrientation, EvaluatorCallableKind, EvaluatorContractKind, MISSING_U32,
-    ParameterValueType, ParticleStatistics, ValidatedRecurrenceTemplateInput,
+    OutputFactorSource, ParameterKind, ParameterValueType, ParticleStatistics,
+    ValidatedRecurrenceTemplateInput,
 };
 use super::{
     AuthenticatedRecurrenceBuilderInput, CurrentSourceBinding, DirectExecutorRole,
@@ -14,13 +15,16 @@ use super::{
     RecurrenceStrategy, SourceStateAssignment,
 };
 use crate::spinor::{
-    BispinorExpression, BivectorExpression, LinearWeylExpression, SpinorChirality,
+    BispinorExpression, BivectorExpression, DiracExpression, LinearWeylExpression, SpinorChirality,
     SpinorDagBuilder, SpinorDagPayloadV2, SpinorKinematicScalar, SpinorPreparedParameterBinding,
     SpinorSourceInputBinding, SpinorSourceInputKind, bispinor_dot_expression, bispinor_scale,
     bispinor_sum, bivector_scale, bivector_sum, bivector_vector_expression,
-    bivector_wedge_expression, external_polarization_expression, linear_weyl_scale,
-    linear_weyl_sum, quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
-    signed_momentum_expression, three_vector_bispinor_expression,
+    bivector_wedge_expression, dirac_bilinear, dirac_propagator_numerator, dirac_scalar_expression,
+    dirac_scale, dirac_sum, dirac_vector_expression, external_polarization_expression,
+    linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
+    massive_dirac_source_expression, quark_vector_weyl_bilinear,
+    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
+    three_vector_bispinor_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -60,6 +64,26 @@ const VECTOR_PROPAGATOR_CONTRACT: &str =
 const VECTOR_SOURCE_PREFIX: &str = "rusticol.source-fill.vector.v1:";
 const FERMION_SOURCE_PREFIX: &str = "rusticol.source-fill.fermion.v1:";
 const GLOBAL_FLIP_EXTENSION: &str = "helicity-equivalence:global-flip-v1";
+
+const DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1";
+const DIRAC_VECTOR_PARTICLE_CONTRACT: &str =
+    "3f4b28f08fba4d08c56d9a1bac9e9ac563a11462feb8f95c7262f27847738661";
+const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-antiparticle.v1";
+const DIRAC_VECTOR_ANTIPARTICLE_CONTRACT: &str =
+    "46391ed42113ed52b1960215b03fad8470f6542fbc928e56b9d7b426e66ab9ab";
+const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
+const DIRAC_SCALAR_CONTRACT: &str =
+    "d9c7dbc51561cdc2b2a7daf3d97ea24283d6c690ae5da2d775e86c80a3b4886f";
+const MASSIVE_DIRAC_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1";
+const MASSIVE_DIRAC_PARTICLE_CONTRACT: &str =
+    "d5b795b8fb0c5b487658d9977623e771f03f4a5c2d1cabf2cd955e542c8ccbef";
+const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
+const MASSIVE_DIRAC_ANTIPARTICLE_CONTRACT: &str =
+    "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c";
 
 fn invalid(message: impl Into<String>) -> RusticolError {
     RusticolError::invalid_argument(format!(
@@ -107,16 +131,21 @@ pub fn lower_authenticated_recurrence_to_spinor_payload_v2(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QcdStateKind {
+    Scalar,
     Vector,
     Bivector,
     Weyl {
         chirality: SpinorChirality,
         orientation: CurrentOrientation,
     },
+    Dirac {
+        orientation: CurrentOrientation,
+    },
 }
 
 #[derive(Clone, Debug)]
 enum QcdCurrent {
+    Scalar(u32),
     Vector(BispinorExpression),
     Bivector(BivectorExpression),
     Weyl {
@@ -126,6 +155,10 @@ enum QcdCurrent {
         /// line. Its action is fused into the authenticated closure.
         value: Option<LinearWeylExpression>,
     },
+    Dirac {
+        orientation: CurrentOrientation,
+        value: DiracExpression,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +167,16 @@ enum QcdContributionKind {
     AntisymmetricTensorVector,
     VectorWedgeVector,
     WeylVector(SpinorChirality),
+    DiracVector(CurrentOrientation),
+    DiracScalar,
+}
+
+#[derive(Clone, Debug)]
+struct QcdSourceLayout {
+    input_kinds: Vec<SpinorSourceInputKind>,
+    massive_sources: Vec<u16>,
+    vector_sources: Vec<u16>,
+    dirac_mass_prepared_slot: Option<u32>,
 }
 
 fn lower_qcd_program(
@@ -151,7 +194,13 @@ fn lower_qcd_program(
         return Err(invalid("the QCD slice requires at least four sources"));
     }
     let representative_signs = qcd_representative_signs(program, source_count)?;
-    let prepared_slots = qcd_parameter_slots(program, templates, direct)?;
+    let source_layout = qcd_source_layout(program, templates, source_count)?;
+    let prepared_slots = qcd_parameter_slots(
+        program,
+        templates,
+        direct,
+        source_layout.dirac_mass_prepared_slot,
+    )?;
     let dense_parameter_slots = prepared_slots
         .iter()
         .copied()
@@ -166,7 +215,22 @@ fn lower_qcd_program(
         .map_err(|_| invalid("external source count exceeds the spinor DAG domain"))?;
     let parameter_count = u16::try_from(prepared_slots.len())
         .map_err(|_| invalid("dense graph parameter count exceeds u16"))?;
-    let mut builder = SpinorDagBuilder::new_with_parameters(momentum_count, parameter_count)?;
+    let mut builder = SpinorDagBuilder::new_with_parameters_and_massive_sources(
+        momentum_count,
+        parameter_count,
+        &source_layout.massive_sources,
+    )?;
+    if source_layout.dirac_mass_prepared_slot.is_some() {
+        match source_layout.vector_sources.as_slice() {
+            [] => {}
+            [source] => builder.use_temporal_reference_source(*source)?,
+            _ => {
+                return Err(invalid(
+                    "the generic massive-Dirac slice supports at most one external vector source; multi-vector processes require an authenticated per-vector reference policy",
+                ));
+            }
+        }
+    }
     let mut current_values = vec![None; program.currents().len()];
 
     for current in program.currents() {
@@ -177,7 +241,14 @@ fn lower_qcd_program(
         }
         let state = qcd_state_kind(templates, current.key().current_state_template_id())?;
         let value = if current.is_source() {
-            lower_qcd_source(current, state, templates, direct, &mut builder)?
+            lower_qcd_source(
+                current,
+                state,
+                templates,
+                direct,
+                &dense_parameter_slots,
+                &mut builder,
+            )?
         } else {
             lower_qcd_current(
                 current,
@@ -186,6 +257,7 @@ fn lower_qcd_program(
                 templates,
                 direct,
                 &dense_parameter_slots,
+                source_layout.dirac_mass_prepared_slot,
                 &representative_signs,
                 &current_values,
                 &mut builder,
@@ -244,19 +316,22 @@ fn lower_qcd_program(
         .into_iter()
         .zip(replay_signs)
         .zip(representative_signs)
-        .map(|((public_slot, replay_sign), representative_sign)| {
-            let public_slot = u16::try_from(public_slot)
-                .map_err(|_| invalid("public source slot exceeds u16"))?;
-            let momentum_sign = representative_sign
-                .checked_mul(replay_sign)
-                .and_then(|sign| i8::try_from(sign).ok())
-                .ok_or_else(|| invalid("source momentum sign exceeds i8"))?;
-            SpinorSourceInputBinding::new(
-                public_slot,
-                momentum_sign,
-                SpinorSourceInputKind::NullSpinor,
-            )
-        })
+        .enumerate()
+        .map(
+            |(graph_slot, ((public_slot, replay_sign), representative_sign))| {
+                let public_slot = u16::try_from(public_slot)
+                    .map_err(|_| invalid("public source slot exceeds u16"))?;
+                let momentum_sign = representative_sign
+                    .checked_mul(replay_sign)
+                    .and_then(|sign| i8::try_from(sign).ok())
+                    .ok_or_else(|| invalid("source momentum sign exceeds i8"))?;
+                SpinorSourceInputBinding::new(
+                    public_slot,
+                    momentum_sign,
+                    source_layout.input_kinds[graph_slot],
+                )
+            },
+        )
         .collect::<RusticolResult<Vec<_>>>()?;
     let parameter_bindings = prepared_slots
         .into_iter()
@@ -279,12 +354,9 @@ fn qcd_state_kind(
         .current_states
         .get(state_id as usize)
         .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
-    if state.id != state_id
-        || state.mass_parameter_id != MISSING_U32
-        || state.width_parameter_id != MISSING_U32
-    {
+    if state.id != state_id {
         return Err(invalid(format!(
-            "current-state template {state_id} is not an exact massless state"
+            "current-state template {state_id} has a noncanonical ID"
         )));
     }
     let basis = template_string(templates, state.basis_string_id, "current-state basis")?;
@@ -307,6 +379,12 @@ fn qcd_state_kind(
         orientation,
         auxiliary_kind,
     ) {
+        (ParticleStatistics::Boson, "scalar", 1, 0, CurrentOrientation::SelfConjugate, None)
+            if state.particle_id == state.anti_particle_id
+                && state.width_parameter_id == MISSING_U32 =>
+        {
+            QcdStateKind::Scalar
+        }
         (
             ParticleStatistics::Boson,
             "lorentz-vector",
@@ -314,7 +392,9 @@ fn qcd_state_kind(
             0,
             CurrentOrientation::SelfConjugate,
             None,
-        ) => QcdStateKind::Vector,
+        ) if state.mass_parameter_id == MISSING_U32 && state.width_parameter_id == MISSING_U32 => {
+            QcdStateKind::Vector
+        }
         (
             ParticleStatistics::Boson,
             "auxiliary:antisymmetric-tensor",
@@ -322,7 +402,9 @@ fn qcd_state_kind(
             0,
             CurrentOrientation::SelfConjugate,
             Some("antisymmetric-tensor"),
-        ) => QcdStateKind::Bivector,
+        ) if state.mass_parameter_id == MISSING_U32 && state.width_parameter_id == MISSING_U32 => {
+            QcdStateKind::Bivector
+        }
         (
             ParticleStatistics::Fermion,
             "weyl-chiral",
@@ -333,7 +415,8 @@ fn qcd_state_kind(
         ) if matches!(
             orientation,
             CurrentOrientation::Particle | CurrentOrientation::Antiparticle
-        ) =>
+        ) && state.mass_parameter_id == MISSING_U32
+            && state.width_parameter_id == MISSING_U32 =>
         {
             QcdStateKind::Weyl {
                 chirality: if chirality == 1 {
@@ -344,9 +427,18 @@ fn qcd_state_kind(
                 orientation,
             }
         }
+        (ParticleStatistics::Fermion, "dirac", 4, 0, orientation, None)
+            if matches!(
+                orientation,
+                CurrentOrientation::Particle | CurrentOrientation::Antiparticle
+            ) && state.mass_parameter_id != MISSING_U32
+                && state.width_parameter_id == MISSING_U32 =>
+        {
+            QcdStateKind::Dirac { orientation }
+        }
         _ => {
             return Err(invalid(format!(
-                "current-state template {state_id} is outside the vector/bivector/one-Weyl-line QCD slice"
+                "current-state template {state_id} is outside the scalar/vector/bivector/one-fermion-line QCD slice"
             )));
         }
     };
@@ -417,13 +509,180 @@ fn qcd_representative_signs(
         .ok_or_else(|| invalid("source currents do not cover every graph source"))
 }
 
-fn lower_qcd_source(
-    current: &super::RecurrenceCurrent,
-    state: QcdStateKind,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DiracSourceEndpoint {
+    source_slot: u32,
+    state_id: u32,
+    particle_id: i32,
+    anti_particle_id: i32,
+    species_string_id: u32,
+    mass_prepared_slot: u32,
+}
+
+fn qcd_source_layout(
+    program: &RecurrenceProgram,
     templates: &ValidatedRecurrenceTemplateInput,
-    direct: &PreparedDirectExecutorCatalog,
-    builder: &mut SpinorDagBuilder,
-) -> RusticolResult<QcdCurrent> {
+    source_count: usize,
+) -> RusticolResult<QcdSourceLayout> {
+    let mut input_kinds = vec![None; source_count];
+    let mut massive_sources = BTreeSet::new();
+    let mut vector_sources = BTreeSet::new();
+    let mut particle_endpoints = BTreeSet::new();
+    let mut antiparticle_endpoints = BTreeSet::new();
+
+    for current in program
+        .currents()
+        .iter()
+        .filter(|current| current.is_source())
+    {
+        let [source_slot] = current.key().support_source_slots() else {
+            return Err(invalid(format!(
+                "source current {} has non-singleton support",
+                current.id()
+            )));
+        };
+        let slot =
+            usize::try_from(*source_slot).map_err(|_| invalid("source slot exceeds usize"))?;
+        let destination = input_kinds
+            .get_mut(slot)
+            .ok_or_else(|| invalid("source slot lies outside the graph source domain"))?;
+        let state_id = current.key().current_state_template_id();
+        let state = templates
+            .input()
+            .current_states
+            .get(state_id as usize)
+            .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
+        let source = qcd_source_row(current, templates)?;
+        let (kind, endpoint) = match qcd_state_kind(templates, state_id)? {
+            QcdStateKind::Scalar => {
+                if state.mass_parameter_id == MISSING_U32
+                    || source.mass_parameter_id != state.mass_parameter_id
+                    || source.width_parameter_id != state.width_parameter_id
+                {
+                    return Err(invalid(format!(
+                        "massive scalar source template {} does not own its current-state mass binding",
+                        source.id
+                    )));
+                }
+                // Authenticate the explicit scalar mass owner even though the
+                // scalar wavefunction itself is the unit expression.  Its
+                // momentum must be decomposed when it enters a Dirac
+                // propagator's signed support.
+                let _ = prepared_real_parameter_slot(
+                    templates,
+                    state.mass_parameter_id,
+                    "scalar source mass",
+                )?;
+                massive_sources.insert(
+                    u16::try_from(*source_slot)
+                        .map_err(|_| invalid("massive scalar source slot exceeds u16"))?,
+                );
+                (SpinorSourceInputKind::MassiveSpinorPair, None)
+            }
+            QcdStateKind::Dirac { orientation } => {
+                if source.mass_parameter_id != state.mass_parameter_id
+                    || source.width_parameter_id != state.width_parameter_id
+                {
+                    return Err(invalid(format!(
+                        "massive Dirac source template {} disagrees with its current-state mass binding",
+                        source.id
+                    )));
+                }
+                let mass_prepared_slot = prepared_real_parameter_slot(
+                    templates,
+                    source.mass_parameter_id,
+                    "massive Dirac source mass",
+                )?;
+                massive_sources.insert(
+                    u16::try_from(*source_slot)
+                        .map_err(|_| invalid("massive Dirac source slot exceeds u16"))?,
+                );
+                (
+                    SpinorSourceInputKind::MassiveSpinorPair,
+                    Some((
+                        orientation,
+                        DiracSourceEndpoint {
+                            source_slot: *source_slot,
+                            state_id,
+                            particle_id: state.particle_id,
+                            anti_particle_id: state.anti_particle_id,
+                            species_string_id: state.species_string_id,
+                            mass_prepared_slot,
+                        },
+                    )),
+                )
+            }
+            QcdStateKind::Vector => {
+                vector_sources.insert(
+                    u16::try_from(*source_slot)
+                        .map_err(|_| invalid("vector source slot exceeds u16"))?,
+                );
+                (SpinorSourceInputKind::NullSpinor, None)
+            }
+            QcdStateKind::Weyl { .. } => (SpinorSourceInputKind::NullSpinor, None),
+            QcdStateKind::Bivector => {
+                return Err(invalid(
+                    "an auxiliary antisymmetric tensor cannot be a QCD source",
+                ));
+            }
+        };
+        if destination.is_some_and(|previous| previous != kind) {
+            return Err(invalid(format!(
+                "graph source slot {source_slot} has incompatible source representations"
+            )));
+        }
+        *destination = Some(kind);
+        if let Some((orientation, endpoint)) = endpoint {
+            match orientation {
+                CurrentOrientation::Particle => {
+                    particle_endpoints.insert(endpoint);
+                }
+                CurrentOrientation::Antiparticle => {
+                    antiparticle_endpoints.insert(endpoint);
+                }
+                CurrentOrientation::SelfConjugate => unreachable!("Dirac state checked above"),
+            }
+        }
+    }
+
+    let input_kinds = input_kinds
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| invalid("QCD source currents do not cover every graph source"))?;
+    let particle_endpoints = particle_endpoints.into_iter().collect::<Vec<_>>();
+    let antiparticle_endpoints = antiparticle_endpoints.into_iter().collect::<Vec<_>>();
+    let dirac_mass_prepared_slot = match (
+        particle_endpoints.as_slice(),
+        antiparticle_endpoints.as_slice(),
+    ) {
+        ([], []) => None,
+        ([particle], [antiparticle])
+            if particle.source_slot != antiparticle.source_slot
+                && particle.particle_id == antiparticle.anti_particle_id
+                && particle.anti_particle_id == antiparticle.particle_id
+                && particle.species_string_id == antiparticle.species_string_id
+                && particle.mass_prepared_slot == antiparticle.mass_prepared_slot =>
+        {
+            Some(particle.mass_prepared_slot)
+        }
+        _ => {
+            return Err(invalid(
+                "the massive Dirac slice requires exactly one mutually conjugate particle/antiparticle source pair with one authenticated mass owner",
+            ));
+        }
+    };
+    Ok(QcdSourceLayout {
+        input_kinds,
+        massive_sources: massive_sources.into_iter().collect(),
+        vector_sources: vector_sources.into_iter().collect(),
+        dirac_mass_prepared_slot,
+    })
+}
+
+fn qcd_source_row<'a>(
+    current: &super::RecurrenceCurrent,
+    templates: &'a ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<&'a super::template::SourceRow> {
     let source_template_id = match current.key().source_binding() {
         CurrentSourceBinding::FixedTemplate(id) => *id,
         _ => return Err(invalid("QCD source does not use one fixed template")),
@@ -433,19 +692,82 @@ fn lower_qcd_source(
         .sources
         .get(source_template_id as usize)
         .ok_or_else(|| invalid(format!("source template {source_template_id} is absent")))?;
+    if source.id != source_template_id {
+        return Err(invalid(format!(
+            "source template {source_template_id} has a noncanonical ID"
+        )));
+    }
+    Ok(source)
+}
+
+fn prepared_real_parameter_slot(
+    templates: &ValidatedRecurrenceTemplateInput,
+    parameter_id: u32,
+    label: &str,
+) -> RusticolResult<u32> {
+    if parameter_id == MISSING_U32 {
+        return Err(invalid(format!("{label} parameter is missing")));
+    }
+    let parameter = templates
+        .input()
+        .parameters
+        .get(parameter_id as usize)
+        .ok_or_else(|| {
+            invalid(format!(
+                "{label} parameter template {parameter_id} is absent"
+            ))
+        })?;
+    if parameter.id != parameter_id
+        || ParameterValueType::try_from(parameter.value_type)? != ParameterValueType::Real
+        || parameter.prepared_parameter_id == MISSING_U32
+    {
+        return Err(invalid(format!(
+            "{label} parameter template {parameter_id} is not an authenticated prepared real slot"
+        )));
+    }
+    Ok(parameter.prepared_parameter_id)
+}
+
+fn prepared_real_parameter_owner(
+    templates: &ValidatedRecurrenceTemplateInput,
+    prepared_slot: u32,
+    label: &str,
+) -> RusticolResult<u32> {
+    let owners = templates
+        .input()
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.prepared_parameter_id == prepared_slot)
+        .collect::<Vec<_>>();
+    let [owner] = owners.as_slice() else {
+        return Err(invalid(format!(
+            "{label} prepared slot {prepared_slot} has {} semantic owners, expected one",
+            owners.len()
+        )));
+    };
+    if ParameterValueType::try_from(owner.value_type)? != ParameterValueType::Real {
+        return Err(invalid(format!(
+            "{label} prepared slot {prepared_slot} is not owned by a real parameter"
+        )));
+    }
+    Ok(owner.id)
+}
+
+fn lower_qcd_source(
+    current: &super::RecurrenceCurrent,
+    state: QcdStateKind,
+    templates: &ValidatedRecurrenceTemplateInput,
+    direct: &PreparedDirectExecutorCatalog,
+    dense_parameter_slots: &BTreeMap<u32, u16>,
+    builder: &mut SpinorDagBuilder,
+) -> RusticolResult<QcdCurrent> {
+    let source = qcd_source_row(current, templates)?;
+    let source_template_id = source.id;
     // The recurrence builder has already authenticated the source template's
     // canonical state against the effective current state, including the
     // initial-state crossing map.  Those IDs are deliberately different for
     // a crossed massless fermion, so requiring literal equality here would
     // reject the very crossing contract we consumed above.
-    if source.id != source_template_id
-        || source.mass_parameter_id != MISSING_U32
-        || source.width_parameter_id != MISSING_U32
-    {
-        return Err(invalid(format!(
-            "source template {source_template_id} does not match its massless current state"
-        )));
-    }
     let family = template_string(
         templates,
         source.wavefunction_family_string_id,
@@ -460,7 +782,10 @@ fn lower_qcd_source(
         .intrinsic_descriptor(DirectExecutorRole::Source, evaluator.id)
         .ok_or_else(|| invalid("QCD source has no authenticated direct intrinsic"))?;
     validate_intrinsic_runtime_binding(templates, evaluator, descriptor, "source")?;
-    if descriptor.contract_digest().is_none() || descriptor.scale().is_some() {
+    if descriptor.contract_digest().is_none()
+        || descriptor.scale().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
+    {
         return Err(invalid("QCD source intrinsic descriptor is malformed"));
     }
     let [source_slot] = current.key().support_source_slots() else {
@@ -473,12 +798,29 @@ fn lower_qcd_source(
             .ok_or_else(|| invalid("QCD source current has no exact source factor"))?,
     )?;
     match state {
+        QcdStateKind::Scalar => {
+            if family != "scalar"
+                || !descriptor
+                    .runtime_template()
+                    .starts_with(SCALAR_SOURCE_PREFIX)
+                || source.helicity != 0
+                || source.spin_state != 0
+            {
+                return Err(invalid(format!(
+                    "source template {source_template_id} is not a scalar source"
+                )));
+            }
+            Ok(QcdCurrent::Scalar(source_factor))
+        }
         QcdStateKind::Vector => {
             if family != "vector"
                 || !descriptor
                     .runtime_template()
                     .starts_with(VECTOR_SOURCE_PREFIX)
                 || !matches!(source.helicity, -1 | 1)
+                || source.spin_state != source.helicity
+                || source.mass_parameter_id != MISSING_U32
+                || source.width_parameter_id != MISSING_U32
             {
                 return Err(invalid(format!(
                     "source template {source_template_id} is not a transverse vector source"
@@ -508,6 +850,9 @@ fn lower_qcd_source(
                     .runtime_template()
                     .starts_with(FERMION_SOURCE_PREFIX)
                 || !matches!(source.helicity, -1 | 1)
+                || source.spin_state != source.helicity
+                || source.mass_parameter_id != MISSING_U32
+                || source.width_parameter_id != MISSING_U32
             {
                 return Err(invalid(format!(
                     "source template {source_template_id} is not a massless Weyl source"
@@ -519,6 +864,42 @@ fn lower_qcd_source(
                 value: Some(LinearWeylExpression::atom(atom, source_factor)),
             })
         }
+        QcdStateKind::Dirac { orientation } => {
+            if family != "fermion"
+                || !descriptor
+                    .runtime_template()
+                    .starts_with(FERMION_SOURCE_PREFIX)
+                || !matches!(source.helicity, -1 | 1)
+                || source.spin_state != source.helicity
+                || source.mass_parameter_id == MISSING_U32
+                || source.width_parameter_id != MISSING_U32
+            {
+                return Err(invalid(format!(
+                    "source template {source_template_id} is not a massive Dirac source"
+                )));
+            }
+            let prepared_mass = prepared_real_parameter_slot(
+                templates,
+                source.mass_parameter_id,
+                "massive Dirac source mass",
+            )?;
+            let dense_mass = dense_parameter_slots
+                .get(&prepared_mass)
+                .copied()
+                .ok_or_else(|| invalid("massive Dirac source mass has no graph binding"))?;
+            let mass = builder.parameter(dense_mass)?;
+            let source_value = massive_dirac_source_expression(
+                builder,
+                atom,
+                mass,
+                i8::try_from(source.spin_state)
+                    .map_err(|_| invalid("massive Dirac spin state exceeds i8"))?,
+            )?;
+            Ok(QcdCurrent::Dirac {
+                orientation,
+                value: dirac_scale(builder, source_factor, &source_value)?,
+            })
+        }
     }
 }
 
@@ -526,8 +907,12 @@ fn qcd_parameter_slots(
     program: &RecurrenceProgram,
     templates: &ValidatedRecurrenceTemplateInput,
     direct: &PreparedDirectExecutorCatalog,
+    dirac_mass_prepared_slot: Option<u32>,
 ) -> RusticolResult<Vec<u32>> {
     let mut slots = BTreeSet::new();
+    if let Some(slot) = dirac_mass_prepared_slot {
+        slots.insert(slot);
+    }
     for contribution in program.contributions() {
         let transition = transition_row(templates, contribution.key().transition_template_id())?;
         let descriptor = direct
@@ -545,6 +930,36 @@ fn qcd_parameter_slots(
             slots.insert(slot);
         }
     }
+    for current in program
+        .currents()
+        .iter()
+        .filter(|current| !current.is_source())
+    {
+        let QcdStateKind::Dirac { orientation } =
+            qcd_state_kind(templates, current.key().current_state_template_id())?
+        else {
+            continue;
+        };
+        if qcd_optional_finalization(current, program)?
+            .and_then(|finalization| finalization.propagator_template_id())
+            .is_none()
+        {
+            continue;
+        }
+        let source_mass = dirac_mass_prepared_slot.ok_or_else(|| {
+            invalid("massive Dirac finalization has no authenticated source-mass owner")
+        })?;
+        let finalizer = qcd_massive_finalizer_contract(
+            current,
+            orientation,
+            program,
+            templates,
+            direct,
+            source_mass,
+        )?;
+        slots.insert(finalizer.mass_prepared_parameter_slot());
+        slots.insert(finalizer.width_prepared_parameter_slot());
+    }
     Ok(slots.into_iter().collect())
 }
 
@@ -557,6 +972,9 @@ fn qcd_contribution_kind(
         VECTOR_WEDGE_VECTOR_TEMPLATE => VECTOR_WEDGE_VECTOR_CONTRACT,
         WEYL_VECTOR_A_TEMPLATE => WEYL_VECTOR_A_CONTRACT,
         WEYL_VECTOR_B_TEMPLATE => WEYL_VECTOR_B_CONTRACT,
+        DIRAC_VECTOR_PARTICLE_TEMPLATE => DIRAC_VECTOR_PARTICLE_CONTRACT,
+        DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => DIRAC_VECTOR_ANTIPARTICLE_CONTRACT,
+        DIRAC_SCALAR_TEMPLATE => DIRAC_SCALAR_CONTRACT,
         other => {
             return Err(invalid(format!(
                 "unsupported QCD contribution primitive {other:?}"
@@ -564,6 +982,7 @@ fn qcd_contribution_kind(
         }
     };
     if descriptor.scale().is_none()
+        || descriptor.massive_dirac_finalizer().is_some()
         || descriptor
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != expected_digest)
@@ -579,6 +998,13 @@ fn qcd_contribution_kind(
         VECTOR_WEDGE_VECTOR_TEMPLATE => QcdContributionKind::VectorWedgeVector,
         WEYL_VECTOR_A_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Positive),
         WEYL_VECTOR_B_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Negative),
+        DIRAC_VECTOR_PARTICLE_TEMPLATE => {
+            QcdContributionKind::DiracVector(CurrentOrientation::Particle)
+        }
+        DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => {
+            QcdContributionKind::DiracVector(CurrentOrientation::Antiparticle)
+        }
+        DIRAC_SCALAR_TEMPLATE => QcdContributionKind::DiracScalar,
         _ => unreachable!("runtime template checked above"),
     })
 }
@@ -629,9 +1055,11 @@ fn qcd_current_momentum(
             ExactRational::new(i128::from(coefficient), 1)?,
             ExactRational::ZERO,
         ))?;
-        let atom = u16::try_from(term.source_slot)
+        let source = u16::try_from(term.source_slot)
             .map_err(|_| invalid("momentum source slot exceeds u16"))?;
-        terms.push((atom, coefficient));
+        for atom in builder.source_momentum_atoms(source)? {
+            terms.push((atom, coefficient));
+        }
     }
     if terms.is_empty() {
         return Err(invalid(format!(
@@ -674,6 +1102,120 @@ fn qcd_finalization<'a>(
     })
 }
 
+fn qcd_massive_finalizer_contract(
+    current: &super::RecurrenceCurrent,
+    orientation: CurrentOrientation,
+    program: &RecurrenceProgram,
+    templates: &ValidatedRecurrenceTemplateInput,
+    direct: &PreparedDirectExecutorCatalog,
+    source_mass_prepared_slot: u32,
+) -> RusticolResult<super::PreparedDirectMassiveDiracFinalizer> {
+    let finalization = qcd_finalization(current, program)?;
+    let propagator_id = finalization
+        .propagator_template_id()
+        .ok_or_else(|| invalid("active massive Dirac current has an identity finalization"))?;
+    let propagator = templates
+        .input()
+        .propagators
+        .get(propagator_id as usize)
+        .ok_or_else(|| invalid(format!("propagator template {propagator_id} is absent")))?;
+    let state_id = current.key().current_state_template_id();
+    let state = templates
+        .input()
+        .current_states
+        .get(state_id as usize)
+        .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
+    if propagator.id != propagator_id
+        || propagator.applies_propagator != 1
+        || propagator.state_template_id != state_id
+    {
+        return Err(invalid(format!(
+            "propagator template {propagator_id} is not the current's authenticated massive Dirac propagator"
+        )));
+    }
+    let evaluator = evaluator_row(
+        templates,
+        propagator.evaluator_binding_id,
+        EvaluatorContractKind::Propagator,
+    )?;
+    direct.resolve_evaluator(DirectExecutorRole::Finalization, evaluator.id)?;
+    let descriptor = direct
+        .intrinsic_descriptor(DirectExecutorRole::Finalization, evaluator.id)
+        .ok_or_else(|| {
+            invalid("massive Dirac propagator has no authenticated intrinsic descriptor")
+        })?;
+    validate_intrinsic_runtime_binding(
+        templates,
+        evaluator,
+        descriptor,
+        "massive Dirac finalization",
+    )?;
+    let (runtime_template, contract_digest) = match orientation {
+        CurrentOrientation::Particle => (
+            MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+            MASSIVE_DIRAC_PARTICLE_CONTRACT,
+        ),
+        CurrentOrientation::Antiparticle => (
+            MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+            MASSIVE_DIRAC_ANTIPARTICLE_CONTRACT,
+        ),
+        CurrentOrientation::SelfConjugate => {
+            return Err(invalid(
+                "massive Dirac finalization has self-conjugate orientation",
+            ));
+        }
+    };
+    let typed = descriptor
+        .massive_dirac_finalizer()
+        .ok_or_else(|| invalid("massive Dirac finalization has no authenticated typed operands"))?;
+    if descriptor.runtime_template() != runtime_template
+        || descriptor
+            .contract_digest()
+            .is_none_or(|digest| digest.to_string() != contract_digest)
+        || descriptor.scale().is_some()
+        || typed.orientation() != orientation
+    {
+        return Err(invalid(format!(
+            "unsupported massive Dirac finalization primitive {:?}",
+            descriptor.runtime_template()
+        )));
+    }
+    if typed.mass_prepared_parameter_slot() != source_mass_prepared_slot {
+        return Err(invalid(
+            "massive Dirac finalizer mass disagrees with authenticated source ownership",
+        ));
+    }
+    if propagator.mass_parameter_id != MISSING_U32 {
+        let propagator_mass = prepared_real_parameter_slot(
+            templates,
+            propagator.mass_parameter_id,
+            "massive Dirac propagator mass",
+        )?;
+        if propagator.mass_parameter_id != state.mass_parameter_id
+            || propagator_mass != typed.mass_prepared_parameter_slot()
+        {
+            return Err(invalid(
+                "massive Dirac propagator mass disagrees with state/finalizer ownership",
+            ));
+        }
+    }
+    let width_owner = prepared_real_parameter_owner(
+        templates,
+        typed.width_prepared_parameter_slot(),
+        "massive Dirac finalizer width",
+    )?;
+    if propagator.width_parameter_id != MISSING_U32
+        && (propagator.width_parameter_id != width_owner
+            || (state.width_parameter_id != MISSING_U32
+                && propagator.width_parameter_id != state.width_parameter_id))
+    {
+        return Err(invalid(
+            "massive Dirac propagator width disagrees with state/finalizer ownership",
+        ));
+    }
+    Ok(typed)
+}
+
 fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> RusticolResult<()> {
     direct.resolve_identity_finalizer()?;
     let descriptor = direct
@@ -682,6 +1224,7 @@ fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> Rustico
     if descriptor.runtime_template() != IDENTITY_FINALIZER
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
     {
         return Err(invalid(
             "authenticated identity-finalizer descriptor is malformed",
@@ -729,6 +1272,9 @@ fn qcd_finalization_scale(
         .intrinsic_descriptor(DirectExecutorRole::Finalization, evaluator.id)
         .ok_or_else(|| invalid("QCD propagator has no authenticated intrinsic descriptor"))?;
     let (runtime_template, contract_digest, negate) = match state {
+        QcdStateKind::Scalar => {
+            return Err(invalid("a scalar insertion cannot have a QCD finalizer"));
+        }
         QcdStateKind::Vector => (
             VECTOR_PROPAGATOR_TEMPLATE,
             VECTOR_PROPAGATOR_CONTRACT,
@@ -747,6 +1293,11 @@ fn qcd_finalization_scale(
             chirality: SpinorChirality::Negative,
             ..
         } => (WEYL_PROPAGATOR_A_TEMPLATE, WEYL_PROPAGATOR_A_CONTRACT, true),
+        QcdStateKind::Dirac { .. } => {
+            return Err(invalid(
+                "massive Dirac finalization must use its typed operand contract",
+            ));
+        }
     };
     if descriptor.runtime_template() != runtime_template
         || descriptor
@@ -755,6 +1306,7 @@ fn qcd_finalization_scale(
         || descriptor
             .scale()
             .is_none_or(|scale| scale.prepared_parameter_slot().is_some())
+        || descriptor.massive_dirac_finalizer().is_some()
     {
         return Err(invalid(format!(
             "unsupported QCD finalization primitive {:?}",
@@ -850,7 +1402,8 @@ fn qcd_contribution_contract<'a>(
     validate_intrinsic_runtime_binding(templates, evaluator, descriptor, "QCD contribution")?;
     let kind = qcd_contribution_kind(descriptor)?;
     validate_transition_parameter_owner(templates, transition, descriptor)?;
-    let (_, permutation) = direct.resolve_contribution(evaluator.id)?;
+    direct.resolve_contribution(evaluator.id)?;
+    let permutation = descriptor.parent_permutation();
     let semantic = [*semantic_left, *semantic_right];
     let parents = match permutation {
         [0, 1] => semantic,
@@ -872,6 +1425,7 @@ fn lower_qcd_current(
     templates: &ValidatedRecurrenceTemplateInput,
     direct: &PreparedDirectExecutorCatalog,
     dense_parameter_slots: &BTreeMap<u32, u16>,
+    dirac_mass_prepared_slot: Option<u32>,
     representative_signs: &[i32],
     current_values: &[Option<QcdCurrent>],
     builder: &mut SpinorDagBuilder,
@@ -887,6 +1441,9 @@ fn lower_qcd_current(
     }
     let finalization = qcd_optional_finalization(current, program)?;
     match state {
+        QcdStateKind::Scalar => Err(invalid(
+            "the mixed QCD slice supports scalar insertions only as authenticated sources",
+        )),
         QcdStateKind::Vector => {
             let mut terms = Vec::new();
             for contribution in &program.contributions()[range] {
@@ -896,7 +1453,7 @@ fn lower_qcd_current(
                 let (kind, parents, descriptor) =
                     qcd_contribution_contract(contribution, program, templates, direct)?;
                 let scale = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
-                let exact = builder.constant(contribution.exact_factor())?;
+                let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let (numerator, scale) = match kind {
                     QcdContributionKind::ThreeVector => {
                         let left = required_qcd_vector(current_values, parents[0])?;
@@ -1003,7 +1560,7 @@ fn lower_qcd_current(
                 let right = required_qcd_vector(current_values, parents[1])?;
                 let wedge = bivector_wedge_expression(builder, left, right);
                 let intrinsic = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
-                let exact = builder.constant(contribution.exact_factor())?;
+                let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let scale = builder.product([intrinsic, exact])?;
                 // n_V*n_V/n_B = sqrt(2)^2/2 = 1.
                 terms.push(bivector_scale(builder, scale, &wedge)?);
@@ -1088,7 +1645,7 @@ fn lower_qcd_current(
                 )?;
                 let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                 let scale = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
-                let exact = builder.constant(contribution.exact_factor())?;
+                let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let scale = builder.product([sqrt_two, scale, exact])?;
                 terms.push(linear_weyl_scale(builder, scale, &numerator)?);
             }
@@ -1109,6 +1666,122 @@ fn lower_qcd_current(
                 value: Some(linear_weyl_scale(builder, scale, &numerator)?),
             })
         }
+        QcdStateKind::Dirac { orientation } => {
+            let mut terms = Vec::new();
+            for contribution in &program.contributions()[range] {
+                if contribution.result_current_id() != current.id() {
+                    return Err(invalid("Dirac contribution belongs to the wrong current"));
+                }
+                let (kind, parents, descriptor) =
+                    qcd_contribution_contract(contribution, program, templates, direct)?;
+                let (parent_orientation, parent) = required_qcd_dirac(current_values, parents[0])?;
+                if parent_orientation != orientation {
+                    return Err(invalid(
+                        "massive Dirac contribution changes line orientation",
+                    ));
+                }
+                let intrinsic = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
+                let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
+                let (numerator, scale) = match kind {
+                    QcdContributionKind::DiracVector(certified_orientation) => {
+                        if certified_orientation != orientation {
+                            return Err(invalid(
+                                "massive Dirac vector primitive has the wrong orientation",
+                            ));
+                        }
+                        let vector = required_qcd_vector(current_values, parents[1])?;
+                        let numerator = dirac_vector_expression(builder, parent, vector)?;
+                        // Sparse vectors represent V/sqrt(2), whereas the
+                        // authenticated component primitive consumes V.
+                        let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
+                        (numerator, builder.product([sqrt_two, intrinsic, exact])?)
+                    }
+                    QcdContributionKind::DiracScalar => {
+                        let scalar = required_qcd_scalar(current_values, parents[1])?;
+                        (
+                            dirac_scalar_expression(builder, parent, scalar)?,
+                            builder.product([intrinsic, exact])?,
+                        )
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "massive Dirac current uses a primitive with the wrong result type",
+                        ));
+                    }
+                };
+                terms.push(dirac_scale(builder, scale, &numerator)?);
+            }
+            let numerator = dirac_sum(builder, terms)?;
+            if finalization
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_some()
+            {
+                let source_mass = dirac_mass_prepared_slot.ok_or_else(|| {
+                    invalid("massive Dirac current has no authenticated source-mass owner")
+                })?;
+                let typed = qcd_massive_finalizer_contract(
+                    current,
+                    orientation,
+                    program,
+                    templates,
+                    direct,
+                    source_mass,
+                )?;
+                let dense_mass = dense_parameter_slots
+                    .get(&typed.mass_prepared_parameter_slot())
+                    .copied()
+                    .ok_or_else(|| invalid("massive Dirac mass has no graph binding"))?;
+                let dense_width = dense_parameter_slots
+                    .get(&typed.width_prepared_parameter_slot())
+                    .copied()
+                    .ok_or_else(|| invalid("massive Dirac width has no graph binding"))?;
+                let mass = builder.parameter(dense_mass)?;
+                let width = builder.parameter(dense_width)?;
+                let (momentum, _) = qcd_current_momentum(current, representative_signs, builder)?;
+                // Particle and antiparticle component templates are dual
+                // under the antisymmetric Weyl bilinear. In the raised sparse
+                // representation both authenticated slash numerators use this
+                // same typed action; their distinct descriptors authenticate
+                // that orientation transport.
+                let propagated = dirac_propagator_numerator(builder, &numerator, &momentum, mass)?;
+                let denominator =
+                    massive_dirac_propagator_denominator(builder, &momentum, mass, width)?;
+                let reciprocal = builder.reciprocal(denominator)?;
+                let runtime_scale = builder.constant(exact_binary64_scale(
+                    typed.constant_real_bits(),
+                    typed.constant_imag_bits(),
+                )?)?;
+                let final_exact = builder.constant(
+                    finalization
+                        .ok_or_else(|| invalid("massive Dirac finalization is absent"))?
+                        .exact_factor(),
+                )?;
+                let scale = builder.product([reciprocal, runtime_scale, final_exact])?;
+                Ok(QcdCurrent::Dirac {
+                    orientation,
+                    value: dirac_scale(builder, scale, &propagated)?,
+                })
+            } else {
+                require_identity_finalizer(direct)?;
+                if program.contributions().iter().any(|contribution| {
+                    contribution.result_current_id() > current.id()
+                        && contribution.parent_current_ids().contains(&current.id())
+                }) {
+                    return Err(invalid(
+                        "an identity-finalized Dirac current is reused as a contribution parent",
+                    ));
+                }
+                let exact = builder.constant(
+                    finalization
+                        .map(super::RecurrenceFinalization::exact_factor)
+                        .unwrap_or(ExactComplexRational::ONE),
+                )?;
+                Ok(QcdCurrent::Dirac {
+                    orientation,
+                    value: dirac_scale(builder, exact, &numerator)?,
+                })
+            }
+        }
     }
 }
 
@@ -1120,6 +1793,27 @@ fn required_qcd_vector(
         Some(QcdCurrent::Vector(value)) => Ok(value),
         _ => Err(invalid(format!(
             "parent current {id} is not a lowered vector current"
+        ))),
+    }
+}
+
+fn required_qcd_scalar(values: &[Option<QcdCurrent>], id: u32) -> RusticolResult<u32> {
+    match values.get(id as usize).and_then(Option::as_ref) {
+        Some(QcdCurrent::Scalar(value)) => Ok(*value),
+        _ => Err(invalid(format!(
+            "parent current {id} is not a lowered scalar current"
+        ))),
+    }
+}
+
+fn required_qcd_dirac(
+    values: &[Option<QcdCurrent>],
+    id: u32,
+) -> RusticolResult<(CurrentOrientation, &DiracExpression)> {
+    match values.get(id as usize).and_then(Option::as_ref) {
+        Some(QcdCurrent::Dirac { orientation, value }) => Ok((*orientation, value)),
+        _ => Err(invalid(format!(
+            "parent current {id} is not a lowered massive Dirac current"
         ))),
     }
 }
@@ -1226,6 +1920,7 @@ fn lower_qcd_closures(
         if !descriptor.runtime_template().starts_with(CLOSURE_PREFIX)
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
+            || descriptor.massive_dirac_finalizer().is_some()
         {
             return Err(invalid("QCD closure intrinsic descriptor is malformed"));
         }
@@ -1269,6 +1964,82 @@ fn lower_qcd_closures(
             ))?;
             let exact = builder.constant(closure.exact_factor())?;
             let node = builder.product([two, contraction, exact])?;
+            terms_by_destination
+                .entry(closure.target_destination_id())
+                .or_default()
+                .push(node);
+            continue;
+        }
+        if let (
+            QcdCurrent::Dirac {
+                orientation: left_orientation,
+                value: left_value,
+            },
+            QcdCurrent::Dirac {
+                orientation: right_orientation,
+                value: right_value,
+            },
+        ) = (left, right)
+        {
+            if coefficients.as_slice()
+                != [
+                    ExactComplexRational::ONE,
+                    ExactComplexRational::ONE,
+                    ExactComplexRational::ONE,
+                    ExactComplexRational::ONE,
+                ]
+                || chirality_relation != "any"
+                || metric_signature.is_some()
+                || *left_orientation == *right_orientation
+            {
+                return Err(invalid(
+                    "QCD Dirac closure is not the certified direct particle/antiparticle contraction",
+                ));
+            }
+            let left_current = program
+                .currents()
+                .get(*left_id as usize)
+                .ok_or_else(|| invalid("QCD Dirac closure left current is absent"))?;
+            let right_current = program
+                .currents()
+                .get(*right_id as usize)
+                .ok_or_else(|| invalid("QCD Dirac closure right current is absent"))?;
+            let (terminal, particle, antiparticle) = match (
+                left_current.is_source(),
+                right_current.is_source(),
+                *left_orientation,
+                *right_orientation,
+            ) {
+                (false, true, CurrentOrientation::Particle, CurrentOrientation::Antiparticle) => {
+                    (left_current, left_value, right_value)
+                }
+                (false, true, CurrentOrientation::Antiparticle, CurrentOrientation::Particle) => {
+                    (left_current, right_value, left_value)
+                }
+                (true, false, CurrentOrientation::Particle, CurrentOrientation::Antiparticle) => {
+                    (right_current, left_value, right_value)
+                }
+                (true, false, CurrentOrientation::Antiparticle, CurrentOrientation::Particle) => {
+                    (right_current, right_value, left_value)
+                }
+                _ => {
+                    return Err(invalid(
+                        "QCD Dirac closure must join one terminal line current to its opposite-orientation source",
+                    ));
+                }
+            };
+            if qcd_optional_finalization(terminal, program)?
+                .and_then(|finalization| finalization.propagator_template_id())
+                .is_some()
+            {
+                return Err(invalid(
+                    "terminal QCD Dirac current is unexpectedly propagated",
+                ));
+            }
+            let contraction = dirac_bilinear(builder, particle, antiparticle)?;
+            let exact = builder.constant(closure.exact_factor())?;
+            let node = builder.product([contraction, exact])?;
+            let _ = qcd_current_momentum(terminal, representative_signs, builder)?;
             terms_by_destination
                 .entry(closure.target_destination_id())
                 .or_default()
@@ -1391,7 +2162,7 @@ fn lower_qcd_closures(
             let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
             let intrinsic =
                 intrinsic_scale_node(contribution_descriptor, dense_parameter_slots, builder)?;
-            let exact = builder.constant(contribution.exact_factor())?;
+            let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
             terminal_terms.push(builder.product([
                 imaginary_unit,
                 sqrt_two,
@@ -1871,6 +2642,7 @@ fn validate_identity_finalizations(
     if descriptor.runtime_template() != IDENTITY_FINALIZER
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
     {
         return Err(invalid("scalar identity-finalizer descriptor is malformed"));
     }
@@ -2040,7 +2812,10 @@ fn lower_scalar_contribution(
             .ok_or_else(|| invalid("prepared parameter has no dense graph binding"))?;
         factors.push(builder.parameter(dense)?);
     }
-    factors.push(builder.constant(contribution.exact_factor())?);
+    factors.push(builder.constant(normalized_contribution_exact_factor(
+        contribution,
+        templates,
+    )?)?);
     builder.product(factors)
 }
 
@@ -2149,11 +2924,12 @@ fn validate_transition_parameter_owner(
         transition.coupling_parameter_sequence_id,
         "transition coupling parameters",
     )?;
+    let output_factor_source = OutputFactorSource::try_from(transition.output_factor_source)?;
     match descriptor
         .scale()
         .and_then(|scale| scale.prepared_parameter_slot())
     {
-        None if parameters.is_empty() => Ok(()),
+        None if parameters.is_empty() && output_factor_source == OutputFactorSource::None => Ok(()),
         Some(prepared_slot) if parameters.len() == 1 => {
             let template_id = parameters[0];
             let parameter = templates
@@ -2161,15 +2937,57 @@ fn validate_transition_parameter_owner(
                 .parameters
                 .get(template_id as usize)
                 .ok_or_else(|| invalid("transition parameter template is absent"))?;
-            if parameter.id != template_id
-                || parameter.prepared_parameter_id != prepared_slot
-                || ParameterValueType::try_from(parameter.value_type)?
-                    != ParameterValueType::Complex
-            {
+            if parameter.id != template_id || parameter.prepared_parameter_id != prepared_slot {
                 return Err(invalid(format!(
-                    "transition {} does not own authenticated complex prepared slot {prepared_slot}",
+                    "transition {} does not own authenticated prepared slot {prepared_slot}",
                     transition.id
                 )));
+            }
+            match output_factor_source {
+                OutputFactorSource::None => {
+                    if ParameterValueType::try_from(parameter.value_type)?
+                        != ParameterValueType::Complex
+                    {
+                        return Err(invalid(format!(
+                            "transition {} model-parameter scale is not complex",
+                            transition.id
+                        )));
+                    }
+                }
+                OutputFactorSource::CouplingReal | OutputFactorSource::CouplingImag => {
+                    if ParameterValueType::try_from(parameter.value_type)?
+                        != ParameterValueType::Real
+                        || ParameterKind::try_from(parameter.kind)? != ParameterKind::External
+                        || parameter.mutable != 1
+                    {
+                        return Err(invalid(format!(
+                            "transition {} output-factor component is not one mutable external real parameter",
+                            transition.id
+                        )));
+                    }
+                    let binding = template_exact_factor(
+                        templates,
+                        transition.binding_coupling_factor_id,
+                        "transition binding coupling",
+                    )?;
+                    let component = match output_factor_source {
+                        OutputFactorSource::CouplingReal => binding.real(),
+                        OutputFactorSource::CouplingImag => binding.imag(),
+                        OutputFactorSource::None => unreachable!(),
+                    };
+                    if component == ExactRational::ZERO
+                        || template_exact_factor(
+                            templates,
+                            parameter.default_factor_id,
+                            "output-factor parameter default",
+                        )? != ExactComplexRational::new(component, ExactRational::ZERO)
+                    {
+                        return Err(invalid(format!(
+                            "transition {} output-factor parameter default disagrees with its authenticated binding component",
+                            transition.id
+                        )));
+                    }
+                }
             }
             Ok(())
         }
@@ -2178,6 +2996,72 @@ fn validate_transition_parameter_owner(
             transition.id
         ))),
     }
+}
+
+fn normalized_contribution_exact_factor(
+    contribution: &super::RecurrenceContribution,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<ExactComplexRational> {
+    let transition = transition_row(templates, contribution.key().transition_template_id())?;
+    let binding = template_exact_factor(
+        templates,
+        transition.binding_coupling_factor_id,
+        "transition binding coupling",
+    )?;
+    let component = match OutputFactorSource::try_from(transition.output_factor_source)? {
+        OutputFactorSource::None => return Ok(contribution.exact_factor()),
+        OutputFactorSource::CouplingReal => binding.real(),
+        OutputFactorSource::CouplingImag => binding.imag(),
+    };
+    contribution
+        .exact_factor()
+        .checked_div(ExactComplexRational::new(component, ExactRational::ZERO))
+}
+
+fn qcd_contribution_exact_node(
+    contribution: &super::RecurrenceContribution,
+    templates: &ValidatedRecurrenceTemplateInput,
+    builder: &mut SpinorDagBuilder,
+) -> RusticolResult<u32> {
+    builder.constant(normalized_contribution_exact_factor(
+        contribution,
+        templates,
+    )?)
+}
+
+fn template_exact_factor(
+    templates: &ValidatedRecurrenceTemplateInput,
+    factor_id: u32,
+    label: &str,
+) -> RusticolResult<ExactComplexRational> {
+    if factor_id == MISSING_U32 {
+        return Err(invalid(format!("{label} is missing")));
+    }
+    let factor = templates
+        .input()
+        .exact_factors
+        .get(factor_id as usize)
+        .ok_or_else(|| invalid(format!("{label} factor {factor_id} is absent")))?;
+    if factor.id != factor_id {
+        return Err(invalid(format!(
+            "{label} factor {factor_id} has a noncanonical ID"
+        )));
+    }
+    let parse = |string_id, part: &str| -> RusticolResult<i128> {
+        template_string(templates, string_id, &format!("{label} {part}"))?
+            .parse::<i128>()
+            .map_err(|error| invalid(format!("{label} {part} is not an exact integer: {error}")))
+    };
+    Ok(ExactComplexRational::new(
+        ExactRational::new(
+            parse(factor.real_numerator_string_id, "real numerator")?,
+            parse(factor.real_denominator_string_id, "real denominator")?,
+        )?,
+        ExactRational::new(
+            parse(factor.imag_numerator_string_id, "imaginary numerator")?,
+            parse(factor.imag_denominator_string_id, "imaginary denominator")?,
+        )?,
+    ))
 }
 
 fn require_scalar_product_descriptor(

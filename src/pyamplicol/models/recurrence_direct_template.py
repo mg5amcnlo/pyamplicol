@@ -22,7 +22,16 @@ from .._internal.versions import (
     SYMJIT_PLANE_APPLICATION_ABI,
 )
 from .recurrence_direct_intrinsics import (
+    DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+    DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+    DIRAC_VECTOR_PARTICLE_TEMPLATE,
+    MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+    MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    MASSIVE_DIRAC_RUNTIME_SCALE_BITS,
+    RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
+    RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
+    RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
     certify_recurrence_contribution_intrinsic,
@@ -76,6 +85,26 @@ _NATIVE_SOURCE_APPLICATION_ABIS = frozenset(
         "symbolica.compiled-asm.complex-f64.v1",
     }
 )
+_PREPARED_GRAPH_CONTRIBUTION_TEMPLATES = frozenset(
+    {
+        DIRAC_SCALAR_TO_DIRAC_TEMPLATE,
+        DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE,
+        DIRAC_VECTOR_PARTICLE_TEMPLATE,
+    }
+)
+_PREPARED_GRAPH_FINALIZATION_TEMPLATES = frozenset(
+    {
+        MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+        MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    }
+)
+
+
+class _UncertifiableOutputFactor:
+    pass
+
+
+_UNCERTIFIABLE_OUTPUT_FACTOR = _UncertifiableOutputFactor()
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -122,6 +151,13 @@ def _require_nonnegative_int(name: str, value: object) -> int:
     if type(value) is not int or value < 0:
         raise RecurrenceDirectTemplateError(f"{name} must be a nonnegative integer")
     return value
+
+
+def _require_f64_bits(name: str, value: object) -> int:
+    result = _require_nonnegative_int(name, value)
+    if result >= 1 << 64:
+        raise RecurrenceDirectTemplateError(f"{name} must encode one binary64 value")
+    return result
 
 
 def _require_positive_int(name: str, value: object) -> int:
@@ -186,6 +222,107 @@ def _require_canonical_object_tuple(name: str, value: object) -> tuple[str, ...]
     return strings
 
 
+def _validate_massive_dirac_finalizer_projection(
+    projection: Mapping[str, object],
+    *,
+    runtime_template: str,
+    contract_digest: str,
+) -> None:
+    expected_fields = {
+        "constant_imag_bits",
+        "constant_real_bits",
+        "kind",
+        "mass_parameter_index",
+        "orientation",
+        "width_parameter_index",
+    }
+    if set(projection) != expected_fields:
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac finalizer projection has unsupported fields"
+        )
+    orientation = projection.get("orientation")
+    expected_templates = {
+        "particle": MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+        "antiparticle": MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
+    }
+    if orientation not in expected_templates:
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac finalizer projection has an unsupported orientation"
+        )
+    mass_index = _require_nonnegative_int(
+        "massive Dirac mass parameter index",
+        projection.get("mass_parameter_index"),
+    )
+    width_index = _require_nonnegative_int(
+        "massive Dirac width parameter index",
+        projection.get("width_parameter_index"),
+    )
+    if mass_index == width_index:
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac mass and width parameter indices must be distinct"
+        )
+    scale_bits = (
+        _require_f64_bits(
+            "massive Dirac real scale bits",
+            projection.get("constant_real_bits"),
+        ),
+        _require_f64_bits(
+            "massive Dirac imaginary scale bits",
+            projection.get("constant_imag_bits"),
+        ),
+    )
+    if scale_bits != MASSIVE_DIRAC_RUNTIME_SCALE_BITS:
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac finalizer must retain the certified +i scale"
+        )
+    expected_template = expected_templates[orientation]
+    if runtime_template != expected_template:
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac finalizer orientation disagrees with its runtime template"
+        )
+    if (
+        RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS.get(runtime_template)
+        != contract_digest
+    ):
+        raise RecurrenceDirectTemplateError(
+            "massive Dirac finalizer contract digest is not authenticated"
+        )
+
+
+def _validate_intrinsic_scale_projection(
+    projection: Mapping[str, object],
+    *,
+    allow_parameter: bool,
+) -> None:
+    if set(projection) != {
+        "constant_imag_bits",
+        "constant_real_bits",
+        "kind",
+        "parameter_index",
+    }:
+        raise RecurrenceDirectTemplateError(
+            "intrinsic scale projection has unsupported fields"
+        )
+    _require_f64_bits(
+        "intrinsic real scale bits",
+        projection.get("constant_real_bits"),
+    )
+    _require_f64_bits(
+        "intrinsic imaginary scale bits",
+        projection.get("constant_imag_bits"),
+    )
+    parameter_index = projection.get("parameter_index")
+    if parameter_index is not None:
+        _require_nonnegative_int(
+            "intrinsic scale parameter index",
+            parameter_index,
+        )
+        if not allow_parameter:
+            raise RecurrenceDirectTemplateError(
+                "finalization intrinsic scale has an unsupported projection"
+            )
+
+
 def _require_empty_prepared_call_metadata(
     binding: RecurrenceDirectPayloadBindingV1,
 ) -> None:
@@ -193,6 +330,7 @@ def _require_empty_prepared_call_metadata(
         "destination_operation": binding.destination_operation,
         "direct_application_abi": binding.direct_application_abi,
         "exact_factor_scalar_slots": binding.exact_factor_scalar_slots,
+        "graph_intrinsic": binding.graph_intrinsic,
         "input_plane_count": binding.input_plane_count,
         "input_plane_projections": binding.input_plane_projections,
         "native_entry_point": binding.native_entry_point,
@@ -212,6 +350,125 @@ def _require_empty_prepared_call_metadata(
     if any(value not in (None, (), 0) for value in fields.values()):
         raise RecurrenceDirectTemplateError(
             "non-executable direct bindings cannot carry prepared-call metadata"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RecurrenceDirectGraphIntrinsicV1:
+    """One exact graph-lowering primitive beside a prepared component call."""
+
+    runtime_template: str
+    contract_digest: str
+    scalar_projection: str
+    contribution_parent_permutation: tuple[int, int] = (0, 1)
+
+    def __post_init__(self) -> None:
+        _require_nonempty(
+            "graph intrinsic runtime template",
+            self.runtime_template,
+        )
+        _require_sha256(
+            "graph intrinsic contract digest",
+            self.contract_digest,
+        )
+        _require_canonical_object_tuple(
+            "graph intrinsic scalar projection",
+            (self.scalar_projection,),
+        )
+        permutation = _require_int_tuple(
+            "graph intrinsic contribution parent permutation",
+            self.contribution_parent_permutation,
+        )
+        if permutation not in {(0, 1), (1, 0)}:
+            raise RecurrenceDirectTemplateError(
+                "graph intrinsic contribution parent permutation must be "
+                "(0, 1) or (1, 0)"
+            )
+
+    @property
+    def projection(self) -> Mapping[str, object]:
+        value = json.loads(self.scalar_projection)
+        assert isinstance(value, Mapping)
+        return value
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "contract_digest": self.contract_digest,
+            "contribution_parent_permutation": list(
+                self.contribution_parent_permutation
+            ),
+            "runtime_template": self.runtime_template,
+            "scalar_projection": dict(self.projection),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> RecurrenceDirectGraphIntrinsicV1:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "contract_digest",
+            "contribution_parent_permutation",
+            "runtime_template",
+            "scalar_projection",
+        }:
+            raise RecurrenceDirectTemplateError(
+                "graph intrinsic fields do not match its canonical contract"
+            )
+        permutation = payload["contribution_parent_permutation"]
+        projection = payload["scalar_projection"]
+        if not isinstance(permutation, list) or not isinstance(projection, Mapping):
+            raise RecurrenceDirectTemplateError(
+                "graph intrinsic permutation/projection has the wrong JSON shape"
+            )
+        return cls(
+            runtime_template=payload["runtime_template"],  # type: ignore[arg-type]
+            contract_digest=payload["contract_digest"],  # type: ignore[arg-type]
+            scalar_projection=_canonical_json(projection),
+            contribution_parent_permutation=tuple(permutation),  # type: ignore[arg-type]
+        )
+
+
+def _validate_graph_intrinsic_for_role(
+    intrinsic: RecurrenceDirectGraphIntrinsicV1,
+    *,
+    role: DirectRole | None,
+) -> None:
+    projection = intrinsic.projection
+    if role == "contribution":
+        if projection.get("kind") != RECURRENCE_INTRINSIC_SCALE_KIND:
+            raise RecurrenceDirectTemplateError(
+                "contribution graph intrinsic has an unsupported projection"
+            )
+        _validate_intrinsic_scale_projection(projection, allow_parameter=True)
+        expected_digest = RECURRENCE_INTRINSIC_CONTRACT_DIGESTS.get(
+            intrinsic.runtime_template
+        )
+    elif role == "finalization":
+        if intrinsic.contribution_parent_permutation != (0, 1):
+            raise RecurrenceDirectTemplateError(
+                "finalization graph intrinsic requires the identity parent permutation"
+            )
+        projection_kind = projection.get("kind")
+        if projection_kind == RECURRENCE_INTRINSIC_SCALE_KIND:
+            _validate_intrinsic_scale_projection(projection, allow_parameter=False)
+        elif projection_kind == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND:
+            _validate_massive_dirac_finalizer_projection(
+                projection,
+                runtime_template=intrinsic.runtime_template,
+                contract_digest=intrinsic.contract_digest,
+            )
+        else:
+            raise RecurrenceDirectTemplateError(
+                "finalization graph intrinsic has an unsupported projection"
+            )
+        expected_digest = RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS.get(
+            intrinsic.runtime_template
+        )
+    else:
+        raise RecurrenceDirectTemplateError(
+            "only contribution/finalization calls may carry a graph intrinsic"
+        )
+    if expected_digest != intrinsic.contract_digest:
+        raise RecurrenceDirectTemplateError(
+            "graph intrinsic contract digest is not authenticated"
         )
 
 
@@ -242,6 +499,7 @@ class RecurrenceDirectPayloadBindingV1:
     intrinsic_contract_digest: str | None = None
     prepared_template_semantic_digest: str | None = None
     contribution_parent_permutation: tuple[int, int] = (0, 1)
+    graph_intrinsic: RecurrenceDirectGraphIntrinsicV1 | None = None
     abi: str = RECURRENCE_DIRECT_PAYLOAD_BINDING_ABI
 
     def __post_init__(self) -> None:
@@ -291,6 +549,10 @@ class RecurrenceDirectPayloadBindingV1:
             "direct scalar-input count", self.scalar_input_count
         )
         if self.kind == "rusticol-intrinsic":
+            if self.graph_intrinsic is not None:
+                raise RecurrenceDirectTemplateError(
+                    "primary Rusticol intrinsics cannot carry graph side metadata"
+                )
             if self.prepared_kernel_id is not None or not self.runtime_template:
                 raise RecurrenceDirectTemplateError(
                     "Rusticol direct intrinsics require a runtime template and "
@@ -315,6 +577,10 @@ class RecurrenceDirectPayloadBindingV1:
                     raise RecurrenceDirectTemplateError(
                         "contribution intrinsic scale has an unsupported kind"
                     )
+                _validate_intrinsic_scale_projection(
+                    projection,
+                    allow_parameter=True,
+                )
                 _require_sha256(
                     "intrinsic contract digest", self.intrinsic_contract_digest
                 )
@@ -364,14 +630,22 @@ class RecurrenceDirectPayloadBindingV1:
                     or self.intrinsic_contract_digest is None
                 ):
                     raise RecurrenceDirectTemplateError(
-                        "finalization intrinsics require one authenticated "
-                        "runtime-owned scale"
+                        "finalization intrinsics require one authenticated projection"
                     )
                 projection = json.loads(scalar_projections[0])
-                if (
-                    projection.get("kind") != RECURRENCE_INTRINSIC_SCALE_KIND
-                    or projection.get("parameter_index") is not None
-                ):
+                projection_kind = projection.get("kind")
+                if projection_kind == RECURRENCE_INTRINSIC_SCALE_KIND:
+                    _validate_intrinsic_scale_projection(
+                        projection,
+                        allow_parameter=False,
+                    )
+                elif projection_kind == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND:
+                    _validate_massive_dirac_finalizer_projection(
+                        projection,
+                        runtime_template=self.runtime_template,
+                        contract_digest=self.intrinsic_contract_digest,
+                    )
+                else:
                     raise RecurrenceDirectTemplateError(
                         "finalization intrinsic scale has an unsupported projection"
                     )
@@ -453,6 +727,18 @@ class RecurrenceDirectPayloadBindingV1:
             if self.kind == "pending-direct-call-abi":
                 _require_empty_prepared_call_metadata(self)
             else:
+                if self.graph_intrinsic is not None:
+                    if not isinstance(
+                        self.graph_intrinsic,
+                        RecurrenceDirectGraphIntrinsicV1,
+                    ):
+                        raise RecurrenceDirectTemplateError(
+                            "prepared graph intrinsic has the wrong data-model type"
+                        )
+                    _validate_graph_intrinsic_for_role(
+                        self.graph_intrinsic,
+                        role=self.role,
+                    )
                 source_path = _require_nonempty(
                     "direct source application path", self.source_application_path
                 )
@@ -552,6 +838,11 @@ class RecurrenceDirectPayloadBindingV1:
             "destination_operation": self.destination_operation,
             "direct_application_abi": self.direct_application_abi,
             "exact_factor_scalar_slots": list(self.exact_factor_scalar_slots),
+            "graph_intrinsic": (
+                self.graph_intrinsic.to_dict()
+                if self.graph_intrinsic is not None
+                else None
+            ),
             "input_plane_count": self.input_plane_count,
             "input_plane_projections": _decode_canonical_objects(
                 self.input_plane_projections
@@ -592,6 +883,7 @@ class RecurrenceDirectPayloadBindingV1:
             "destination_operation",
             "direct_application_abi",
             "exact_factor_scalar_slots",
+            "graph_intrinsic",
             "input_plane_count",
             "input_plane_projections",
             "intrinsic_contract_digest",
@@ -667,6 +959,11 @@ class RecurrenceDirectPayloadBindingV1:
                 payload["input_plane_projections"]  # type: ignore[arg-type]
             ),
             intrinsic_contract_digest=payload["intrinsic_contract_digest"],  # type: ignore[arg-type]
+            graph_intrinsic=(
+                RecurrenceDirectGraphIntrinsicV1.from_dict(payload["graph_intrinsic"])
+                if payload["graph_intrinsic"] is not None
+                else None
+            ),
             scalar_projections=_encode_canonical_objects(
                 payload["scalar_projections"]  # type: ignore[arg-type]
             ),
@@ -1557,6 +1854,9 @@ def build_recurrence_direct_template_catalog(
         )
         for record in records
     }
+    parameter_records = {
+        record.template_id: record for record in recurrence_catalog.parameters
+    }
     supplied_direct = dict(prepared_direct_payload_bindings or {})
     jit_sources = dict(prepared_jit_sources or {})
     native_sources = dict(prepared_native_sources or {})
@@ -1689,14 +1989,35 @@ def build_recurrence_direct_template_catalog(
                     certified_intrinsic = None
                     finalization_intrinsic = None
                     if role == "contribution":
-                        certified_intrinsic = certify_recurrence_contribution_intrinsic(
-                            exact_expressions=source.exact_expressions,
-                            input_contracts=source.input_contracts,
-                            parent_component_counts=parent_component_counts,
-                            destination_component_count=destination_component_count,
-                            binding_coupling=binding_coupling,
-                            allow_nontrivial_parent_permutation=True,
+                        output_factor_resolution = (
+                            _uniform_output_factor_parameter_index(
+                                binding.semantic_template_ids,
+                                semantic_records,
+                                parameter_records,
+                            )
                         )
+                        if (
+                            output_factor_resolution
+                            is not _UNCERTIFIABLE_OUTPUT_FACTOR
+                        ):
+                            certified_intrinsic = (
+                                certify_recurrence_contribution_intrinsic(
+                                    exact_expressions=source.exact_expressions,
+                                    input_contracts=source.input_contracts,
+                                    parent_component_counts=parent_component_counts,
+                                    destination_component_count=(
+                                        destination_component_count
+                                    ),
+                                    binding_coupling=binding_coupling,
+                                    factored_output_parameter_index=(
+                                        cast(
+                                            int | None,
+                                            output_factor_resolution,
+                                        )
+                                    ),
+                                    allow_nontrivial_parent_permutation=True,
+                                )
+                            )
                     elif role == "finalization":
                         finalization_intrinsic = (
                             certify_recurrence_finalization_intrinsic(
@@ -1705,50 +2026,73 @@ def build_recurrence_direct_template_catalog(
                                 component_count=destination_component_count,
                             )
                         )
-                    if certified_intrinsic is not None:
+                    if (
+                        certified_intrinsic is not None
+                        and certified_intrinsic.runtime_template
+                        not in _PREPARED_GRAPH_CONTRIBUTION_TEMPLATES
+                    ):
                         payload_binding = _build_certified_intrinsic_binding(
                             certified_intrinsic
                         )
-                    elif finalization_intrinsic is not None:
-                        payload_binding = _build_certified_finalization_intrinsic_binding(
-                            finalization_intrinsic
-                        )
-                    elif isinstance(source, PreparedJitDirectSourceV1):
-                        payload_binding = _build_prepared_jit_direct_binding(
-                            source=source,
-                            role=cast(DirectRole, role),
-                            parent_component_counts=parent_component_counts,
-                            destination_component_count=destination_component_count,
-                            binding_coupling=binding_coupling,
-                            prepared_template_semantic_digest=(
-                                _prepared_template_contract_digest(
-                                    candidate,
-                                    backend=backend,
-                                    target_triple=target_triple,
-                                    portable=portable,
-                                    optimization_level=optimization_level,
-                                    alignment_bytes=alignment_bytes,
-                                )
-                            ),
+                    elif (
+                        finalization_intrinsic is not None
+                        and finalization_intrinsic.runtime_template
+                        not in _PREPARED_GRAPH_FINALIZATION_TEMPLATES
+                    ):
+                        payload_binding = (
+                            _build_certified_finalization_intrinsic_binding(
+                                finalization_intrinsic
+                            )
                         )
                     else:
-                        payload_binding = _build_prepared_native_direct_binding(
-                            source=source,
-                            role=cast(DirectRole, role),
-                            parent_component_counts=parent_component_counts,
-                            destination_component_count=destination_component_count,
-                            binding_coupling=binding_coupling,
-                            prepared_template_semantic_digest=(
-                                _prepared_template_contract_digest(
-                                    candidate,
-                                    backend=backend,
-                                    target_triple=target_triple,
-                                    portable=portable,
-                                    optimization_level=optimization_level,
-                                    alignment_bytes=alignment_bytes,
-                                )
-                            ),
+                        certified_graph = (
+                            certified_intrinsic
+                            if certified_intrinsic is not None
+                            else finalization_intrinsic
                         )
+                        graph_intrinsic = (
+                            _build_certified_graph_intrinsic(certified_graph)
+                            if certified_graph is not None
+                            else None
+                        )
+                        prepared_template_semantic_digest = (
+                            _prepared_template_contract_digest(
+                                candidate,
+                                backend=backend,
+                                target_triple=target_triple,
+                                portable=portable,
+                                optimization_level=optimization_level,
+                                alignment_bytes=alignment_bytes,
+                            )
+                        )
+                        if isinstance(source, PreparedJitDirectSourceV1):
+                            payload_binding = _build_prepared_jit_direct_binding(
+                                source=source,
+                                role=cast(DirectRole, role),
+                                parent_component_counts=parent_component_counts,
+                                destination_component_count=(
+                                    destination_component_count
+                                ),
+                                binding_coupling=binding_coupling,
+                                prepared_template_semantic_digest=(
+                                    prepared_template_semantic_digest
+                                ),
+                                graph_intrinsic=graph_intrinsic,
+                            )
+                        else:
+                            payload_binding = _build_prepared_native_direct_binding(
+                                source=source,
+                                role=cast(DirectRole, role),
+                                parent_component_counts=parent_component_counts,
+                                destination_component_count=(
+                                    destination_component_count
+                                ),
+                                binding_coupling=binding_coupling,
+                                prepared_template_semantic_digest=(
+                                    prepared_template_semantic_digest
+                                ),
+                                graph_intrinsic=graph_intrinsic,
+                            )
             if payload_binding is None:
                 payload_binding = RecurrenceDirectPayloadBindingV1(
                     kind="pending-direct-call-abi",
@@ -1925,6 +2269,7 @@ def _build_prepared_jit_direct_binding(
     destination_component_count: int,
     binding_coupling: ExactComplexRationalV1 | None,
     prepared_template_semantic_digest: str,
+    graph_intrinsic: RecurrenceDirectGraphIntrinsicV1 | None = None,
 ) -> RecurrenceDirectPayloadBindingV1:
     if role == "source":
         raise RecurrenceDirectTemplateError(
@@ -2052,6 +2397,9 @@ def _build_prepared_jit_direct_binding(
         "destination_operation": _DESTINATION_OPERATIONS[role],
         "direct_application_abi": SYMJIT_DIRECT_APPLICATION_ABI,
         "exact_factor_scalar_slots": [0, 1],
+        "graph_intrinsic": (
+            graph_intrinsic.to_dict() if graph_intrinsic is not None else None
+        ),
         "input_plane_count": len(input_plane_projections),
         "input_plane_projections": input_plane_projections,
         "intrinsic_contract_digest": None,
@@ -2084,6 +2432,7 @@ def _build_prepared_jit_direct_binding(
             DirectDestinationOperation, _DESTINATION_OPERATIONS[role]
         ),
         exact_factor_scalar_slots=(0, 1),
+        graph_intrinsic=graph_intrinsic,
         state_plane_indices=(),
         parameter_bindings=_encode_canonical_objects(parameter_bindings),
         input_plane_count=len(input_plane_projections),
@@ -2103,6 +2452,7 @@ def _build_prepared_native_direct_binding(
     destination_component_count: int,
     binding_coupling: ExactComplexRationalV1 | None,
     prepared_template_semantic_digest: str,
+    graph_intrinsic: RecurrenceDirectGraphIntrinsicV1 | None = None,
 ) -> RecurrenceDirectPayloadBindingV1:
     """Bind one native export while authenticating JIT-equivalent projections."""
 
@@ -2135,6 +2485,7 @@ def _build_prepared_native_direct_binding(
         destination_component_count=destination_component_count,
         binding_coupling=binding_coupling,
         prepared_template_semantic_digest=prepared_template_semantic_digest,
+        graph_intrinsic=graph_intrinsic,
     )
     metadata = projected._prepared_call_fields(include_payload_digest=False)
     metadata["direct_application_abi"] = NATIVE_DIRECT_APPLICATION_ABI
@@ -2180,6 +2531,30 @@ def _build_certified_intrinsic_binding(
         scalar_projections=_encode_canonical_objects((scale,)),
         intrinsic_contract_digest=contract_digest,
         contribution_parent_permutation=certified.parent_permutation,
+    )
+
+
+def _build_certified_graph_intrinsic(
+    certified: (
+        CertifiedRecurrenceIntrinsic | CertifiedRecurrenceFinalizationIntrinsic
+    ),
+) -> RecurrenceDirectGraphIntrinsicV1:
+    parent_permutation = (
+        certified.parent_permutation
+        if isinstance(certified, CertifiedRecurrenceIntrinsic)
+        else (0, 1)
+    )
+    return RecurrenceDirectGraphIntrinsicV1(
+        runtime_template=_require_nonempty(
+            "certified graph intrinsic runtime template",
+            certified.runtime_template,
+        ),
+        contract_digest=_require_sha256(
+            "certified graph intrinsic contract digest",
+            certified.contract_digest,
+        ),
+        scalar_projection=_canonical_json(certified.scale_projection()),
+        contribution_parent_permutation=parent_permutation,
     )
 
 
@@ -2284,6 +2659,95 @@ def _uniform_binding_coupling(
     return next(iter(couplings))
 
 
+def _uniform_output_factor_parameter_index(
+    semantic_template_ids: Sequence[str],
+    semantic_records: Mapping[str, object],
+    parameter_records: Mapping[str, object],
+) -> int | _UncertifiableOutputFactor | None:
+    """Resolve one factored coupling component through semantic ownership.
+
+    ``None`` means there is no output factor, an integer is its unique prepared
+    owner, and the private sentinel means retained kernel parameters make that
+    owner ambiguous.  Only the last case skips graph certification; malformed
+    or conflicting semantic records still fail catalog construction.
+    """
+
+    records: list[object] = []
+    for template_id in semantic_template_ids:
+        record = semantic_records.get(template_id)
+        if record is None:
+            raise RecurrenceDirectTemplateError(
+                f"direct contribution semantic template {template_id!r} is absent"
+            )
+        records.append(record)
+    factor_sources = {
+        getattr(record, "output_factor_source", None) for record in records
+    }
+    if factor_sources == {"none"}:
+        return None
+    if len(factor_sources) != 1 or not factor_sources.issubset(
+        {"coupling-real", "coupling-imag"}
+    ):
+        raise RecurrenceDirectTemplateError(
+            "one direct evaluator binding has conflicting output-factor sources"
+        )
+    factor_source = next(iter(factor_sources))
+    parameter_id_sets = {
+        tuple(getattr(record, "coupling_parameter_ids", ())) for record in records
+    }
+    if len(parameter_id_sets) != 1:
+        raise RecurrenceDirectTemplateError(
+            "one factored direct evaluator binding has conflicting coupling owners"
+        )
+    (parameter_ids,) = parameter_id_sets
+    if not parameter_ids:
+        raise RecurrenceDirectTemplateError(
+            "a factored direct evaluator binding has no coupling parameter owner"
+        )
+    binding_couplings = {
+        getattr(record, "binding_coupling", None) for record in records
+    }
+    if len(binding_couplings) != 1:
+        raise RecurrenceDirectTemplateError(
+            "one factored direct evaluator binding has conflicting default couplings"
+        )
+    binding_coupling = next(iter(binding_couplings))
+    if not isinstance(binding_coupling, ExactComplexRationalV1):
+        raise RecurrenceDirectTemplateError(
+            "factored direct intrinsic has no exact default coupling"
+        )
+    if len(parameter_ids) > 1:
+        return _UNCERTIFIABLE_OUTPUT_FACTOR
+    parameter_id = parameter_ids[0]
+    parameter = parameter_records.get(parameter_id)
+    if parameter is None:
+        raise RecurrenceDirectTemplateError(
+            "factored direct intrinsic coupling parameter is absent"
+        )
+    prepared_parameter_id = getattr(parameter, "prepared_parameter_id", None)
+    if (
+        type(prepared_parameter_id) is not int
+        or prepared_parameter_id < 0
+        or getattr(parameter, "parameter_kind", None) != "external"
+        or getattr(parameter, "value_type", None) != "real"
+        or getattr(parameter, "mutable", None) is not True
+    ):
+        raise RecurrenceDirectTemplateError(
+            "factored direct intrinsic coupling owner is not one mutable real "
+            "prepared parameter"
+        )
+    expected_default = ExactComplexRationalV1.from_fractions(
+        binding_coupling.real
+        if factor_source == "coupling-real"
+        else binding_coupling.imag
+    )
+    if getattr(parameter, "default_value", None) != expected_default:
+        raise RecurrenceDirectTemplateError(
+            "factored direct intrinsic coupling default disagrees with its binding"
+        )
+    return prepared_parameter_id
+
+
 def _slot_counts(
     semantic_template_ids: Sequence[str],
     semantic_records: Mapping[str, object],
@@ -2386,6 +2850,7 @@ __all__ = [
     "PreparedJitDirectSourceV1",
     "PreparedNativeDirectCallableSpecV1",
     "PreparedNativeDirectSourceV1",
+    "RecurrenceDirectGraphIntrinsicV1",
     "RecurrenceDirectPayloadBindingV1",
     "RecurrenceDirectTemplateCatalogV1",
     "RecurrenceDirectTemplateError",

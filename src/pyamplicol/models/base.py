@@ -64,6 +64,43 @@ class Vertex:
     coupling: tuple[float, float] = (1.0, 0.0)
 
 
+def runtime_coupling_parameter_names(
+    vertex_kind: int,
+    vertex_particles: Sequence[int],
+    coupling: Sequence[object],
+    *,
+    model: Model | None = None,
+) -> list[str | None]:
+    """Return the model-owned runtime names for one vertex coupling.
+
+    This lives with the model contract because recurrence-catalog construction
+    and ordinary stage lowering must agree on the same parameter identity.
+    """
+
+    runtime_names = getattr(model, "runtime_parameter_names_for_vertex", None)
+    if callable(runtime_names):
+        return [str(name) for name in runtime_names(int(vertex_kind))]
+    lowering_rule = getattr(model, "vertex_lowering_rule", None)
+    if callable(lowering_rule):
+        rule = lowering_rule(int(vertex_kind))
+        if rule.coupling_mode in {"fixed", "none"}:
+            return [None for _value in coupling]
+    particles = "_".join(str(int(pdg)) for pdg in vertex_particles)
+    base = f"coupling.{int(vertex_kind)}.{particles}"
+    names: list[str | None] = []
+    for component, value in enumerate(coupling):
+        if not isinstance(value, str | int | float):
+            raise TypeError(
+                f"runtime coupling components must be numeric, got {value!r}"
+            )
+        numeric_value = float(value)
+        if component == 1 and numeric_value == -10.0:
+            names.append(None)
+        else:
+            names.append(f"{base}.component_{component}")
+    return names
+
+
 CouplingOrders = tuple[tuple[str, int], ...]
 QuantumNumberFlow = tuple[tuple[str, str], ...]
 RecurrenceFlavourFlowOperation = Literal[
@@ -1567,4 +1604,5 @@ __all__ = [
     "Vertex",
     "VertexEvaluationEquivalence",
     "VertexLoweringRule",
+    "runtime_coupling_parameter_names",
 ]

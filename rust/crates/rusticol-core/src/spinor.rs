@@ -152,6 +152,7 @@ pub struct SpinorDag {
     parameter_count: u16,
     massive_sources: Box<[MassiveSpinorSource]>,
     uses_reference_atom: bool,
+    temporal_reference_source: Option<u16>,
     nodes: Box<[SpinorNode]>,
     roots: Box<[SpinorAmplitudeRoot]>,
     rewrite_stats: SpinorRewriteStats,
@@ -359,8 +360,12 @@ impl SpinorDag {
             if self.uses_reference_atom
                 && usize::from(self.spinor_atom_count) < required_spinor_slots
             {
+                let reference = match self.temporal_reference_source {
+                    Some(source) => temporal_reference_flat(point, source)?,
+                    None => select_common_reference_flat(point)?,
+                };
                 workspace.spinors[usize::from(self.spinor_atom_count) * stride + point_index] =
-                    MasslessSpinors::from_momentum(select_common_reference_flat(point)?)?;
+                    MasslessSpinors::from_momentum(reference)?;
             }
         }
 
@@ -553,8 +558,12 @@ impl SpinorDag {
             workspace.spinors[usize::from(massive.r_atom)] = r;
         }
         if self.uses_reference_atom && usize::from(self.spinor_atom_count) < required_spinor_slots {
+            let reference = match self.temporal_reference_source {
+                Some(source) => temporal_reference_momentum(momenta, source)?,
+                None => select_common_reference_momentum(momenta)?,
+            };
             workspace.spinors[usize::from(self.spinor_atom_count)] =
-                MasslessSpinors::from_momentum(select_common_reference_momentum(momenta)?)?;
+                MasslessSpinors::from_momentum(reference)?;
         }
         for (node_index, node) in self.nodes.iter().enumerate() {
             let node_value = match node {
@@ -989,6 +998,7 @@ pub struct SpinorDagBuilder {
     spinor_atom_count: u16,
     parameter_count: u16,
     massive_sources: Vec<MassiveSpinorSource>,
+    temporal_reference_source: Option<u16>,
     nodes: Vec<SpinorNode>,
     interner: BTreeMap<SpinorNode, SpinorNodeId>,
     roots: Vec<SpinorAmplitudeRoot>,
@@ -1006,6 +1016,18 @@ impl SpinorDagBuilder {
     /// implicit massive source layout.
     pub fn new_with_parameters(momentum_count: u16, parameter_count: u16) -> RusticolResult<Self> {
         Self::new_impl(momentum_count, parameter_count, &[])
+    }
+
+    /// Create a parameterized graph whose listed physical momentum sources
+    /// are represented by deterministic pairs of null spinor atoms.  This is
+    /// the model-driven entry point for recurrences with any authenticated
+    /// mixture of massive external states.
+    pub(crate) fn new_with_parameters_and_massive_sources(
+        momentum_count: u16,
+        parameter_count: u16,
+        massive_source_slots: &[u16],
+    ) -> RusticolResult<Self> {
+        Self::new_impl(momentum_count, parameter_count, massive_source_slots)
     }
 
     /// Create a graph with one on-shell massive-vector source.  The source
@@ -1034,7 +1056,7 @@ impl SpinorDagBuilder {
                 "massive fermion and antifermion sources must differ",
             ));
         }
-        Self::new_impl(
+        Self::new_with_parameters_and_massive_sources(
             momentum_count,
             parameter_count,
             &[fermion_source, antifermion_source],
@@ -1079,6 +1101,7 @@ impl SpinorDagBuilder {
             spinor_atom_count,
             parameter_count,
             massive_sources,
+            temporal_reference_source: None,
             nodes: Vec::new(),
             interner: BTreeMap::new(),
             roots: Vec::new(),
@@ -1103,6 +1126,37 @@ impl SpinorDagBuilder {
     /// It is deliberately outside the physical momentum-source domain.
     pub const fn reference_atom(&self) -> u16 {
         self.spinor_atom_count
+    }
+
+    /// Derive the shared polarization reference from the parity-reversed
+    /// null momentum of one physical source.  This is the spinor form of the
+    /// temporal gauge used by the retained component evaluator.
+    pub(crate) fn use_temporal_reference_source(&mut self, source: u16) -> RusticolResult<()> {
+        if source >= self.momentum_count {
+            return Err(invalid(format!(
+                "temporal reference source {source} is outside a {}-source graph",
+                self.momentum_count
+            )));
+        }
+        if self
+            .massive_sources
+            .iter()
+            .any(|massive| massive.source == source)
+        {
+            return Err(invalid(
+                "temporal polarization reference must be derived from a null source",
+            ));
+        }
+        if self
+            .temporal_reference_source
+            .is_some_and(|previous| previous != source)
+        {
+            return Err(invalid(
+                "spinor DAG already has a different temporal reference source",
+            ));
+        }
+        self.temporal_reference_source = Some(source);
+        Ok(())
     }
 
     pub fn constant(&mut self, value: ExactComplexRational) -> RusticolResult<SpinorNodeId> {
@@ -1134,13 +1188,34 @@ impl SpinorDagBuilder {
         self.intern(SpinorNode::Kinematic(scalar))
     }
 
-    fn massive_vector_atoms(&self, source: u16) -> RusticolResult<(u16, u16)> {
+    pub(crate) fn massive_vector_atoms(&self, source: u16) -> RusticolResult<(u16, u16)> {
         let massive = self
             .massive_sources
             .iter()
             .find(|entry| entry.source == source)
             .ok_or_else(|| invalid(format!("source {source} is not massive")))?;
         Ok((massive.k_atom, massive.r_atom))
+    }
+
+    /// Null atoms whose dyads sum to one physical source momentum. Massless
+    /// sources use their ordinary atom; massive sources use their `(k, r)`
+    /// decomposition.
+    pub(crate) fn source_momentum_atoms(&self, source: u16) -> RusticolResult<Vec<u16>> {
+        if source >= self.momentum_count {
+            return Err(invalid(format!(
+                "momentum source {source} is outside a {}-source graph",
+                self.momentum_count
+            )));
+        }
+        if let Some(massive) = self
+            .massive_sources
+            .iter()
+            .find(|entry| entry.source == source)
+        {
+            Ok(vec![massive.k_atom, massive.r_atom])
+        } else {
+            Ok(vec![source])
+        }
     }
 
     pub fn bracket(
@@ -1572,6 +1647,11 @@ impl SpinorDagBuilder {
             parameter_count: self.parameter_count,
             massive_sources: self.massive_sources.into_boxed_slice(),
             uses_reference_atom,
+            temporal_reference_source: if uses_reference_atom {
+                self.temporal_reference_source
+            } else {
+                None
+            },
             nodes: self.nodes.into_boxed_slice(),
             roots: self.roots.into_boxed_slice(),
             rewrite_stats: self.rewrite_stats,
@@ -2728,9 +2808,28 @@ fn quark_vector_weyl_closure(
 /// upper two-component spinor and `dotted` the lower one in the built-in
 /// model's chiral Dirac basis.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct DiracExpression {
+pub(crate) struct DiracExpression {
     undotted: LinearWeylExpression,
     dotted: LinearWeylExpression,
+}
+
+pub(crate) fn dirac_sum(
+    builder: &mut SpinorDagBuilder,
+    expressions: impl IntoIterator<Item = DiracExpression>,
+) -> RusticolResult<DiracExpression> {
+    let expressions = expressions.into_iter().collect::<Vec<_>>();
+    Ok(DiracExpression {
+        undotted: linear_weyl_sum(
+            builder,
+            expressions
+                .iter()
+                .map(|expression| expression.undotted.clone()),
+        )?,
+        dotted: linear_weyl_sum(
+            builder,
+            expressions.into_iter().map(|expression| expression.dotted),
+        )?,
+    })
 }
 
 fn weyl_vector_action(
@@ -2828,6 +2927,129 @@ fn massive_dirac_spin_states(
     ])
 }
 
+pub(crate) fn massive_dirac_source_expression(
+    builder: &mut SpinorDagBuilder,
+    source: u16,
+    mass: SpinorNodeId,
+    spin_state: i8,
+) -> RusticolResult<DiracExpression> {
+    let states = massive_dirac_spin_states(builder, source, mass)?;
+    match spin_state {
+        -1 => Ok(states[0].clone()),
+        1 => Ok(states[1].clone()),
+        _ => Err(invalid("massive Dirac spin state must be -1 or +1")),
+    }
+}
+
+/// Apply the certified chiral-basis Dirac-vector algebra. Vector expressions
+/// carry the repository's sparse `V/sqrt(2)` normalization; the caller owns
+/// the authenticated primitive scale that restores component normalization.
+pub(crate) fn dirac_vector_expression(
+    builder: &mut SpinorDagBuilder,
+    current: &DiracExpression,
+    vector: &BispinorExpression,
+) -> RusticolResult<DiracExpression> {
+    Ok(DiracExpression {
+        undotted: weyl_vector_action(builder, SpinorChirality::Positive, &current.dotted, vector)?,
+        dotted: weyl_vector_action(
+            builder,
+            SpinorChirality::Negative,
+            &current.undotted,
+            vector,
+        )?,
+    })
+}
+
+pub(crate) fn dirac_scalar_expression(
+    builder: &mut SpinorDagBuilder,
+    current: &DiracExpression,
+    scalar: SpinorNodeId,
+) -> RusticolResult<DiracExpression> {
+    dirac_scale(builder, scalar, current)
+}
+
+pub(crate) fn dirac_propagator_numerator(
+    builder: &mut SpinorDagBuilder,
+    current: &DiracExpression,
+    momentum: &BispinorExpression,
+    mass: SpinorNodeId,
+) -> RusticolResult<DiracExpression> {
+    let undotted_momentum = weyl_vector_action(
+        builder,
+        SpinorChirality::Positive,
+        &current.dotted,
+        momentum,
+    )?;
+    let dotted_momentum = weyl_vector_action(
+        builder,
+        SpinorChirality::Negative,
+        &current.undotted,
+        momentum,
+    )?;
+    let undotted_mass = linear_weyl_scale(builder, mass, &current.undotted)?;
+    let dotted_mass = linear_weyl_scale(builder, mass, &current.dotted)?;
+    Ok(DiracExpression {
+        undotted: linear_weyl_sum(builder, [undotted_momentum, undotted_mass])?,
+        dotted: linear_weyl_sum(builder, [dotted_momentum, dotted_mass])?,
+    })
+}
+
+fn linear_weyl_contraction(
+    builder: &mut SpinorDagBuilder,
+    kind: SpinorBracketKind,
+    left: &LinearWeylExpression,
+    right: &LinearWeylExpression,
+) -> RusticolResult<SpinorNodeId> {
+    let mut terms = Vec::with_capacity(left.terms.len() * right.terms.len());
+    for (left_atom, left_coefficient) in &left.terms {
+        for (right_atom, right_coefficient) in &right.terms {
+            let bracket = builder.bracket(kind, *left_atom, *right_atom)?;
+            terms.push(builder.product([*left_coefficient, *right_coefficient, bracket])?);
+        }
+    }
+    let result = builder.sum(terms)?;
+    builder.simplify_schouten(result)
+}
+
+/// Direct component contraction of one particle-oriented and one
+/// antiparticle-oriented Dirac current in the authenticated chiral basis.
+pub(crate) fn dirac_bilinear(
+    builder: &mut SpinorDagBuilder,
+    particle: &DiracExpression,
+    antiparticle: &DiracExpression,
+) -> RusticolResult<SpinorNodeId> {
+    let undotted = linear_weyl_contraction(
+        builder,
+        SpinorBracketKind::Angle,
+        &particle.undotted,
+        &antiparticle.undotted,
+    )?;
+    let dotted = linear_weyl_contraction(
+        builder,
+        SpinorBracketKind::Square,
+        &particle.dotted,
+        &antiparticle.dotted,
+    )?;
+    builder.sum([undotted, dotted])
+}
+
+pub(crate) fn massive_dirac_propagator_denominator(
+    builder: &mut SpinorDagBuilder,
+    momentum: &BispinorExpression,
+    mass: SpinorNodeId,
+    width: SpinorNodeId,
+) -> RusticolResult<SpinorNodeId> {
+    let momentum_squared = bispinor_dot_expression(builder, momentum, momentum)?;
+    let mass_squared = builder.product([mass, mass])?;
+    let negative_mass_squared = builder.negate(mass_squared)?;
+    let imaginary_unit = builder.constant(ExactComplexRational::new(
+        ExactRational::ZERO,
+        ExactRational::ONE,
+    ))?;
+    let width_term = builder.product([imaginary_unit, mass, width])?;
+    builder.sum([momentum_squared, negative_mass_squared, width_term])
+}
+
 fn massive_dirac_vector_numerator(
     builder: &mut SpinorDagBuilder,
     quark: &DiracExpression,
@@ -2860,7 +3082,7 @@ fn massive_dirac_vector_numerator(
     Ok(DiracExpression { undotted, dotted })
 }
 
-fn massive_dirac_scale(
+pub(crate) fn dirac_scale(
     builder: &mut SpinorDagBuilder,
     scalar: SpinorNodeId,
     current: &DiracExpression,
@@ -3079,7 +3301,7 @@ pub fn build_helicity_summed_massive_quark_two_gluon_spinor_dag(
                 &propagator_support,
                 mass,
             )?;
-            let propagated = massive_dirac_scale(&mut builder, negative_propagator, &numerator)?;
+            let propagated = dirac_scale(&mut builder, negative_propagator, &numerator)?;
             for (antiquark_index, antiquark) in antiquark_states.iter().enumerate() {
                 let combined =
                     massive_dirac_vector_closure(&mut builder, quark, combined_vector, antiquark)?;
@@ -3907,6 +4129,26 @@ fn evaluate_kinematic_flat(
     }
 }
 
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+fn temporal_reference_momentum(momenta: &[[f64; 4]], source: u16) -> RusticolResult<[f64; 4]> {
+    let momentum = momenta
+        .get(usize::from(source))
+        .copied()
+        .ok_or_else(|| invalid("temporal reference source is outside the momentum input"))?;
+    Ok([momentum[0], -momentum[1], -momentum[2], -momentum[3]])
+}
+
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+fn temporal_reference_flat(point: &[f64], source: u16) -> RusticolResult<[f64; 4]> {
+    let offset = usize::from(source)
+        .checked_mul(4)
+        .ok_or_else(|| invalid("temporal reference source offset overflows"))?;
+    let momentum = point
+        .get(offset..offset + 4)
+        .ok_or_else(|| invalid("temporal reference source is outside the flat momentum input"))?;
+    Ok([momentum[0], -momentum[1], -momentum[2], -momentum[3]])
+}
+
 /// Choose one deterministic, well-separated null reference for every gluon
 /// source at a point. A common reference exposes the largest exact
 /// same-helicity cancellations in the bispinor graph.
@@ -4317,6 +4559,51 @@ mod tests {
         assert_eq!(dag.nodes().len(), 237);
         assert!(!dag.uses_reference_atom());
         assert!(build_helicity_summed_massive_quark_two_gluon_spinor_dag(&[2, 0, 0, 3]).is_err());
+    }
+
+    #[test]
+    fn massive_dirac_generic_vertex_finalizer_split_matches_fused_algebra() {
+        let mut builder =
+            SpinorDagBuilder::new_with_parameters_and_massive_sources(3, 1, &[0, 2]).unwrap();
+        let mass = builder.parameter(0).unwrap();
+        let particle = massive_dirac_source_expression(&mut builder, 0, mass, -1).unwrap();
+        let antiparticle = massive_dirac_source_expression(&mut builder, 2, mass, 1).unwrap();
+        let vector = external_polarization_expression(&mut builder, 1, -1).unwrap();
+        let (k, r) = builder.massive_vector_atoms(0).unwrap();
+        let momentum_terms = [(k, builder.one()), (r, builder.one()), (1, builder.one())];
+        let momentum = signed_momentum_expression(&momentum_terms);
+
+        let vertex = dirac_vector_expression(&mut builder, &particle, &vector).unwrap();
+        let split = dirac_propagator_numerator(&mut builder, &vertex, &momentum, mass).unwrap();
+        let fused =
+            massive_dirac_vector_numerator(&mut builder, &particle, &vector, &[k, r, 1], mass)
+                .unwrap();
+        assert_eq!(split, fused);
+
+        let direct = dirac_bilinear(&mut builder, &vertex, &antiparticle).unwrap();
+        let fused_closure =
+            massive_dirac_vector_closure(&mut builder, &particle, &vector, &antiparticle).unwrap();
+        assert_eq!(direct, fused_closure);
+    }
+
+    #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+    #[test]
+    fn massive_dirac_temporal_reference_reverses_one_null_source() {
+        let momenta = [[173.0, 0.0, 0.0, 0.0], [-10.0, -6.0, -8.0, 0.0]];
+        let expected = [-10.0, 6.0, 8.0, 0.0];
+        assert_eq!(temporal_reference_momentum(&momenta, 1).unwrap(), expected);
+        assert_eq!(
+            temporal_reference_flat(&momenta.into_iter().flatten().collect::<Vec<_>>(), 1,)
+                .unwrap(),
+            expected,
+        );
+        MasslessSpinors::from_momentum(expected).unwrap();
+
+        let mut builder =
+            SpinorDagBuilder::new_with_parameters_and_massive_sources(3, 0, &[0, 2]).unwrap();
+        assert!(builder.use_temporal_reference_source(0).is_err());
+        builder.use_temporal_reference_source(1).unwrap();
+        assert!(builder.use_temporal_reference_source(2).is_err());
     }
 
     #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]

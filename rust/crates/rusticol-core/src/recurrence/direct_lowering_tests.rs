@@ -95,6 +95,71 @@ fn prepared_intrinsic_metadata_is_keyed_and_fail_closed() {
     );
 }
 
+#[test]
+fn prepared_massive_dirac_finalizer_metadata_is_typed_and_role_closed() {
+    let key = PreparedDirectExecutorKey::Evaluator {
+        role: DirectExecutorRole::Finalization,
+        evaluator_binding_id: 42,
+    };
+    let typed = PreparedDirectMassiveDiracFinalizer::new(
+        CurrentOrientation::Particle,
+        0.0_f64.to_bits(),
+        1.0_f64.to_bits(),
+        6,
+        7,
+    );
+    let descriptor = PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+        key,
+        "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1".to_owned(),
+        digest(20),
+        typed,
+    );
+    let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+        digest(3),
+        vec![PreparedDirectExecutorBinding::evaluator(
+            DirectExecutorRole::Finalization,
+            42,
+            0,
+        )],
+        vec![descriptor],
+    )
+    .unwrap();
+    assert_eq!(
+        catalog
+            .intrinsic_descriptor(DirectExecutorRole::Finalization, 42)
+            .unwrap()
+            .massive_dirac_finalizer(),
+        Some(typed)
+    );
+
+    let invalid = PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+        key,
+        "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1".to_owned(),
+        digest(20),
+        PreparedDirectMassiveDiracFinalizer::new(
+            CurrentOrientation::SelfConjugate,
+            0.0_f64.to_bits(),
+            1.0_f64.to_bits(),
+            6,
+            6,
+        ),
+    );
+    assert!(
+        PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![PreparedDirectExecutorBinding::evaluator(
+                DirectExecutorRole::Finalization,
+                42,
+                0,
+            )],
+            vec![invalid],
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invalid typed metadata")
+    );
+}
+
 fn rational(numerator: i128) -> ExactComplexRational {
     ExactComplexRational::new(
         ExactRational::new(numerator, 1).unwrap(),
