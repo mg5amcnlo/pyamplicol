@@ -31,17 +31,47 @@ class _FlowCase:
     tracked_value: float
 
 
-_POINT = (
-    (500.0, 0.0, 0.0, 500.0),
-    (500.0, 0.0, 0.0, -500.0),
-    (500.0, 349.55548503752317, 162.29632791789103, -318.54491806423516),
-    (500.0, -349.55548503752317, -162.29632791789103, 318.54491806423516),
+@dataclass(frozen=True)
+class _ProcessCase:
+    expression: str
+    process_id: str
+    point: tuple[tuple[float, float, float, float], ...]
+    flows: tuple[_FlowCase, ...]
+    tracked_total: float
+
+
+_CASES = (
+    _ProcessCase(
+        expression="d d~ > u u~",
+        process_id="d_dbar_to_u_ubar",
+        point=(
+            (500.0, 0.0, 0.0, 500.0),
+            (500.0, 0.0, 0.0, -500.0),
+            (500.0, 349.55548503752317, 162.29632791789103, -318.54491806423516),
+            (500.0, -349.55548503752317, -162.29632791789103, 318.54491806423516),
+        ),
+        flows=(
+            _FlowCase((2, 1, 3, 4), "flow:2,1,3,4", 0.08586784491130668),
+            _FlowCase((2, 4, 3, 1), "flow:2,4,3,1", 0.7728106042017603),
+        ),
+        tracked_total=0.858678449113067,
+    ),
+    _ProcessCase(
+        expression="d d~ > d d~",
+        process_id="d_dbar_to_d_dbar",
+        point=(
+            (500.0, 0.0, 0.0, 500.0),
+            (500.0, 0.0, 0.0, -500.0),
+            (500.0, -92.37565236398261, -439.14510003273597, 220.49562346578892),
+            (500.0, 92.37565236398261, 439.14510003273597, -220.49562346578892),
+        ),
+        flows=(
+            _FlowCase((2, 1, 3, 4), "flow:2,1,3,4", 22.812191406806715),
+            _FlowCase((2, 4, 3, 1), "flow:2,4,3,1", 4.393177047511702),
+        ),
+        tracked_total=27.205368454318417,
+    ),
 )
-_FLOWS = (
-    _FlowCase((2, 1, 3, 4), "flow:2,1,3,4", 0.08586784491130668),
-    _FlowCase((2, 4, 3, 1), "flow:2,4,3,1", 0.7728106042017603),
-)
-_TRACKED_TOTAL = 0.858678449113067
 
 
 def _config() -> RunConfig:
@@ -68,8 +98,12 @@ def _config() -> RunConfig:
     )
 
 
-def _value(runtime: Runtime, color_flow: str) -> float:
-    return complex(runtime.evaluate((_POINT,), color_flows=(color_flow,))[0]).real
+def _value(
+    runtime: Runtime,
+    point: tuple[tuple[float, float, float, float], ...],
+    color_flow: str,
+) -> float:
+    return complex(runtime.evaluate((point,), color_flows=(color_flow,))[0]).real
 
 
 def test_graph_spinor_two_massless_fermion_lines(tmp_path: Path) -> None:
@@ -86,55 +120,56 @@ def test_graph_spinor_two_massless_fermion_lines(tmp_path: Path) -> None:
         evaluator=config.evaluator,
     )
 
-    candidate_total = 0.0
-    for index, flow in enumerate(_FLOWS):
-        runtimes: dict[str, Runtime] = {}
-        for mode in ("spinor", "component"):
-            artifact = tmp_path / f"ddbar-uubar-flow-{index}-{mode}"
-            generate_slice(
-                ProcessRequest.parse("d d~ > u u~", name="d_dbar_to_u_ubar"),
-                artifact,
-                selection=GenerationSlice(
-                    reference_color_order=flow.color_order,
-                    selected_color_sector_ids=(0,),
-                    experimental_spinor_dag=mode == "spinor",
-                ),
-                config=config,
-                model=prepared,
-            )
-            if mode == "spinor":
-                execution = json.loads(
-                    (
-                        artifact / "processes" / "d_dbar_to_u_ubar" / "execution.json"
-                    ).read_text(encoding="utf-8")
+    for case in _CASES:
+        candidate_total = 0.0
+        for index, flow in enumerate(case.flows):
+            runtimes: dict[str, Runtime] = {}
+            for mode in ("spinor", "component"):
+                artifact = tmp_path / f"{case.process_id}-flow-{index}-{mode}"
+                generate_slice(
+                    ProcessRequest.parse(case.expression, name=case.process_id),
+                    artifact,
+                    selection=GenerationSlice(
+                        reference_color_order=flow.color_order,
+                        selected_color_sector_ids=(0,),
+                        experimental_spinor_dag=mode == "spinor",
+                    ),
+                    config=config,
+                    model=prepared,
                 )
-                assert execution["graph_payload"] == {
-                    "abi": "pyamplicol-spinor-dag-binary-v2",
-                    "path": "spinor-dag-v2.bin",
-                }
-                assert "process_family" not in execution
-            runtimes[mode] = Runtime.load(artifact, process="d_dbar_to_u_ubar")
+                if mode == "spinor":
+                    execution = json.loads(
+                        (
+                            artifact / "processes" / case.process_id / "execution.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    assert execution["graph_payload"] == {
+                        "abi": "pyamplicol-spinor-dag-binary-v2",
+                        "path": "spinor-dag-v2.bin",
+                    }
+                    assert "process_family" not in execution
+                runtimes[mode] = Runtime.load(artifact, process=case.process_id)
 
-        candidate = runtimes["spinor"]
-        reference = runtimes["component"]
-        assert candidate.execution_mode == "spinor"
-        assert reference.execution_mode == "compiled"
-        reference_value = _value(reference, flow.color_flow)
-        candidate_value = _value(candidate, flow.color_flow)
-        assert candidate_value == pytest.approx(
-            reference_value,
+            candidate = runtimes["spinor"]
+            reference = runtimes["component"]
+            assert candidate.execution_mode == "spinor"
+            assert reference.execution_mode == "compiled"
+            reference_value = _value(reference, case.point, flow.color_flow)
+            candidate_value = _value(candidate, case.point, flow.color_flow)
+            assert candidate_value == pytest.approx(
+                reference_value,
+                rel=2.0e-12,
+                abs=1.0e-15,
+            )
+            assert reference_value == pytest.approx(
+                flow.tracked_value,
+                rel=2.0e-12,
+                abs=1.0e-15,
+            )
+            candidate_total += candidate_value
+
+        assert candidate_total == pytest.approx(
+            case.tracked_total,
             rel=2.0e-12,
             abs=1.0e-15,
         )
-        assert reference_value == pytest.approx(
-            flow.tracked_value,
-            rel=2.0e-12,
-            abs=1.0e-15,
-        )
-        candidate_total += candidate_value
-
-    assert candidate_total == pytest.approx(
-        _TRACKED_TOTAL,
-        rel=2.0e-12,
-        abs=1.0e-15,
-    )
