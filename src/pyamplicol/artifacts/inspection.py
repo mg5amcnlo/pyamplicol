@@ -24,6 +24,9 @@ from pyamplicol._internal.versions import (
     RECURRENCE_DIRECT_TEMPLATE_ABI,
     RECURRENCE_PLAN_ABI,
     RECURRENCE_RUNTIME_LAYOUT_ABI,
+    SPINOR_DAG_ABI,
+    SPINOR_DAG_BINARY_ABI,
+    SPINOR_DAG_F64_RUNTIME_CAPABILITY,
 )
 from pyamplicol.api.errors import ArtifactError
 
@@ -33,6 +36,7 @@ from .security import confined_path, normalize_relative_path
 _EAGER_RUNTIME_KIND = "pyamplicol-runtime-eager-execution"
 _RECURRENCE_RUNTIME_KIND = "pyamplicol-runtime-recurrence-execution"
 _ON_THE_FLY_RUNTIME_KIND = "pyamplicol-runtime-on-the-fly-execution"
+_SPINOR_RUNTIME_KIND = "pyamplicol-runtime-spinor-dag-execution"
 _ON_THE_FLY_PUBLIC_METADATA_KIND = "pyamplicol-on-the-fly-public-metadata"
 _RETIRED_RECURRENCE_RUNTIME_CAPABILITY = "rusticol.recurrence-runtime.complex-f64.v1"
 _RECURRENCE_DIRECT_SCHEDULE_MEMBER_PATH = "schedule/recurrence-direct-schedule-v2.bin"
@@ -80,6 +84,7 @@ _RECURRENCE_PROFILE_PHASES = (
 # The compact lane feeds the same direct-profile counters from its dynamically
 # prepared query family; only the plan materialization boundary differs.
 _ON_THE_FLY_PROFILE_PHASES = _RECURRENCE_PROFILE_PHASES
+_SPINOR_PROFILE_PHASES = ("runtime-orchestration",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1520,6 +1525,281 @@ def _execution_inspection(
         )
     )
     capability_values = frozenset(str(value) for value in capabilities)
+    if SPINOR_DAG_F64_RUNTIME_CAPABILITY in capability_values:
+        if tuple(str(value) for value in capabilities) != (
+            SPINOR_DAG_F64_RUNTIME_CAPABILITY,
+        ):
+            raise ArtifactError(
+                "spinor execution must declare exactly its f64 runtime capability"
+            )
+        execution = _json_mapping(execution_path, "process execution manifest")
+        common_fields = {
+            "schema_version",
+            "kind",
+            "required_runtime_capabilities",
+            "process",
+            "key",
+            "color_accuracy",
+            "external_pdg_order",
+            "spinor_dag_abi",
+            "external_count",
+            "fixed_color_order",
+            "helicity_reduction",
+            "coupling_stripped",
+        }
+        graph_fields = common_fields | {
+            "graph_payload",
+            "runtime_metadata",
+        }
+        if "graph_payload" in execution:
+            if process is None or set(execution) not in {
+                frozenset(graph_fields),
+                frozenset(graph_fields | {"kernel_pack"}),
+            }:
+                raise ArtifactError(
+                    "graph-backed spinor execution has unsupported root fields"
+                )
+            external_count = _integer(
+                execution.get("external_count"),
+                "graph-backed spinor execution.external_count",
+                minimum=2,
+            )
+            external_pdgs = tuple(
+                _sequence(
+                    execution.get("external_pdg_order"),
+                    "graph-backed spinor execution.external_pdg_order",
+                )
+            )
+            expected_pdgs = tuple(
+                _sequence(
+                    process.get("external_pdgs"),
+                    f"process {process.get('id')} external_pdgs",
+                )
+            )
+            graph_payload = _mapping(
+                execution.get("graph_payload"),
+                "graph-backed spinor execution.graph_payload",
+            )
+            kernel_pack = execution.get("kernel_pack")
+            if kernel_pack is not None:
+                kernel_pack = _mapping(
+                    kernel_pack,
+                    "graph-backed spinor execution.kernel_pack",
+                )
+            _mapping(
+                execution.get("runtime_metadata"),
+                "graph-backed spinor execution.runtime_metadata",
+            )
+            if (
+                execution.get("schema_version") != 3
+                or execution.get("kind") != _SPINOR_RUNTIME_KIND
+                or execution.get("required_runtime_capabilities")
+                != [SPINOR_DAG_F64_RUNTIME_CAPABILITY]
+                or execution.get("process") != process.get("expression")
+                or execution.get("key") != process.get("id")
+                or execution.get("color_accuracy") != "lc"
+                or process.get("color_accuracy") != "lc"
+                or len(external_pdgs) != external_count
+                or external_pdgs != expected_pdgs
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in external_pdgs
+                )
+                or execution.get("spinor_dag_abi") != SPINOR_DAG_ABI
+                or execution.get("fixed_color_order") != []
+                or execution.get("helicity_reduction")
+                != "complete-incoherent-sum"
+                or execution.get("coupling_stripped") is not False
+                or graph_payload
+                != {
+                    "abi": SPINOR_DAG_BINARY_ABI,
+                    "path": "spinor-dag-v2.bin",
+                }
+                or (
+                    kernel_pack is not None
+                    and kernel_pack
+                    != {
+                        "manifest_path": "model/eager-kernel-pack.json",
+                        "payload_root": "model/eager-kernels",
+                    }
+                )
+            ):
+                raise ArtifactError(
+                    "graph-backed spinor execution disagrees with its outer process"
+                )
+            return _ExecutionInspection(
+                execution_mode="spinor",
+                physical_helicity_count=1,
+                physical_color_flow_count=1,
+                native_profile_phases=_SPINOR_PROFILE_PHASES,
+            )
+        process_family = execution.get("process_family", "pure-gluon")
+        expected_fields = common_fields
+        if process_family == "single-massless-quark-line":
+            expected_fields = common_fields | {
+                "process_family",
+                "ordered_source_labels",
+            }
+        elif process_family == "single-massive-quark-line" or (
+            process_family
+            == "single-massless-quark-line-massive-neutral-vector"
+        ):
+            expected_fields = common_fields | {
+                "process_family",
+                "ordered_source_labels",
+                "spinor_parameter_names",
+            }
+        if process is None or set(execution) != expected_fields:
+            raise ArtifactError(
+                "spinor process execution manifest has unsupported root fields"
+            )
+        external_count = _integer(
+            execution.get("external_count"),
+            "spinor process execution manifest.external_count",
+            minimum=3,
+        )
+        external_pdgs = tuple(
+            _sequence(
+                execution.get("external_pdg_order"),
+                "spinor process execution manifest.external_pdg_order",
+            )
+        )
+        expected_pdgs = tuple(
+            _sequence(
+                process.get("external_pdgs"),
+                f"process {process.get('id')} external_pdgs",
+            )
+        )
+        fixed_color_order = tuple(
+            _integer(
+                value,
+                f"spinor process execution manifest.fixed_color_order[{index}]",
+                minimum=1,
+            )
+            for index, value in enumerate(
+                _sequence(
+                    execution.get("fixed_color_order"),
+                    "spinor process execution manifest.fixed_color_order",
+                )
+            )
+        )
+        ordered_source_labels = tuple(
+            _integer(
+                value,
+                (
+                    "spinor process execution manifest."
+                    f"ordered_source_labels[{index}]"
+                ),
+                minimum=1,
+            )
+            for index, value in enumerate(
+                _sequence(
+                    execution.get("ordered_source_labels", fixed_color_order),
+                    "spinor process execution manifest.ordered_source_labels",
+                )
+            )
+        )
+        pure_gluon = process_family == "pure-gluon"
+        source_labels_valid = len(external_pdgs) == external_count and all(
+            1 <= label <= len(external_pdgs) for label in ordered_source_labels
+        )
+        crossed_ordered_pdgs = tuple(
+            (
+                -int(external_pdgs[label - 1])
+                if label <= 2 and abs(int(external_pdgs[label - 1])) <= 5
+                else int(external_pdgs[label - 1])
+            )
+            for label in ordered_source_labels
+        ) if source_labels_valid else ()
+        quark_line = (
+            process_family == "single-massless-quark-line"
+            and ordered_source_labels == fixed_color_order
+            and len(crossed_ordered_pdgs) >= 2
+            and crossed_ordered_pdgs[0] in range(1, 6)
+            and crossed_ordered_pdgs[-1] == -crossed_ordered_pdgs[0]
+            and all(pdg == 21 for pdg in crossed_ordered_pdgs[1:-1])
+        )
+        z_labels = tuple(
+            index + 1 for index, pdg in enumerate(external_pdgs) if pdg == 23
+        )
+        parameter_names = tuple(
+            str(value)
+            for value in _sequence(
+                execution.get("spinor_parameter_names", ()),
+                "spinor process execution manifest.spinor_parameter_names",
+            )
+        )
+        massive_quark_line = (
+            process_family == "single-massive-quark-line"
+            and external_pdgs == (21, 21, 6, -6)
+            and fixed_color_order in {(3, 1, 2, 4), (3, 2, 1, 4)}
+            and ordered_source_labels == fixed_color_order
+            and crossed_ordered_pdgs == (6, 21, 21, -6)
+            and parameter_names == ("particle.6.mass", "particle.6.width")
+        )
+        crossed_colored_pdgs = (
+            crossed_ordered_pdgs[:-1]
+            if ordered_source_labels == (*fixed_color_order, *z_labels)
+            else ()
+        )
+        massive_vector_quark_line = (
+            process_family
+            == "single-massless-quark-line-massive-neutral-vector"
+            and len(z_labels) == 1
+            and z_labels[0] > 2
+            and ordered_source_labels == (*fixed_color_order, z_labels[0])
+            and len(crossed_colored_pdgs) >= 2
+            and crossed_colored_pdgs[0] in range(1, 6)
+            and crossed_colored_pdgs[-1] == -crossed_colored_pdgs[0]
+            and all(pdg == 21 for pdg in crossed_colored_pdgs[1:-1])
+            and len(parameter_names) == 2
+            and len(set(parameter_names)) == 2
+            and all(parameter_names)
+        )
+        expected_fixed_labels = (
+            sorted(set(range(1, external_count + 1)) - set(z_labels))
+            if massive_vector_quark_line
+            else list(range(1, external_count + 1))
+        )
+        expected_coupling_stripped = not massive_vector_quark_line
+        if (
+            execution.get("schema_version") != 3
+            or execution.get("kind") != _SPINOR_RUNTIME_KIND
+            or execution.get("required_runtime_capabilities")
+            != [SPINOR_DAG_F64_RUNTIME_CAPABILITY]
+            or execution.get("process") != process.get("expression")
+            or execution.get("key") != process.get("id")
+            or execution.get("color_accuracy") != "lc"
+            or process.get("color_accuracy") != "lc"
+            or external_count not in {3, 4, 5, 6}
+            or len(external_pdgs) != external_count
+            or external_pdgs != expected_pdgs
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in external_pdgs
+            )
+            or sorted(fixed_color_order) != expected_fixed_labels
+            or sorted(ordered_source_labels) != list(range(1, external_count + 1))
+            or not (
+                (pure_gluon and all(value == 21 for value in external_pdgs))
+                or quark_line
+                or massive_quark_line
+                or massive_vector_quark_line
+            )
+            or execution.get("spinor_dag_abi") != SPINOR_DAG_ABI
+            or execution.get("helicity_reduction") != "complete-incoherent-sum"
+            or execution.get("coupling_stripped")
+            is not expected_coupling_stripped
+        ):
+            raise ArtifactError(
+                "spinor process execution manifest disagrees with its outer process"
+            )
+        return _ExecutionInspection(
+            execution_mode="spinor",
+            physical_helicity_count=1,
+            physical_color_flow_count=1,
+            native_profile_phases=_SPINOR_PROFILE_PHASES,
+        )
     on_the_fly_color_capabilities = {
         ON_THE_FLY_LC_COLOR_RUNTIME_CAPABILITY,
         ON_THE_FLY_CONTRACTED_COLOR_RUNTIME_CAPABILITY,
@@ -2304,6 +2584,8 @@ def _process_inspection(
     if str(process["color_accuracy"]) == "lc":
         if execution.execution_mode == "on-the-fly":
             lc_flow_layout = "compact/query-local"
+        elif execution.execution_mode == "spinor":
+            lc_flow_layout = "fixed-color-order"
         else:
             lc_flow_layout = "topology-replay"
             generation = manifest.extensions.get("generation")

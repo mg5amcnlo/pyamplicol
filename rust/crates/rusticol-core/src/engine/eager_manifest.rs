@@ -2,7 +2,8 @@
 
 use super::evaluator::recurrence_intrinsic_direct::{
     FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE, RecurrenceContributionIntrinsicKind,
-    WEYL_PROPAGATOR_NEGATIVE_TEMPLATE, WEYL_PROPAGATOR_POSITIVE_TEMPLATE,
+    RecurrenceFinalizationIntrinsicKind, WEYL_PROPAGATOR_NEGATIVE_TEMPLATE,
+    WEYL_PROPAGATOR_POSITIVE_TEMPLATE,
 };
 use super::*;
 use crate::{
@@ -1218,6 +1219,52 @@ impl RecurrenceDirectPayloadBindingManifest {
                         "Direct-Arena intrinsic contract digest",
                     )?;
                     RecurrenceContributionIntrinsicKind::from_runtime_template(runtime_template)?;
+                } else if template.role == "finalization"
+                    && runtime_template != "rusticol.identity-finalize-in-place.v1"
+                {
+                    let Some(RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
+                        constant_real_bits,
+                        constant_imag_bits,
+                        parameter_index,
+                    }) = self.scalar_projections.first()
+                    else {
+                        return Err(RusticolError::integrity(
+                            "Direct-Arena finalization intrinsic has no certified scale",
+                        ));
+                    };
+                    if self.role.as_deref() != Some("finalization")
+                        || self.destination_operation.as_deref() != Some("finalize-in-place")
+                        || self.scalar_input_count != 1
+                        || self.scalar_projections.len() != 1
+                        || parameter_index.is_some()
+                    {
+                        return Err(RusticolError::integrity(
+                            "Direct-Arena finalization intrinsic metadata is inconsistent",
+                        ));
+                    }
+                    validate_sha256_text(
+                        self.intrinsic_contract_digest
+                            .as_deref()
+                            .unwrap_or_default(),
+                        "Direct-Arena finalization intrinsic contract digest",
+                    )?;
+                    let expected_scale =
+                        match RecurrenceFinalizationIntrinsicKind::from_runtime_template(
+                            runtime_template,
+                        )? {
+                            RecurrenceFinalizationIntrinsicKind::WeylPropagatorPositive
+                            | RecurrenceFinalizationIntrinsicKind::WeylPropagatorNegative => {
+                                (1.0_f64.to_bits(), 0.0_f64.to_bits())
+                            }
+                            RecurrenceFinalizationIntrinsicKind::FeynmanVectorPropagator => {
+                                (0.0_f64.to_bits(), (-1.0_f64).to_bits())
+                            }
+                        };
+                    if (*constant_real_bits, *constant_imag_bits) != expected_scale {
+                        return Err(RusticolError::integrity(
+                            "Direct-Arena finalization intrinsic scale disagrees with its runtime primitive",
+                        ));
+                    }
                 } else if self.role.is_some()
                     || self.destination_operation.is_some()
                     || self.scalar_input_count != 0

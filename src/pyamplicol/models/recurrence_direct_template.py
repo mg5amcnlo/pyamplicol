@@ -23,6 +23,7 @@ from .._internal.versions import (
 )
 from .recurrence_direct_intrinsics import (
     RECURRENCE_INTRINSIC_SCALE_KIND,
+    CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
@@ -353,6 +354,66 @@ class RecurrenceDirectPayloadBindingV1:
                 ):
                     raise RecurrenceDirectTemplateError(
                         "contribution intrinsics carry prepared-call metadata"
+                    )
+            elif self.role == "finalization":
+                if (
+                    parent_permutation != (0, 1)
+                    or self.destination_operation != "finalize-in-place"
+                    or self.scalar_input_count != 1
+                    or len(scalar_projections) != 1
+                    or self.intrinsic_contract_digest is None
+                ):
+                    raise RecurrenceDirectTemplateError(
+                        "finalization intrinsics require one authenticated "
+                        "runtime-owned scale"
+                    )
+                projection = json.loads(scalar_projections[0])
+                if (
+                    projection.get("kind") != RECURRENCE_INTRINSIC_SCALE_KIND
+                    or projection.get("parameter_index") is not None
+                ):
+                    raise RecurrenceDirectTemplateError(
+                        "finalization intrinsic scale has an unsupported projection"
+                    )
+                _require_sha256(
+                    "intrinsic contract digest", self.intrinsic_contract_digest
+                )
+                expected_payload_digest = _digest(
+                    {
+                        "abi": self.abi,
+                        "contribution_parent_permutation": [0, 1],
+                        "destination_operation": self.destination_operation,
+                        "intrinsic_contract_digest": self.intrinsic_contract_digest,
+                        "kind": self.kind,
+                        "role": self.role,
+                        "runtime_template": self.runtime_template,
+                        "scalar_input_count": self.scalar_input_count,
+                        "scalar_projections": [projection],
+                    }
+                )
+                if self.payload_digest != expected_payload_digest:
+                    raise RecurrenceDirectTemplateError(
+                        "finalization intrinsic payload digest does not match "
+                        "its certified metadata"
+                    )
+                if any(
+                    value not in (None, (), 0)
+                    for value in (
+                        self.direct_application_abi,
+                        exact_factor_slots,
+                        input_plane_count,
+                        input_projections,
+                        output_aliases,
+                        parameter_bindings,
+                        self.prepared_template_semantic_digest,
+                        self.source_application_abi,
+                        self.source_application_path,
+                        self.source_application_sha256,
+                        state_planes,
+                    )
+                ):
+                    raise RecurrenceDirectTemplateError(
+                        "finalization intrinsics carry prepared-call metadata"
                     )
             else:
                 if parent_permutation != (0, 1):
@@ -1649,8 +1710,8 @@ def build_recurrence_direct_template_catalog(
                             certified_intrinsic
                         )
                     elif finalization_intrinsic is not None:
-                        payload_binding = _build_runtime_intrinsic_binding(
-                            runtime_template=finalization_intrinsic
+                        payload_binding = _build_certified_finalization_intrinsic_binding(
+                            finalization_intrinsic
                         )
                     elif isinstance(source, PreparedJitDirectSourceV1):
                         payload_binding = _build_prepared_jit_direct_binding(
@@ -2119,6 +2180,41 @@ def _build_certified_intrinsic_binding(
         scalar_projections=_encode_canonical_objects((scale,)),
         intrinsic_contract_digest=contract_digest,
         contribution_parent_permutation=certified.parent_permutation,
+    )
+
+
+def _build_certified_finalization_intrinsic_binding(
+    certified: CertifiedRecurrenceFinalizationIntrinsic,
+) -> RecurrenceDirectPayloadBindingV1:
+    runtime_template = _require_nonempty(
+        "certified finalization intrinsic runtime template",
+        certified.runtime_template,
+    )
+    contract_digest = _require_sha256(
+        "certified finalization intrinsic contract digest",
+        certified.contract_digest,
+    )
+    scale = certified.scale_projection()
+    metadata = {
+        "abi": RECURRENCE_DIRECT_PAYLOAD_BINDING_ABI,
+        "contribution_parent_permutation": [0, 1],
+        "destination_operation": "finalize-in-place",
+        "intrinsic_contract_digest": contract_digest,
+        "kind": "rusticol-intrinsic",
+        "role": "finalization",
+        "runtime_template": runtime_template,
+        "scalar_input_count": 1,
+        "scalar_projections": [scale],
+    }
+    return RecurrenceDirectPayloadBindingV1(
+        kind="rusticol-intrinsic",
+        payload_digest=_digest(metadata),
+        runtime_template=runtime_template,
+        role="finalization",
+        destination_operation="finalize-in-place",
+        scalar_input_count=1,
+        scalar_projections=_encode_canonical_objects((scale,)),
+        intrinsic_contract_digest=contract_digest,
     )
 
 

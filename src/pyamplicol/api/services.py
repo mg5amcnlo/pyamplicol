@@ -392,15 +392,18 @@ class Runtime:
     @property
     def execution_mode(
         self,
-    ) -> Literal["compiled", "eager", "recurrence", "on-the-fly"]:
+    ) -> Literal["compiled", "eager", "recurrence", "on-the-fly", "spinor"]:
         """Native execution lane authenticated while loading the artifact."""
 
         value = getattr(self._backend, "execution_mode", None)
-        if value not in {"compiled", "eager", "recurrence", "on-the-fly"}:
+        if value not in {"compiled", "eager", "recurrence", "on-the-fly", "spinor"}:
             raise EvaluationError(
                 "runtime backend does not expose a valid execution mode"
             )
-        return cast(Literal["compiled", "eager", "recurrence", "on-the-fly"], value)
+        return cast(
+            Literal["compiled", "eager", "recurrence", "on-the-fly", "spinor"],
+            value,
+        )
 
     def inspect(self) -> Mapping[str, object]:
         """Return compact authenticated runtime metadata and live cache state.

@@ -40,6 +40,61 @@ fn digest(seed: u8) -> SemanticDigest {
     SemanticDigest::new([seed; 32]).unwrap()
 }
 
+#[test]
+fn prepared_intrinsic_metadata_is_keyed_and_fail_closed() {
+    let key = PreparedDirectExecutorKey::Evaluator {
+        role: DirectExecutorRole::Contribution,
+        evaluator_binding_id: 41,
+    };
+    let scale = PreparedDirectIntrinsicScale::new(1.0_f64.to_bits(), 0.0_f64.to_bits(), Some(51));
+    let descriptor = PreparedDirectIntrinsicDescriptor::new(
+        key,
+        "rusticol.recurrence-intrinsic.scalar-product.v1".to_owned(),
+        Some(digest(19)),
+        Some(scale),
+    );
+    let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+        digest(3),
+        vec![PreparedDirectExecutorBinding::evaluator(
+            DirectExecutorRole::Contribution,
+            41,
+            0,
+        )],
+        vec![descriptor],
+    )
+    .unwrap();
+    let retained = catalog
+        .intrinsic_descriptor(DirectExecutorRole::Contribution, 41)
+        .unwrap();
+    assert_eq!(
+        retained.runtime_template(),
+        "rusticol.recurrence-intrinsic.scalar-product.v1"
+    );
+    assert_eq!(retained.contract_digest(), Some(digest(19)));
+    assert_eq!(retained.scale(), Some(scale));
+
+    let incomplete = PreparedDirectIntrinsicDescriptor::new(
+        key,
+        "rusticol.recurrence-intrinsic.scalar-product.v1".to_owned(),
+        None,
+        Some(scale),
+    );
+    assert!(
+        PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![PreparedDirectExecutorBinding::evaluator(
+                DirectExecutorRole::Contribution,
+                41,
+                0,
+            )],
+            vec![incomplete],
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("incomplete execution metadata")
+    );
+}
+
 fn rational(numerator: i128) -> ExactComplexRational {
     ExactComplexRational::new(
         ExactRational::new(numerator, 1).unwrap(),

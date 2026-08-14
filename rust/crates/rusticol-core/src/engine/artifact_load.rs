@@ -6,6 +6,10 @@ use super::eager_v3_manifest::{EagerV3ExecutionManifest, parse_eager_v3_executio
 use super::on_the_fly_manifest::{
     ON_THE_FLY_EXECUTION_KIND, OnTheFlyExecutionManifest, parse_on_the_fly_execution_manifest,
 };
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+use super::spinor_manifest::{
+    SPINOR_EXECUTION_KIND, SpinorExecutionManifest, parse_spinor_execution_manifest,
+};
 use super::*;
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 use crate::recurrence::RECURRENCE_RUNTIME_KIND;
@@ -18,6 +22,8 @@ pub(super) enum LoadedExecutionManifest {
     Recurrence(Box<RecurrenceExecutionManifest>),
     #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
     OnTheFly(Box<OnTheFlyExecutionManifest>),
+    #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+    Spinor(Box<SpinorExecutionManifest>),
 }
 
 impl LoadedExecutionManifest {
@@ -30,6 +36,8 @@ impl LoadedExecutionManifest {
             Self::Recurrence(value) => &value.key,
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             Self::OnTheFly(value) => &value.key,
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            Self::Spinor(value) => &value.key,
         }
     }
 
@@ -42,6 +50,8 @@ impl LoadedExecutionManifest {
             Self::Recurrence(value) => &value.process,
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             Self::OnTheFly(value) => &value.process,
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            Self::Spinor(value) => &value.process,
         }
     }
 
@@ -54,6 +64,8 @@ impl LoadedExecutionManifest {
             Self::Recurrence(value) => &value.color_accuracy,
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             Self::OnTheFly(value) => &value.color_accuracy,
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            Self::Spinor(value) => &value.color_accuracy,
         }
     }
 
@@ -66,6 +78,8 @@ impl LoadedExecutionManifest {
             Self::Recurrence(value) => &value.external_pdg_order,
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             Self::OnTheFly(value) => &value.external_pdg_order,
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            Self::Spinor(value) => &value.external_pdg_order,
         }
     }
 
@@ -78,6 +92,8 @@ impl LoadedExecutionManifest {
             Self::Recurrence(value) => &value.required_runtime_capabilities,
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             Self::OnTheFly(value) => &value.required_runtime_capabilities,
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            Self::Spinor(value) => &value.required_runtime_capabilities,
         }
     }
 
@@ -89,7 +105,7 @@ impl LoadedExecutionManifest {
             // the kernel pack. Their compact execution headers intentionally do
             // not duplicate that backend identity.
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
-            Self::EagerV3(_) | Self::Recurrence(_) | Self::OnTheFly(_) => Ok(()),
+            Self::EagerV3(_) | Self::Recurrence(_) | Self::OnTheFly(_) | Self::Spinor(_) => Ok(()),
         }
     }
 }
@@ -126,6 +142,7 @@ pub(super) fn load_verified_evaluator(
         || header.kind == "pyamplicol-runtime-eager-execution"
         || header.kind == RECURRENCE_RUNTIME_KIND
         || header.kind == ON_THE_FLY_EXECUTION_KIND
+        || header.kind == SPINOR_EXECUTION_KIND
     {
         if artifact.manifest().processes.len() != 1 {
             return Err(RusticolError::integrity(
@@ -468,6 +485,10 @@ fn parse_execution_payload_variant(
         ON_THE_FLY_EXECUTION_KIND => parse_on_the_fly_execution_manifest(bytes, outer)
             .map(Box::new)
             .map(LoadedExecutionManifest::OnTheFly),
+        #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+        SPINOR_EXECUTION_KIND => parse_spinor_execution_manifest(bytes, outer)
+            .map(Box::new)
+            .map(LoadedExecutionManifest::Spinor),
         _ => Err(RusticolError::compatibility(format!(
             "unsupported internal evaluator manifest kind {:?}",
             header.kind
@@ -541,6 +562,39 @@ fn validate_loaded_execution_references(
                 return Err(RusticolError::security(
                     "on-the-fly runtime container is not owned evaluator state",
                 ));
+            }
+            Ok(())
+        }
+        #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+        LoadedExecutionManifest::Spinor(manifest) => {
+            let Some(graph) = manifest.graph_payload.as_ref() else {
+                return Ok(());
+            };
+            let relative_root = evaluator_root.strip_prefix(artifact.root()).map_err(|_| {
+                RusticolError::security("spinor process root escapes the verified artifact")
+            })?;
+            let relative = relative_root.join(&graph.path);
+            let relative = relative.to_str().ok_or_else(|| {
+                RusticolError::security("spinor graph payload path is not valid UTF-8")
+            })?;
+            let payload = artifact.payload(relative)?;
+            if payload.role != PayloadRole::EvaluatorState
+                || payload.media_type != "application/octet-stream"
+                || payload.process_id.as_deref() != Some(manifest.key.as_str())
+                || payload.executable
+            {
+                return Err(RusticolError::security(
+                    "spinor graph payload is not process-owned evaluator state",
+                ));
+            }
+            if let Some(kernel_pack) = &manifest.kernel_pack {
+                if artifact.payload(&kernel_pack.manifest_path)?.role
+                    != PayloadRole::EvaluatorManifest
+                {
+                    return Err(RusticolError::security(
+                        "spinor prepared kernel pack is not an evaluator manifest",
+                    ));
+                }
             }
             Ok(())
         }

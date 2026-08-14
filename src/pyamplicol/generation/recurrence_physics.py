@@ -388,6 +388,160 @@ def build_recurrence_runtime_metadata(
     )
 
 
+def build_graph_spinor_physics(
+    process: CanonicalProcessIR,
+    logical: RecurrenceBuilderLogicalInputV1,
+    catalog: RecurrenceTemplateCatalog,
+    *,
+    process_id: str,
+    normalization: Mapping[str, object],
+    selected_color_sector_ids: Sequence[int] | None,
+) -> dict[str, object]:
+    """Project one authenticated recurrence flow onto aggregate graph axes."""
+
+    if logical.process_id != process.key or process.color_accuracy != "lc":
+        raise ValueError(
+            "graph-backed spinor physics requires its LC process projection"
+        )
+    retained_flows = _retained_public_flows(logical)
+    if len(retained_flows) != 1:
+        raise ValueError(
+            "graph-backed spinor physics requires exactly one retained LC flow"
+        )
+    flow = retained_flows[0]
+    selected_flow_ids = (
+        None
+        if logical.selected_public_flow_ids is None
+        else set(logical.selected_public_flow_ids)
+    )
+    selected_sector_ids = (
+        None
+        if selected_color_sector_ids is None
+        else tuple(sorted({int(value) for value in selected_color_sector_ids}))
+    )
+    if (selected_flow_ids is None) != (selected_sector_ids is None):
+        raise ValueError(
+            "graph-backed spinor selected flows and color sectors must be "
+            "recorded together"
+        )
+    if selected_sector_ids == ():
+        raise ValueError(
+            "graph-backed spinor selected color sectors cannot be empty"
+        )
+    color_coverage = "complete" if selected_flow_ids is None else "selected"
+    weight = _complex_factor(flow.reduction_weight)
+    if weight != 1.0 + 0.0j:
+        raise ValueError(
+            "graph-backed spinor physics requires unit retained-flow reduction weight"
+        )
+    labels_by_slot = {
+        leg.source_slot: leg.public_label for leg in logical.external_legs
+    }
+    word = [labels_by_slot[slot] for slot in flow.word_source_slots]
+    external_count = len(process.legs)
+    return {
+        "schema_version": 1,
+        "kind": "pyamplicol-resolved-physics",
+        "process_id": process_id,
+        "process": process.process,
+        "color_accuracy": "lc",
+        "coverage": {
+            "helicities": "complete",
+            "color": color_coverage,
+            "color_kind": "physical-lc-flows",
+            "structural_zero_helicity_count": 0,
+        },
+        "external_particles": [
+            {
+                "index": index,
+                "label": int(leg.label),
+                "particle": str(leg.particle),
+                "pdg": int(leg.pdg),
+                "role": "initial" if leg.is_initial else "final",
+                "momentum_slot": index,
+                "momentum_components": ["E", "px", "py", "pz"],
+            }
+            for index, leg in enumerate(process.legs)
+        ],
+        "helicities": [
+            {
+                "id": "h:sum",
+                "index": 0,
+                "values": [0] * external_count,
+                "computed": True,
+                "structural_zero": False,
+                "representative_id": "h:sum",
+                "coefficient": 1.0,
+            }
+        ],
+        "color_components": [
+            {
+                "kind": "lc-flow",
+                "id": flow.public_id,
+                "index": 0,
+                "word": word,
+                "computed": True,
+                "representative_id": flow.public_id,
+                "coefficient": 1.0,
+            }
+        ],
+        "reduction": {
+            "kind": "lc-diagonal",
+            "groups": [
+                {
+                    "id": "reduction:0",
+                    "representative_helicity_id": "h:sum",
+                    "representative_color_id": flow.public_id,
+                    "physical_helicity_ids": ["h:sum"],
+                    "physical_color_ids": [flow.public_id],
+                }
+            ],
+        },
+        "model_parameters": _public_model_parameters(catalog),
+        "selectors": {
+            "helicity": False,
+            "color_flow": True,
+            "contracted_color": False,
+        },
+        "extensions": {
+            "process_key": process.key,
+            "normalization": {
+                key: normalization[key]
+                for key in _NORMALIZATION_EXTENSION_KEYS
+                if key in normalization
+            },
+            "runtime_selectors": {
+                "kind": "pyamplicol-runtime-selectors",
+                "contract_version": 1,
+                "provenance": RECURRENCE_PLAN_ABI,
+                "axes": {
+                    "helicity": {
+                        "generation_coverage": "complete",
+                        "generation_selection": {},
+                        "runtime_contract": "complete-reusable",
+                    },
+                    "color_flow": {
+                        "generation_coverage": color_coverage,
+                        "generation_selection": list(selected_sector_ids or ()),
+                        "runtime_contract": (
+                            "complete-reusable"
+                            if color_coverage == "complete"
+                            else "generation-specialized"
+                        ),
+                    },
+                },
+                "generation_specialized_axes": (
+                    [] if color_coverage == "complete" else ["color_flow"]
+                ),
+            },
+            "spinor_dag": {
+                "helicity_axis": "always-summed-aggregate",
+                "graph_backed": True,
+            },
+        },
+    }
+
+
 def build_on_the_fly_public_metadata(
     process: CanonicalProcessIR,
     catalog: RecurrenceTemplateCatalog,
@@ -1071,6 +1225,7 @@ def _helicity_id(values: Sequence[int]) -> str:
 
 
 __all__ = [
+    "build_graph_spinor_physics",
     "build_on_the_fly_public_metadata",
     "build_on_the_fly_runtime_metadata",
     "build_recurrence_color_contraction",

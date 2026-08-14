@@ -230,6 +230,14 @@ def main() -> int:
                     str(overlay / RUSTICOL_MANIFEST),
                     "--features",
                     "extension-module,numpy",
+                    # This wheel is installed only into the local candidate
+                    # source runtime.  Release manylinux repair belongs to the
+                    # release builder and can reject otherwise valid host-only
+                    # development binaries on newer glibc systems.
+                    "--compatibility",
+                    "linux",
+                    "--auditwheel",
+                    "skip",
                     "--interpreter",
                     str(args.python),
                     "--out",

@@ -6,11 +6,13 @@ parent: "Profiling and Benchmarking"
 <!-- SPDX-License-Identifier: 0BSD -->
 # Performance Reports
 
-The repository publishes only two rendered snapshots from separate manual
-measurement campaigns:
+The repository publishes two rendered snapshots from separate manual
+measurement campaigns and focused execution-design studies:
 
 - [MacBook M3 report](https://github.com/mg5amcnlo/pyamplicol/blob/main/docs/performance_reports/macbook_M3_pyAmpliCol.pdf)
 - [AMD EPYC report](https://github.com/mg5amcnlo/pyamplicol/blob/main/docs/performance_reports/EPYC_pyAmpliCol.pdf)
+- [Berends-Giele closure-anchor study](berends_giele_closure_anchor_study.md)
+- [Always-summed spinor DAG study](spinor_dag_study.md)
 
 These PDFs are measurement-host results, not release-CI results. Raw JSON,
 generated TeX, build workspaces, attempts, logs, locks, and coordination state

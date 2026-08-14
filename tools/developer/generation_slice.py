@@ -26,6 +26,9 @@ from pyamplicol.api.requests import (
 from pyamplicol.api.results import GenerationResult
 from pyamplicol.api.services import _generation_resource_resolution
 from pyamplicol.config import ConfigResolution, GenerationConfig, RunConfig
+from pyamplicol.generation.recurrence_projection import (
+    RecurrenceClosureAnchorPolicy,
+)
 from pyamplicol.generation.service import GenerationBackend, _ProcessSelection
 from pyamplicol.reporting import ProgressSink
 
@@ -61,8 +64,12 @@ class GenerationSlice:
     reference_color_order: tuple[int, ...] = ()
     selected_color_sector_ids: tuple[int, ...] = ()
     selected_source_helicities: Mapping[int, int] | None = None
+    recurrence_closure_anchor_policy: RecurrenceClosureAnchorPolicy = "right"
+    experimental_spinor_dag: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.experimental_spinor_dag, bool):
+            raise TypeError("experimental_spinor_dag must be a boolean")
         object.__setattr__(
             self,
             "reference_color_order",
@@ -97,6 +104,10 @@ class GenerationSlice:
             "selected_source_helicities",
             normalized_helicities or None,
         )
+        if self.recurrence_closure_anchor_policy not in {"right", "left", "both"}:
+            raise ValueError(
+                "recurrence_closure_anchor_policy must be 'right', 'left', or 'both'"
+            )
 
     def _selection(self) -> _ProcessSelection:
         return _ProcessSelection(
@@ -107,6 +118,7 @@ class GenerationSlice:
                 else None
             ),
             selected_source_helicities=self.selected_source_helicities,
+            experimental_spinor_dag=self.experimental_spinor_dag,
         )
 
 
@@ -148,6 +160,7 @@ def generate_slice(
         resolved,
         progress,
         process_selection=selection._selection(),
+        recurrence_closure_anchor_policy=(selection.recurrence_closure_anchor_policy),
     )
     return backend.generate(
         _process_set(processes),

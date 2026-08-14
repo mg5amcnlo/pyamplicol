@@ -1127,7 +1127,7 @@ type RecurrenceCommonRuntimeParts = (
     Vec<DirectSourceDispatchDomainSpec>,
 );
 
-fn recurrence_runtime_parameters(
+pub(super) fn recurrence_runtime_parameters(
     metadata: &RecurrenceRuntimeMetadata,
 ) -> Vec<GenericRuntimeModelParameterManifest> {
     metadata
@@ -1146,12 +1146,12 @@ fn recurrence_runtime_parameters(
 }
 
 #[derive(Clone, Copy)]
-struct RecurrenceNormalizationValues {
-    factor: f64,
-    color_factor: f64,
+pub(super) struct RecurrenceNormalizationValues {
+    pub(super) factor: f64,
+    pub(super) color_factor: f64,
 }
 
-fn recurrence_normalization_values(
+pub(super) fn recurrence_normalization_values(
     metadata: &RecurrenceRuntimeMetadata,
 ) -> RusticolResult<RecurrenceNormalizationValues> {
     let normalization = &metadata.normalization;
@@ -1180,6 +1180,32 @@ fn recurrence_normalization_values(
         factor,
         color_factor,
     })
+}
+
+pub(super) fn recurrence_prepared_parameter_projection(
+    metadata: &RecurrenceRuntimeMetadata,
+) -> RusticolResult<Vec<PreparedParameterProjectionEntry>> {
+    metadata
+        .parameter_projection
+        .iter()
+        .filter_map(|row| {
+            row.prepared_parameter_id
+                .map(|prepared_slot| (row, prepared_slot))
+        })
+        .map(|(row, prepared_slot)| {
+            Ok(PreparedParameterProjectionEntry {
+                runtime_slot: usize::try_from(row.runtime_slot).map_err(|_| {
+                    RusticolError::artifact("recurrence runtime parameter slot exceeds usize")
+                })?,
+                prepared_slot: usize::try_from(prepared_slot).map_err(|_| {
+                    RusticolError::artifact("recurrence prepared parameter slot exceeds usize")
+                })?,
+                component: u8::try_from(row.component).map_err(|_| {
+                    RusticolError::artifact("recurrence parameter component exceeds u8")
+                })?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(feature = "on-the-fly-test-support")]
@@ -1824,7 +1850,8 @@ impl NativeRuntime {
                 LoadedExecutionManifest::Recurrence(manifest) => manifest,
                 LoadedExecutionManifest::Compiled(_)
                 | LoadedExecutionManifest::EagerV3(_)
-                | LoadedExecutionManifest::OnTheFly(_) => {
+                | LoadedExecutionManifest::OnTheFly(_)
+                | LoadedExecutionManifest::Spinor(_) => {
                     return Err(RusticolError::compatibility(
                         "on-the-fly artifact probing requires a recurrence artifact",
                     ));

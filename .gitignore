@@ -24,9 +24,11 @@ src/pyamplicol/_rusticol*.pyd
 .cargo/config.toml
 
 # Retain local performance campaigns and generated reports outside Git. The
-# repository publishes only the report index and two selected PDF snapshots.
+# repository publishes only the index, selected PDF snapshots, and focused studies.
 /docs/performance_reports/*
 !/docs/performance_reports/README.md
+!/docs/performance_reports/berends_giele_closure_anchor_study.md
+!/docs/performance_reports/spinor_dag_study.md
 !/docs/performance_reports/macbook_M3_pyAmpliCol.pdf
 !/docs/performance_reports/EPYC_pyAmpliCol.pdf
 /docs/arxiv/

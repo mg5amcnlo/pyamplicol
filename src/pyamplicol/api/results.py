@@ -749,9 +749,9 @@ class BenchmarkTimingBreakdown:
     """
 
     sample_count: int
-    execution_mode: Literal["compiled", "eager", "recurrence", "on-the-fly"] = (
-        "compiled"
-    )
+    execution_mode: Literal[
+        "compiled", "eager", "recurrence", "on-the-fly", "spinor"
+    ] = "compiled"
     wall_time: BenchmarkComponentTiming | None = None
     source_fill_time: BenchmarkComponentTiming | None = None
     momentum_setup_time: BenchmarkComponentTiming | None = None
@@ -813,10 +813,11 @@ class BenchmarkTimingBreakdown:
             "eager",
             "recurrence",
             "on-the-fly",
+            "spinor",
         }:
             raise ValueError(
                 "benchmark timing breakdown execution_mode must be compiled, eager, "
-                "recurrence, or on-the-fly"
+                "recurrence, on-the-fly, or spinor"
             )
         for name in (
             "wall_time",

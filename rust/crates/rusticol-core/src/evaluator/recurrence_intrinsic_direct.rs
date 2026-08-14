@@ -34,6 +34,7 @@ pub(crate) const VECTOR_WEDGE_VECTOR_TO_ANTISYMMETRIC_TENSOR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.vector-wedge-vector.v1";
 pub(crate) const COLOR_ORDERED_THREE_VECTOR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.color-ordered-three-vector.v1";
+pub(crate) const SCALAR_PRODUCT_TEMPLATE: &str = "rusticol.recurrence-intrinsic.scalar-product.v1";
 pub(crate) const WEYL_PROPAGATOR_POSITIVE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.weyl-propagator-a.v1";
 pub(crate) const WEYL_PROPAGATOR_NEGATIVE_TEMPLATE: &str =
@@ -44,6 +45,7 @@ pub(crate) const FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE: &str =
 /// Exact algebra class certified by the model compiler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RecurrenceContributionIntrinsicKind {
+    ScalarProduct,
     WeylVectorToWeylPositive,
     WeylVectorToWeylNegative,
     AntisymmetricTensorVectorToVector,
@@ -75,6 +77,7 @@ impl RecurrenceContributionIntrinsicKind {
     #[cfg(test)]
     pub(crate) const fn runtime_template(self) -> &'static str {
         match self {
+            Self::ScalarProduct => SCALAR_PRODUCT_TEMPLATE,
             Self::WeylVectorToWeylPositive => WEYL_VECTOR_TO_WEYL_POSITIVE_TEMPLATE,
             Self::WeylVectorToWeylNegative => WEYL_VECTOR_TO_WEYL_NEGATIVE_TEMPLATE,
             Self::AntisymmetricTensorVectorToVector => {
@@ -89,6 +92,7 @@ impl RecurrenceContributionIntrinsicKind {
 
     pub(crate) fn from_runtime_template(value: &str) -> RusticolResult<Self> {
         match value {
+            SCALAR_PRODUCT_TEMPLATE => Ok(Self::ScalarProduct),
             WEYL_VECTOR_TO_WEYL_POSITIVE_TEMPLATE => Ok(Self::WeylVectorToWeylPositive),
             WEYL_VECTOR_TO_WEYL_NEGATIVE_TEMPLATE => Ok(Self::WeylVectorToWeylNegative),
             ANTISYMMETRIC_TENSOR_VECTOR_TO_VECTOR_TEMPLATE => {
@@ -186,6 +190,7 @@ impl LoadedRecurrenceIntrinsicDirectExecutor {
 
     pub(crate) fn contribution_handle(&self) -> ContextDirectContributionExecutorHandle {
         let call = match self.kind {
+            RecurrenceContributionIntrinsicKind::ScalarProduct => execute_scalar_product_rows,
             RecurrenceContributionIntrinsicKind::WeylVectorToWeylPositive => {
                 execute_weyl_vector_to_weyl_positive_rows
             }
@@ -399,6 +404,63 @@ struct WeylVectorToWeylNegative;
 struct AntisymmetricTensorVectorToVector;
 struct VectorWedgeVectorToAntisymmetricTensor;
 struct ColorOrderedThreeVector;
+struct ScalarProduct;
+
+impl DirectContributionFormula for ScalarProduct {
+    const PARENT0_COMPONENTS: u32 = 1;
+    const PARENT1_COMPONENTS: u32 = 1;
+    const DESTINATION_COMPONENTS: u32 = 1;
+    const BASE_SCALE: ComplexValue = ComplexValue::new(1.0, 0.0);
+
+    #[inline(always)]
+    unsafe fn evaluate_point(
+        arena: DirectArenaView,
+        row: DirectContributionRow,
+        stride: usize,
+        point: usize,
+        scale: ComplexValue,
+    ) {
+        let left = unsafe { load_current(arena, row.parent0_component_base, stride, point) };
+        let right =
+            unsafe { load_current(arena, row.parent1_component_base_or_sentinel, stride, point) };
+        unsafe {
+            add_scaled_current(
+                arena,
+                row.destination_component_base,
+                stride,
+                point,
+                left.mul(right),
+                scale,
+                contribution_accumulates(row),
+            );
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn evaluate_pair(
+        arena: DirectArenaView,
+        row: DirectContributionRow,
+        stride: usize,
+        point: usize,
+        scale: ComplexValue,
+    ) {
+        let left = unsafe { load_current_pair(arena, row.parent0_component_base, stride, point) };
+        let right = unsafe {
+            load_current_pair(arena, row.parent1_component_base_or_sentinel, stride, point)
+        };
+        unsafe {
+            add_scaled_current_pair(
+                arena,
+                row.destination_component_base,
+                stride,
+                point,
+                left.mul(right),
+                scale,
+                contribution_accumulates(row),
+            );
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct SimdComplex2 {
@@ -1159,6 +1221,29 @@ unsafe extern "C" fn execute_weyl_vector_to_weyl_positive_rows(
 ) -> c_int {
     unsafe {
         execute_rows::<WeylVectorToWeylPositive>(
+            context,
+            arena,
+            parameters,
+            factors,
+            rows,
+            row_count,
+            point_count,
+        )
+    }
+}
+
+unsafe extern "C" fn execute_scalar_product_rows(
+    context: *const c_void,
+    arena: DirectArenaView,
+    _momenta: DirectMomentumView,
+    parameters: DirectParameterView,
+    factors: DirectFactorView,
+    rows: *const DirectContributionRow,
+    row_count: u32,
+    point_count: u32,
+) -> c_int {
+    unsafe {
+        execute_rows::<ScalarProduct>(
             context,
             arena,
             parameters,
@@ -2195,6 +2280,7 @@ mod tests {
     #[test]
     fn runtime_template_names_round_trip_and_unknown_names_fail_closed() {
         let kinds = [
+            RecurrenceContributionIntrinsicKind::ScalarProduct,
             RecurrenceContributionIntrinsicKind::WeylVectorToWeylPositive,
             RecurrenceContributionIntrinsicKind::WeylVectorToWeylNegative,
             RecurrenceContributionIntrinsicKind::AntisymmetricTensorVectorToVector,

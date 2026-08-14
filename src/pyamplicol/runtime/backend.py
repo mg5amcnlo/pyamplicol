@@ -20,6 +20,7 @@ from pyamplicol._internal.versions import (
     ON_THE_FLY_LC_COLOR_RUNTIME_CAPABILITY,
     ON_THE_FLY_RUNTIME_CAPABILITY,
     RECURRENCE_DIRECT_ARENA_RUNTIME_CAPABILITY,
+    SPINOR_DAG_F64_RUNTIME_CAPABILITY,
     verify_native_module,
 )
 from pyamplicol.api.errors import (
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
 
 _Accuracy = Literal["lc", "nlc", "full"]
 _ParticleState = Literal["incoming", "outgoing"]
-_ExecutionMode = Literal["compiled", "eager", "recurrence", "on-the-fly"]
+_ExecutionMode = Literal["compiled", "eager", "recurrence", "on-the-fly", "spinor"]
 
 _ON_THE_FLY_WARM_UP_TASK_ID = "runtime-warm-up"
 _ON_THE_FLY_WARM_UP_STAGES = (
@@ -547,7 +548,7 @@ def _native_execution_mode(
 ) -> _ExecutionMode:
     payload = metadata
     mode = payload.get("execution_mode", "compiled")
-    if mode not in {"compiled", "eager", "recurrence", "on-the-fly"}:
+    if mode not in {"compiled", "eager", "recurrence", "on-the-fly", "spinor"}:
         raise CompatibilityError(f"unsupported runtime execution mode {mode!r}")
     return cast(_ExecutionMode, mode)
 
@@ -591,9 +592,10 @@ class RusticolRuntimeBackend:
         return self._execution_mode
 
     def _require_supported_precision(self, precision: int) -> None:
-        if self._execution_mode == "on-the-fly" and precision != 16:
+        if self._execution_mode in {"on-the-fly", "spinor"} and precision != 16:
             raise CompatibilityError(
-                "on-the-fly execution supports only precision=16 (native f64); "
+                f"{self._execution_mode} execution supports only precision=16 "
+                "(native f64); "
                 f"received precision={precision}"
             )
 
@@ -649,7 +651,7 @@ class RusticolRuntimeBackend:
             "runtime_metadata": deepcopy(dict(self._native_metadata)),
             "on_the_fly_state": self._on_the_fly_runtime_state_census(),
         }
-        if self._execution_mode == "on-the-fly":
+        if self._execution_mode in {"on-the-fly", "spinor"}:
             result["supported_precisions"] = (16,)
         return result
 
@@ -802,6 +804,12 @@ class RusticolRuntimeBackend:
                     "on-the-fly artifact has an invalid runtime capability contract"
                 )
             self._supports_per_point_selectors = True
+        elif self._execution_mode == "spinor":
+            if capabilities != (SPINOR_DAG_F64_RUNTIME_CAPABILITY,):
+                raise CompatibilityError(
+                    "spinor artifact has an invalid runtime capability contract"
+                )
+            self._supports_per_point_selectors = False
         else:
             self._supports_per_point_selectors = (
                 RECURRENCE_DIRECT_ARENA_RUNTIME_CAPABILITY in capabilities

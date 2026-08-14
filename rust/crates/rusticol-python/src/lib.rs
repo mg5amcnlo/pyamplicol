@@ -2241,6 +2241,11 @@ fn _rusticol(module: &Bound<'_, PyModule>) -> PyResult<()> {
         recurrence::_lower_recurrence_direct_v2,
         module
     )?)?;
+    #[cfg(feature = "numpy")]
+    module.add_function(wrap_pyfunction!(
+        recurrence::_lower_recurrence_spinor_dag_v2,
+        module
+    )?)?;
     #[cfg(all(feature = "numpy", feature = "on-the-fly-test-support"))]
     module.add_function(wrap_pyfunction!(
         recurrence::_on_the_fly_test_support_probe_v1,

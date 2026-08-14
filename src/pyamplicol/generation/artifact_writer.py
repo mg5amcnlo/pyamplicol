@@ -64,6 +64,9 @@ from .._internal.versions import (
     RECURRENCE_PLAN_ABI,
     RECURRENCE_RUNTIME_LAYOUT_ABI,
     RUNTIME_PHYSICS_SCHEMA_VERSION,
+    SPINOR_DAG_ABI,
+    SPINOR_DAG_BINARY_ABI,
+    SPINOR_DAG_F64_RUNTIME_CAPABILITY,
     SYMBOLICA_ASM_RUNTIME_CAPABILITY,
     SYMBOLICA_CPP_RUNTIME_CAPABILITY,
     SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY,
@@ -159,6 +162,7 @@ _RECURRENCE_DIRECT_SCHEDULE_MEMBER_PATH = "schedule/recurrence-direct-schedule-v
 _RECURRENCE_COLOR_CONTRACTION_PATH = "recurrence-color.bin"
 _RECURRENCE_SCHEDULE_SHARING_EXTENSION = "recurrence_schedule_sharing"
 ON_THE_FLY_RUNTIME_KIND = "pyamplicol-runtime-on-the-fly-execution"
+SPINOR_DAG_RUNTIME_KIND = "pyamplicol-runtime-spinor-dag-execution"
 ON_THE_FLY_RUNTIME_CONTAINER_KIND = "pyamplicol-on-the-fly-runtime-container"
 ON_THE_FLY_RUNTIME_CONTAINER_SCHEMA_VERSION = 1
 ON_THE_FLY_RUNTIME_STORAGE_ABI = "pacbin-v1"
@@ -166,6 +170,7 @@ ON_THE_FLY_PUBLIC_METADATA_KIND = "pyamplicol-on-the-fly-public-metadata"
 _ON_THE_FLY_RUNTIME_CONTAINER_PATH = "on-the-fly-runtime.pacbin"
 _ON_THE_FLY_PROCESS_SEED_MEMBER_PATH = "on-the-fly/process-seed-v1.bin"
 _ON_THE_FLY_COLOR_CONTRACTION_PATH = "on-the-fly-color.bin"
+_SPINOR_GRAPH_PAYLOAD_PATH = "spinor-dag-v2.bin"
 _SAFE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _SUPPORTED_ARTIFACT_TARGETS = frozenset(
     {
@@ -312,11 +317,38 @@ class OnTheFlyProcessArtifact:
     generation_filters: Mapping[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class SpinorProcessArtifact:
+    """One deterministic spinor graph, legacy-specialized or payload-backed."""
+
+    process_id: str
+    expression: str
+    color_accuracy: str
+    external_pdgs: tuple[int, ...]
+    aliases: tuple[Mapping[str, object], ...]
+    physics: Mapping[str, object]
+    fixed_color_order: tuple[int, ...]
+    validation_point: ValidationPointRecord
+    generation_filters: Mapping[str, object]
+    process_family: Literal[
+        "pure-gluon",
+        "single-massless-quark-line",
+        "single-massive-quark-line",
+        "single-massless-quark-line-massive-neutral-vector",
+    ] | None = "pure-gluon"
+    ordered_source_labels: tuple[int, ...] = ()
+    spinor_parameter_names: tuple[str, ...] = ()
+    graph_payload: bytes | None = None
+    runtime_metadata: Mapping[str, object] | None = None
+    referenced_kernel_ids: frozenset[int] = frozenset()
+
+
 ProcessArtifact = (
     CompiledProcessArtifact
     | EagerPlanV3ProcessArtifact
     | RecurrenceProcessArtifact
     | OnTheFlyProcessArtifact
+    | SpinorProcessArtifact
 )
 
 
@@ -829,7 +861,10 @@ def write_schema_v3_artifact(
                     raise ValueError(
                         f"execution payload for {process_id!r} is not an object"
                     )
-                if execution_payload.get("kind") == ON_THE_FLY_RUNTIME_KIND:
+                if execution_payload.get("kind") in {
+                    ON_THE_FLY_RUNTIME_KIND,
+                    SPINOR_DAG_RUNTIME_KIND,
+                }:
                     continue
                 proof = build_generation_structural_proof(
                     artifact_root=staged_root,
@@ -1289,6 +1324,14 @@ def _prepared_kernel_ids(
             # complete prepared-kernel inventory, including bindings that a
             # particular process schedule does not happen to exercise.
             kernel_ids.update(kernel.kernel_id for kernel in bundle.kernel_pack.kernels)
+        if not kernel_ids:
+            # PreparedKernelPack deliberately rejects empty kernel inventories.
+            # Fail before publishing a graph manifest whose canonical pack
+            # reference would otherwise dangle.
+            raise ValueError(
+                "prepared execution requires at least one retained kernel; "
+                "empty prepared kernel packs are unsupported"
+            )
     return frozenset(kernel_ids)
 
 
@@ -1342,6 +1385,16 @@ def _is_prepared_kernel_process(process: ProcessArtifact) -> bool:
         EagerPlanV3ProcessArtifact
         | RecurrenceProcessArtifact
         | OnTheFlyProcessArtifact,
+    ) or (
+        isinstance(process, SpinorProcessArtifact)
+        and process.graph_payload is not None
+        and bool(process.referenced_kernel_ids)
+    )
+
+
+def _is_compact_execution_process(process: ProcessArtifact) -> bool:
+    return _is_prepared_kernel_process(process) or isinstance(
+        process, SpinorProcessArtifact
     )
 
 
@@ -1353,6 +1406,8 @@ def _prepared_referenced_kernel_ids(
     if isinstance(process, EagerPlanV3ProcessArtifact):
         return process.referenced_kernel_ids
     if isinstance(process, OnTheFlyProcessArtifact):
+        return process.referenced_kernel_ids
+    if isinstance(process, SpinorProcessArtifact) and process.graph_payload is not None:
         return process.referenced_kernel_ids
     raise TypeError("compiled process has no prepared-kernel references")
 
@@ -1401,7 +1456,8 @@ def _write_process_payloads(
         process,
         EagerPlanV3ProcessArtifact
         | RecurrenceProcessArtifact
-        | OnTheFlyProcessArtifact,
+        | OnTheFlyProcessArtifact
+        | SpinorProcessArtifact,
     ):
         schema = {}
         physics = _mapping(process.physics)
@@ -1423,7 +1479,8 @@ def _write_process_payloads(
                 "on-the-fly generation returned incompatible compact public metadata"
             )
     elif isinstance(
-        process, EagerPlanV3ProcessArtifact | RecurrenceProcessArtifact
+        process,
+        EagerPlanV3ProcessArtifact | RecurrenceProcessArtifact | SpinorProcessArtifact,
     ) and (
         physics.get("schema_version") != RUNTIME_PHYSICS_SCHEMA_VERSION
         or physics.get("kind") != "pyamplicol-resolved-physics"
@@ -1534,6 +1591,21 @@ def _write_process_payloads(
             role="evaluator-manifest",
             media_type="application/json",
             process_id=process.process_id,
+        )
+    elif isinstance(process, SpinorProcessArtifact):
+        if process.graph_payload is not None:
+            evaluator_payloads.add_bytes(
+                f"{prefix}/{_SPINOR_GRAPH_PAYLOAD_PATH}",
+                process.graph_payload,
+                process_id=process.process_id,
+                media_type="application/octet-stream",
+            )
+        execution_record = builder.add_json(
+            execution_path,
+            _spinor_execution_manifest(process),
+            role="evaluator-manifest",
+            process_id=process.process_id,
+            compact=True,
         )
     else:
         execution_record = builder.add_json(
@@ -1814,6 +1886,184 @@ def _on_the_fly_execution_summary(
         ) from exc
 
 
+def _spinor_execution_manifest(
+    process: SpinorProcessArtifact,
+) -> dict[str, object]:
+    external_count = len(process.external_pdgs)
+    if process.color_accuracy != "lc" or external_count < 2:
+        raise ValueError(
+            "spinor artifacts require LC and at least two external particles"
+        )
+    if process.graph_payload is not None:
+        if (
+            not process.graph_payload
+            or process.process_family is not None
+            or process.fixed_color_order
+            or process.ordered_source_labels
+            or process.spinor_parameter_names
+            or process.runtime_metadata is None
+        ):
+            raise ValueError(
+                "graph-backed spinor artifacts require payload-owned source and "
+                "parameter bindings plus recurrence runtime metadata"
+            )
+        manifest: dict[str, object] = {
+            "schema_version": PROCESS_ARTIFACT_SCHEMA_VERSION,
+            "kind": SPINOR_DAG_RUNTIME_KIND,
+            "required_runtime_capabilities": [SPINOR_DAG_F64_RUNTIME_CAPABILITY],
+            "process": process.expression,
+            "key": process.process_id,
+            "color_accuracy": process.color_accuracy,
+            "external_pdg_order": list(process.external_pdgs),
+            "spinor_dag_abi": SPINOR_DAG_ABI,
+            "external_count": external_count,
+            "fixed_color_order": [],
+            "helicity_reduction": "complete-incoherent-sum",
+            "coupling_stripped": False,
+            "graph_payload": {
+                "abi": SPINOR_DAG_BINARY_ABI,
+                "path": _SPINOR_GRAPH_PAYLOAD_PATH,
+            },
+            "runtime_metadata": dict(process.runtime_metadata),
+        }
+        if process.referenced_kernel_ids:
+            manifest["kernel_pack"] = {
+                "manifest_path": _EAGER_KERNEL_PACK_PATH,
+                "payload_root": _EAGER_KERNEL_PAYLOAD_ROOT,
+            }
+        return manifest
+    if process.runtime_metadata is not None:
+        raise ValueError("legacy spinor artifacts cannot carry graph runtime metadata")
+    if external_count not in {3, 4, 5, 6}:
+        raise ValueError(
+            "legacy spinor artifacts require three to six external particles"
+        )
+    if process.process_family == "pure-gluon":
+        if (
+            external_count not in {4, 5, 6}
+            or sorted(process.fixed_color_order) != list(range(1, external_count + 1))
+            or any(pdg != 21 for pdg in process.external_pdgs)
+            or process.ordered_source_labels
+            or process.spinor_parameter_names
+        ):
+            raise ValueError(
+                "pure-gluon spinor artifacts require only gluons and no "
+                "explicit traversal or graph-parameter metadata"
+            )
+    elif process.process_family == "single-massless-quark-line":
+        source_labels = tuple(int(label) for label in process.ordered_source_labels)
+        if (
+            external_count not in {4, 5, 6}
+            or sorted(process.fixed_color_order) != list(range(1, external_count + 1))
+            or source_labels != process.fixed_color_order
+            or process.spinor_parameter_names
+        ):
+            raise ValueError(
+                "quark-line spinor artifacts require the source traversal to "
+                "equal the fixed color order and no graph parameters"
+            )
+        outgoing_pdgs = tuple(
+            (
+                -int(process.external_pdgs[label - 1])
+                if label <= 2 and abs(int(process.external_pdgs[label - 1])) <= 5
+                else int(process.external_pdgs[label - 1])
+            )
+            for label in source_labels
+        )
+        if (
+            outgoing_pdgs[0] not in range(1, 6)
+            or outgoing_pdgs[-1] != -outgoing_pdgs[0]
+            or any(pdg != 21 for pdg in outgoing_pdgs[1:-1])
+            or sorted(abs(pdg) for pdg in process.external_pdgs)
+            != sorted(abs(pdg) for pdg in outgoing_pdgs)
+        ):
+            raise ValueError(
+                "quark-line spinor artifacts require a complete q-gluons-qbar "
+                "outgoing traversal matching the external particles"
+            )
+    elif process.process_family == "single-massive-quark-line":
+        source_labels = tuple(int(label) for label in process.ordered_source_labels)
+        if (
+            external_count != 4
+            or process.external_pdgs != (21, 21, 6, -6)
+            or process.fixed_color_order not in {(3, 1, 2, 4), (3, 2, 1, 4)}
+            or source_labels != process.fixed_color_order
+            or process.spinor_parameter_names
+            != ("particle.6.mass", "particle.6.width")
+        ):
+            raise ValueError(
+                "massive-quark spinor artifacts require g g > t tbar, one of "
+                "the two t-gluon-gluon-tbar flows, and ordered top mass/width "
+                "graph parameters"
+            )
+    elif process.process_family == "single-massless-quark-line-massive-neutral-vector":
+        source_labels = tuple(int(label) for label in process.ordered_source_labels)
+        z_labels = tuple(
+            index + 1 for index, pdg in enumerate(process.external_pdgs) if pdg == 23
+        )
+        expected_colored_labels = sorted(
+            set(range(1, external_count + 1)) - set(z_labels)
+        )
+        if (
+            external_count not in {3, 4, 5}
+            or len(z_labels) != 1
+            or z_labels[0] <= 2
+            or sorted(process.fixed_color_order) != expected_colored_labels
+            or source_labels != (*process.fixed_color_order, z_labels[0])
+            or len(process.spinor_parameter_names) != 2
+            or len(set(process.spinor_parameter_names)) != 2
+            or any(not name for name in process.spinor_parameter_names)
+        ):
+            raise ValueError(
+                "massive-vector spinor artifacts require q-gluons-qbar color "
+                "order, a trailing final-state Z source, and two graph parameters"
+            )
+        outgoing_colored_pdgs = tuple(
+            (
+                -int(process.external_pdgs[label - 1])
+                if label <= 2 and abs(int(process.external_pdgs[label - 1])) <= 5
+                else int(process.external_pdgs[label - 1])
+            )
+            for label in process.fixed_color_order
+        )
+        if (
+            outgoing_colored_pdgs[0] not in range(1, 6)
+            or outgoing_colored_pdgs[-1] != -outgoing_colored_pdgs[0]
+            or any(pdg != 21 for pdg in outgoing_colored_pdgs[1:-1])
+        ):
+            raise ValueError(
+                "massive-vector spinor artifacts require one light outgoing "
+                "q-gluons-qbar color line"
+            )
+    else:
+        raise ValueError(f"unsupported spinor process family: {process.process_family}")
+    manifest: dict[str, object] = {
+        "schema_version": PROCESS_ARTIFACT_SCHEMA_VERSION,
+        "kind": SPINOR_DAG_RUNTIME_KIND,
+        "required_runtime_capabilities": [SPINOR_DAG_F64_RUNTIME_CAPABILITY],
+        "process": process.expression,
+        "key": process.process_id,
+        "color_accuracy": process.color_accuracy,
+        "external_pdg_order": list(process.external_pdgs),
+        "spinor_dag_abi": SPINOR_DAG_ABI,
+        "external_count": external_count,
+        "fixed_color_order": list(process.fixed_color_order),
+        "helicity_reduction": "complete-incoherent-sum",
+        "coupling_stripped": process.process_family
+        != "single-massless-quark-line-massive-neutral-vector",
+    }
+    if process.process_family != "pure-gluon":
+        manifest.update(
+            {
+                "process_family": process.process_family,
+                "ordered_source_labels": list(process.ordered_source_labels),
+            }
+        )
+    if process.spinor_parameter_names:
+        manifest["spinor_parameter_names"] = list(process.spinor_parameter_names)
+    return manifest
+
+
 def _bounded_eager_execution_summary(
     process: EagerPlanV3ProcessArtifact,
 ) -> bytes:
@@ -2086,6 +2336,8 @@ def _execution_manifest(
         )
     if isinstance(process, EagerPlanV3ProcessArtifact):
         return _eager_plan_v3_execution_manifest(process)
+    if isinstance(process, SpinorProcessArtifact):
+        return _spinor_execution_manifest(process)
     primary = _compiled_execution_lane_manifest(
         runtime_schema=compiler_schema,
         stage_manifest=process.stage_manifest,
@@ -4143,6 +4395,8 @@ def _process_runtime_capabilities(
         return _recurrence_process_runtime_capabilities(process)
     if isinstance(process, EagerPlanV3ProcessArtifact):
         return _EAGER_PLAN_V3_RUNTIME_CAPABILITIES
+    if isinstance(process, SpinorProcessArtifact):
+        return (SPINOR_DAG_F64_RUNTIME_CAPABILITY,)
     return _compiled_process_runtime_capabilities(process)
 
 
@@ -4200,6 +4454,7 @@ def _required_runtime_capabilities(
             EAGER_PLAN_V3_RUNTIME_CAPABILITY,
             RECURRENCE_DIRECT_ARENA_RUNTIME_CAPABILITY,
             RECURRENCE_COLOR_RUNTIME_CAPABILITY,
+            SPINOR_DAG_F64_RUNTIME_CAPABILITY,
         }
     )
     if unknown:
@@ -4235,7 +4490,7 @@ def _extensions(
             ),
             "filters": dict(process.generation_filters),
         }
-        if _is_prepared_kernel_process(process):
+        if _is_compact_execution_process(process):
             record["execution_manifest_sha256"] = execution_manifest_sha256_by_process[
                 process.process_id
             ]
@@ -4873,6 +5128,7 @@ __all__ = [
     "RECURRENCE_RUNTIME_KIND",
     "RECURRENCE_RUNTIME_LAYOUT_ABI",
     "RECURRENCE_RUNTIME_STORAGE_ABI",
+    "SPINOR_DAG_RUNTIME_KIND",
     "ApiBundleHook",
     "ArtifactWriteResult",
     "CompiledExecutionArtifact",
@@ -4881,6 +5137,7 @@ __all__ = [
     "OnTheFlyProcessArtifact",
     "ProcessArtifact",
     "RecurrenceProcessArtifact",
+    "SpinorProcessArtifact",
     "build_api_validation_points",
     "write_schema_v3_artifact",
 ]

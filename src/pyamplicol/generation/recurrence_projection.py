@@ -14,7 +14,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 from ..color.plan import (
     ColorTopologyReplayCertificate,
@@ -69,6 +69,10 @@ _TEMPLATE_SECTIONS: Final = (
 )
 _CLOSURE_ANCHOR_PROOF_ALGORITHM_V2: Final = "canonical-lc-closure-anchor-v2"
 _CLOSURE_ANCHOR_PROOF_ALGORITHM_V3: Final = "canonical-lc-closure-anchor-v3"
+_CLOSURE_ANCHOR_PROOF_ALGORITHM_EXPERIMENTAL_V1: Final = (
+    "experimental-single-open-line-endpoint-anchor-v1"
+)
+RecurrenceClosureAnchorPolicy = Literal["right", "left", "both"]
 _PURE_MASSLESS_ADJOINT_HELICITY_SUPPORT_ROLE: Final = (
     "helicity-support:pure-massless-adjoint-tree-v1"
 )
@@ -123,6 +127,7 @@ def project_recurrence_process_v1(
     coupling_order_limits: Mapping[str, int] | None = None,
     process_support_mask: int = 1,
     model: Model | None = None,
+    closure_anchor_policy: RecurrenceClosureAnchorPolicy = "right",
 ) -> RecurrenceBuilderLogicalInputV1:
     """Return deterministic recurrence-builder records for one LC process.
 
@@ -141,6 +146,16 @@ def project_recurrence_process_v1(
     ):
         raise RecurrenceProjectionError(
             "recurrence process support mask must be a positive integer bitmap"
+        )
+    if closure_anchor_policy not in {"right", "left", "both"}:
+        raise RecurrenceProjectionError(
+            "recurrence closure-anchor policy must be 'right', 'left', or 'both'"
+        )
+    if closure_anchor_policy == "both" and layout != "all-flow-union":
+        raise RecurrenceProjectionError(
+            "the mixed-endpoint closure-anchor study requires the "
+            "all-flow-union layout; topology replay requires one endpoint "
+            "choice per replay-equivalence class"
         )
     reflection_contract = _closure_reflection_contract(
         template_catalog,
@@ -161,6 +176,7 @@ def project_recurrence_process_v1(
         process,
         external_legs,
         process_support_mask,
+        closure_anchor_policy,
     )
     selected_flows = selection.selected_public_flow_ids
     if selected_flows is not None:
@@ -885,6 +901,7 @@ def _project_physical_sectors(
     process: CanonicalProcessIR,
     external_legs: tuple[RecurrenceExternalLegV1, ...],
     support_mask: int,
+    closure_anchor_policy: RecurrenceClosureAnchorPolicy,
 ) -> tuple[
     tuple[RecurrencePhysicalLCSectorV1, ...],
     tuple[RecurrencePublicLCFlowV1, ...],
@@ -976,6 +993,7 @@ def _project_physical_sectors(
             process_source_label_order=tuple(int(leg.label) for leg in process.legs),
             singlet_source_slots=singlet_source_slots,
             external_legs=external_legs,
+            anchor_policy=closure_anchor_policy,
         )
         result.append(
             RecurrencePhysicalLCSectorV1(
@@ -1037,6 +1055,7 @@ def _closure_anchor_contract(
     process_source_label_order: tuple[int, ...],
     singlet_source_slots: tuple[int, ...],
     external_legs: tuple[RecurrenceExternalLegV1, ...],
+    anchor_policy: RecurrenceClosureAnchorPolicy,
 ) -> tuple[int, str, str]:
     external_source_count = len(external_legs)
     if external_source_count <= 0:
@@ -1052,20 +1071,47 @@ def _closure_anchor_contract(
             raise RecurrenceProjectionError(
                 "LC closure traversal does not preserve the physical colour word"
             )
-        closure_source_slot = closure_word_source_slots[-1]
-        # Newly projected open-line sectors always carry the v3 structural
-        # proof, including the no-rotation case.  The decoder retains v2 for
-        # already encoded terminal-word contracts.
-        proof_algorithm = (
-            _CLOSURE_ANCHOR_PROOF_ALGORITHM_V3
-            if sector_kind == "open-lines"
-            else _CLOSURE_ANCHOR_PROOF_ALGORITHM_V2
-        )
-        policy = (
-            "terminal-colour-word-endpoint"
-            if proof_algorithm == _CLOSURE_ANCHOR_PROOF_ALGORITHM_V2
-            else "minimum-coloured-source-slot-open-line-block-rotation"
-        )
+        if anchor_policy != "right":
+            if (
+                sector_kind != "open-lines"
+                or open_string_count != 1
+                or len(physical_block_source_slots) != 1
+                or len(closure_block_source_slots) != 1
+                or physical_block_source_slots[0] != word_source_slots
+                or closure_block_source_slots[0] != closure_word_source_slots
+            ):
+                raise RecurrenceProjectionError(
+                    "experimental left/both closure anchoring is restricted to "
+                    "one complete open colour line"
+                )
+            interior = closure_word_source_slots[1:-1]
+            selected_endpoint = (
+                anchor_policy
+                if anchor_policy != "both"
+                else ("left" if interior < tuple(reversed(interior)) else "right")
+            )
+            closure_source_slot = (
+                closure_word_source_slots[0]
+                if selected_endpoint == "left"
+                else closure_word_source_slots[-1]
+            )
+            proof_algorithm = _CLOSURE_ANCHOR_PROOF_ALGORITHM_EXPERIMENTAL_V1
+            policy = f"{anchor_policy}-endpoint-study"
+        else:
+            closure_source_slot = closure_word_source_slots[-1]
+            # Newly projected open-line sectors always carry the v3 structural
+            # proof, including the no-rotation case.  The decoder retains v2 for
+            # already encoded terminal-word contracts.
+            proof_algorithm = (
+                _CLOSURE_ANCHOR_PROOF_ALGORITHM_V3
+                if sector_kind == "open-lines"
+                else _CLOSURE_ANCHOR_PROOF_ALGORITHM_V2
+            )
+            policy = (
+                "terminal-colour-word-endpoint"
+                if proof_algorithm == _CLOSURE_ANCHOR_PROOF_ALGORITHM_V2
+                else "minimum-coloured-source-slot-open-line-block-rotation"
+            )
     else:
         if sector_kind != "singlet" or tuple(sorted(singlet_source_slots)) != tuple(
             range(external_source_count)
@@ -1122,6 +1168,15 @@ def _closure_anchor_contract(
                 "physical_block_source_slots": physical_block_source_slots,
                 "process_source_label_order": process_source_label_order,
                 "selected_closure_block": closure_block_source_slots[-1],
+            }
+        )
+    elif proof_algorithm == _CLOSURE_ANCHOR_PROOF_ALGORITHM_EXPERIMENTAL_V1:
+        proof_payload.update(
+            {
+                "closure_traversal_source_slots": closure_word_source_slots,
+                "open_string_source_slots": closure_block_source_slots[0],
+                "requested_endpoint_policy": anchor_policy,
+                "selected_endpoint": selected_endpoint,
             }
         )
     proof_digest = _digest(proof_payload)

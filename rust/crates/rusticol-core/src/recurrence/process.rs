@@ -2306,7 +2306,9 @@ impl<'a> RecurrenceProcessInputView<'a> {
             )?;
             if !matches!(
                 closure_algorithm,
-                "canonical-lc-closure-anchor-v2" | "canonical-lc-closure-anchor-v3"
+                "canonical-lc-closure-anchor-v2"
+                    | "canonical-lc-closure-anchor-v3"
+                    | "experimental-single-open-line-endpoint-anchor-v1"
             ) {
                 return Err(invalid(format!(
                     "physical LC sector {sector_index} uses unsupported closure-anchor proof algorithm {closure_algorithm:?}"
@@ -2584,6 +2586,82 @@ impl<'a> RecurrenceProcessInputView<'a> {
                 if closure_proof_digest.as_bytes() != &expected_digest {
                     return Err(invalid(format!(
                         "physical LC sector {sector_index} v3 closure proof digest does not match the independently reconstructed minimum-coloured-source block rotation"
+                    )));
+                }
+            } else if closure_algorithm == "experimental-single-open-line-endpoint-anchor-v1" {
+                if kind != ProcessLCSectorKind::OpenLines || open_blocks.len() != 1 {
+                    return Err(invalid(format!(
+                        "physical LC sector {sector_index} experimental endpoint anchoring requires exactly one open colour line"
+                    )));
+                }
+                let open_string = &open_blocks[0];
+                if word != open_string.as_slice() {
+                    return Err(invalid(format!(
+                        "physical LC sector {sector_index} experimental endpoint anchoring requires the public word to be one complete open colour line"
+                    )));
+                }
+                let interior = &word[1..word.len().saturating_sub(1)];
+                let reversed_interior = interior.iter().rev().copied().collect::<Vec<_>>();
+                let fermionic_source_slots = self
+                    .external_legs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, leg)| leg.is_fermionic == 1)
+                    .map(|(slot, _)| {
+                        u32::try_from(slot).map_err(|_| invalid("external source slot exceeds u32"))
+                    })
+                    .collect::<RusticolResult<Vec<_>>>()?;
+                let mut authenticated_policy_count = 0usize;
+                for requested_policy in ["left", "both"] {
+                    let selected_endpoint =
+                        if requested_policy == "left" || interior < reversed_interior.as_slice() {
+                            "left"
+                        } else {
+                            "right"
+                        };
+                    let expected_anchor = if selected_endpoint == "left" {
+                        word.first().copied()
+                    } else {
+                        word.last().copied()
+                    }
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "physical LC sector {sector_index} experimental endpoint word is empty"
+                        ))
+                    })?;
+                    if sector.closure_source_slot != expected_anchor {
+                        continue;
+                    }
+                    let payload = json!({
+                        "algorithm": "experimental-single-open-line-endpoint-anchor-v1",
+                        "closure_source_slot": sector.closure_source_slot,
+                        "closure_traversal_source_slots": word,
+                        "component_order_policy": "exact-ordered-components",
+                        "external_source_count": self.external_legs.len(),
+                        "fermionic_source_slots": &fermionic_source_slots,
+                        "open_string_count": 1,
+                        "open_string_source_slots": open_string,
+                        "policy": format!("{requested_policy}-endpoint-study"),
+                        "requested_endpoint_policy": requested_policy,
+                        "sector_id": sector.sector_id,
+                        "sector_kind": "open-lines",
+                        "selected_endpoint": selected_endpoint,
+                        "singlet_source_slots": singlets,
+                        "word_source_slots": word,
+                    });
+                    let canonical = serde_json::to_vec(&payload).map_err(|error| {
+                        invalid(format!(
+                            "physical LC sector {sector_index} experimental endpoint proof cannot be canonicalized: {error}"
+                        ))
+                    })?;
+                    let expected_digest: [u8; 32] = Sha256::digest(canonical).into();
+                    if closure_proof_digest.as_bytes() == &expected_digest {
+                        authenticated_policy_count += 1;
+                    }
+                }
+                if authenticated_policy_count != 1 {
+                    return Err(invalid(format!(
+                        "physical LC sector {sector_index} experimental endpoint closure proof does not authenticate one supported left/both policy"
                     )));
                 }
             }

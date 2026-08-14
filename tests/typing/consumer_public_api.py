@@ -96,7 +96,7 @@ def exercise_runtime(artifact: Path) -> None:
     assert_type(runtime.artifact_id, str)
     assert_type(
         runtime.execution_mode,
-        Literal["compiled", "eager", "recurrence", "on-the-fly"],
+        Literal["compiled", "eager", "recurrence", "on-the-fly", "spinor"],
     )
     assert_type(runtime.inspect(), Mapping[str, object])
     physics = runtime.physics

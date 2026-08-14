@@ -1468,6 +1468,10 @@ impl NativeRuntime {
             LoadedExecutionManifest::OnTheFly(_) => Err(RusticolError::compatibility(
                 "on-the-fly reduction-group loading is unavailable through the eager bridge",
             )),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            LoadedExecutionManifest::Spinor(_) => Err(RusticolError::compatibility(
+                "spinor reduction-group loading is unavailable through the eager bridge",
+            )),
         }
     }
 
@@ -1531,6 +1535,10 @@ impl NativeRuntime {
             LoadedExecutionManifest::OnTheFly(_) => Err(RusticolError::compatibility(
                 "on-the-fly exact-section loading is unavailable through the eager bridge",
             )),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            LoadedExecutionManifest::Spinor(_) => Err(RusticolError::compatibility(
+                "spinor execution has no eager exact sections",
+            )),
         }
     }
 
@@ -1585,6 +1593,10 @@ impl NativeRuntime {
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             LoadedExecutionManifest::OnTheFly(_) => Err(RusticolError::compatibility(
                 "compact recurrence exact-section loading is unavailable for on-the-fly artifacts",
+            )),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            LoadedExecutionManifest::Spinor(_) => Err(RusticolError::compatibility(
+                "compact recurrence exact-section loading is unavailable for spinor artifacts",
             )),
         }
     }
@@ -1765,6 +1777,23 @@ impl NativeRuntime {
                     )
                 }
                 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+                LoadedExecutionManifest::Spinor(manifest) => {
+                    let representative_process = manifest.process.clone();
+                    let representative_key = manifest.key.clone();
+                    let loaded = super::spinor_load::load_spinor_native_runtime_from_artifact(
+                        &artifact,
+                        &evaluator_root,
+                        &manifest,
+                        &physics_v1,
+                    )?;
+                    (
+                        representative_process,
+                        representative_key,
+                        loaded.common,
+                        NativeExecutionLane::Spinor(Box::new(loaded.lane)),
+                    )
+                }
+                #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
                 LoadedExecutionManifest::OnTheFly(_) => {
                     unreachable!("on-the-fly manifests are dispatched before dense physics loading")
                 }
@@ -1859,6 +1888,8 @@ impl NativeRuntime {
                 NativeExecutionLane::Recurrence(runtime) => runtime.backend_name() == "jit",
                 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
                 NativeExecutionLane::OnTheFly(_) => false,
+                #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+                NativeExecutionLane::Spinor(_) => false,
             };
             if uses_simd_jit {
                 super::evaluator::native_f64_simd_lane_width()
@@ -1928,6 +1959,8 @@ impl NativeRuntime {
                 Some(runtime.lane.requested_query_construction_threads()),
                 Some(runtime.lane.effective_query_construction_threads()),
             ),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(_) => ("spinor", None, None, None, None, None),
         };
         #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
         let compiled_direct_configuration = compiled_direct_configuration_snapshot(&self.runtime);
@@ -2940,6 +2973,10 @@ impl NativeRuntime {
             NativeExecutionLane::OnTheFly(runtime) => {
                 runtime.run_total_into_unprofiled(&self.runtime, batch, None, None, output)
             }
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(runtime) => {
+                runtime.run_total_into_unprofiled(&self.runtime, batch, None, None, output)
+            }
         }
     }
 
@@ -2975,6 +3012,14 @@ impl NativeRuntime {
             ),
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             NativeExecutionLane::OnTheFly(runtime) => runtime.run_total_into_unprofiled(
+                &self.runtime,
+                batch,
+                selected_helicities,
+                selected_colors,
+                output,
+            ),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(runtime) => runtime.run_total_into_unprofiled(
                 &self.runtime,
                 batch,
                 selected_helicities,
@@ -3019,6 +3064,10 @@ impl NativeRuntime {
             NativeExecutionLane::OnTheFly(runtime) => runtime
                 .run_resolved(&self.runtime, batch, selected_helicities, selected_colors)
                 .map(|(resolved, _profile)| resolved),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(runtime) => {
+                runtime.run_resolved(&self.runtime, batch, selected_helicities, selected_colors)
+            }
         }
     }
 
@@ -3135,6 +3184,19 @@ impl NativeRuntime {
                     &mut values,
                 )?;
                 profile.total_materialized_value_count += values.len() as u64;
+                Ok((values, profile))
+            }
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(runtime) => {
+                let view = F64MomentumBatchView::from_nested(batch, self.runtime.external_count)?;
+                let mut values = vec![0.0; batch.len()];
+                let profile = runtime.run_total_into(
+                    &self.runtime,
+                    view,
+                    selected_helicities,
+                    selected_colors,
+                    &mut values,
+                )?;
                 Ok((values, profile))
             }
         }
@@ -3258,6 +3320,7 @@ impl NativeRuntime {
                 ));
             }
             NativeExecutionLane::OnTheFly(_) => false,
+            NativeExecutionLane::Spinor(_) => false,
         };
         let measured_points = point_count.checked_mul(repetitions).ok_or_else(|| {
             RusticolError::invalid_argument("arena profile point count overflowed")
@@ -3486,6 +3549,20 @@ impl NativeRuntime {
                     profile.total_materialized_value_count += point_count as u64;
                     (values, profile)
                 }
+                #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+                NativeExecutionLane::Spinor(runtime) => {
+                    let view =
+                        F64MomentumBatchView::from_nested(&batch, self.runtime.external_count)?;
+                    let mut values = vec![0.0; point_count];
+                    let profile = runtime.run_total_into(
+                        &self.runtime,
+                        view,
+                        selected_helicities.as_ref(),
+                        selected_colors.as_ref(),
+                        &mut values,
+                    )?;
+                    (values, profile)
+                }
             };
             (values, profile)
         } else {
@@ -3501,6 +3578,15 @@ impl NativeRuntime {
                 }
                 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
                 NativeExecutionLane::OnTheFly(runtime) => {
+                    let view =
+                        F64MomentumBatchView::from_nested(&batch, self.runtime.external_count)?;
+                    let mut values = vec![0.0; point_count];
+                    let profile =
+                        runtime.run_total_into(&self.runtime, view, None, None, &mut values)?;
+                    (values, profile)
+                }
+                #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+                NativeExecutionLane::Spinor(runtime) => {
                     let view =
                         F64MomentumBatchView::from_nested(&batch, self.runtime.external_count)?;
                     let mut values = vec![0.0; point_count];
@@ -3920,6 +4006,8 @@ impl NativeRuntime {
             }
             #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
             NativeExecutionLane::OnTheFly(_) => profile.validate_recurrence_top_level_accounting(),
+            #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+            NativeExecutionLane::Spinor(_) => profile.validate_recurrence_top_level_accounting(),
         }
     }
 
@@ -4037,6 +4125,11 @@ impl NativeRuntime {
         if self.execution_lane.is_recurrence() {
             return Err(recurrence_parity_pending("higher-precision evaluation"));
         }
+        if self.execution_lane.is_spinor() {
+            return Err(RusticolError::unsupported_precision(
+                "spinor DAG execution supports only native f64 evaluation",
+            ));
+        }
         if decimal_digits == 32 {
             let batch = self.prepare_double_batch(momenta, point_count)?;
             let (values, _profile) = self.runtime.run_double(&batch)?;
@@ -4075,6 +4168,11 @@ impl NativeRuntime {
         if self.execution_lane.is_recurrence() {
             return Err(recurrence_parity_pending(
                 "resolved higher-precision evaluation",
+            ));
+        }
+        if self.execution_lane.is_spinor() {
+            return Err(RusticolError::unsupported_precision(
+                "spinor DAG execution supports only native f64 evaluation",
             ));
         }
         self.record_resolved_warnings(helicity_ids, color_ids)?;

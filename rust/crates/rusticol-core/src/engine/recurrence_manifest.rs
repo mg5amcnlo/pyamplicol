@@ -2016,6 +2016,27 @@ impl RecurrenceRuntimeMetadata {
                 "recurrence prepared-parameter defaults do not match the plan parameter count",
             ));
         }
+        self.validate_spinor_runtime_domain(external_pdgs, color_accuracy)
+    }
+
+    pub(super) fn validate_spinor_runtime_domain(
+        &self,
+        external_pdgs: &[i32],
+        color_accuracy: &str,
+    ) -> RusticolResult<()> {
+        for (context, len) in [
+            ("runtime parameters", self.runtime_parameters.len()),
+            (
+                "prepared parameter defaults",
+                self.prepared_parameter_defaults.len(),
+            ),
+            ("parameter projection", self.parameter_projection.len()),
+            ("source templates", self.source_templates.len()),
+            ("external legs", self.external_legs.len()),
+            ("particle masses", self.particle_masses.len()),
+        ] {
+            bounded_len(context, len)?;
+        }
         if self
             .prepared_parameter_defaults
             .iter()

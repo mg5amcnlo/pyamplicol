@@ -36,6 +36,10 @@ FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE = (
 )
 
 
+def _f64_bits(value: float) -> int:
+    return struct.unpack("<Q", struct.pack("<d", value))[0]
+
+
 @dataclass(frozen=True, slots=True)
 class CertifiedRecurrenceIntrinsic:
     """One exact algebra witness plus its model-owned scalar scale."""
@@ -54,6 +58,25 @@ class CertifiedRecurrenceIntrinsic:
             "constant_real_bits": _f64_bits(real),
             "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
             "parameter_index": self.model_parameter_index,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CertifiedRecurrenceFinalizationIntrinsic:
+    """One exact runtime-owned finalization primitive."""
+
+    runtime_template: str
+    contract_digest: str
+    constant_scale: complex
+
+    def scale_projection(self) -> dict[str, object]:
+        real = 0.0 if self.constant_scale.real == 0.0 else self.constant_scale.real
+        imag = 0.0 if self.constant_scale.imag == 0.0 else self.constant_scale.imag
+        return {
+            "constant_imag_bits": _f64_bits(imag),
+            "constant_real_bits": _f64_bits(real),
+            "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+            "parameter_index": None,
         }
 
 
@@ -89,6 +112,14 @@ class _IntrinsicWitness:
 
 
 _WITNESSES = (
+    _IntrinsicWitness(
+        runtime_template=("rusticol.recurrence-intrinsic.scalar-product.v1"),
+        expressions=("l0*r0",),
+        anchor_monomial="l0*r0",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(1, 1),
+        destination_component_count=1,
+    ),
     _IntrinsicWitness(
         runtime_template=(
             "rusticol.recurrence-intrinsic.color-ordered-three-vector.v1"
@@ -181,6 +212,31 @@ class _FinalizationWitness:
     anchor_monomial: str
     inverse_anchor_coefficient: str
     component_count: int
+    runtime_owned_scale: complex
+    contract_digest: str = ""
+
+    def __post_init__(self) -> None:
+        payload = {
+            "anchor_monomial": self.anchor_monomial,
+            "component_count": self.component_count,
+            "expressions": list(self.expressions),
+            "inverse_anchor_coefficient": self.inverse_anchor_coefficient,
+            "runtime_owned_scale_bits": [
+                _f64_bits(self.runtime_owned_scale.real),
+                _f64_bits(self.runtime_owned_scale.imag),
+            ],
+            "runtime_template": self.runtime_template,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        object.__setattr__(self, "contract_digest", digest)
 
 
 _FINALIZATION_WITNESSES = (
@@ -193,6 +249,7 @@ _FINALIZATION_WITNESSES = (
         anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l0*p3",
         inverse_anchor_coefficient="1𝑖",
         component_count=2,
+        runtime_owned_scale=1.0 + 0.0j,
     ),
     _FinalizationWitness(
         runtime_template=WEYL_PROPAGATOR_NEGATIVE_TEMPLATE,
@@ -203,6 +260,7 @@ _FINALIZATION_WITNESSES = (
         anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l1*p2",
         inverse_anchor_coefficient="-1",
         component_count=2,
+        runtime_owned_scale=1.0 + 0.0j,
     ),
     _FinalizationWitness(
         runtime_template=FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE,
@@ -215,6 +273,7 @@ _FINALIZATION_WITNESSES = (
         anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l0",
         inverse_anchor_coefficient="1",
         component_count=4,
+        runtime_owned_scale=0.0 - 1.0j,
     ),
 )
 
@@ -276,8 +335,7 @@ def certify_recurrence_contribution_intrinsic(
             coefficient = normalized[0].coefficient(_sym.E(witness.anchor_monomial))
             scale = (coefficient * _sym.E(witness.inverse_anchor_coefficient)).expand()
             if any(
-                candidate.to_canonical_string()
-                != (scale * reference).expand().to_canonical_string()
+                not _symbolically_equal(candidate, scale * reference)
                 for candidate, reference in zip(normalized, references, strict=True)
             ):
                 continue
@@ -300,7 +358,7 @@ def certify_recurrence_finalization_intrinsic(
     exact_expressions: Sequence[str],
     input_contracts: Sequence[str],
     component_count: int,
-) -> str | None:
+) -> CertifiedRecurrenceFinalizationIntrinsic | None:
     """Prove that one prepared propagator/finalizer is one known arena primitive."""
 
     if not exact_expressions or len(exact_expressions) != component_count:
@@ -324,12 +382,27 @@ def certify_recurrence_finalization_intrinsic(
         coefficient = normalized[0].coefficient(_sym.E(witness.anchor_monomial))
         scale = (coefficient * _sym.E(witness.inverse_anchor_coefficient)).expand()
         if any(
-            candidate.to_canonical_string()
-            != (scale * reference).expand().to_canonical_string()
+            not _symbolically_equal(candidate, scale * reference)
             for candidate, reference in zip(normalized, references, strict=True)
         ):
             continue
-        return witness.runtime_template
+        scalar = _extract_scalar_scale(scale, {})
+        if scalar is None:
+            continue
+        constant, parameter_index = scalar
+        if parameter_index is not None or (
+            _f64_bits(constant.real),
+            _f64_bits(constant.imag),
+        ) != (
+            _f64_bits(witness.runtime_owned_scale.real),
+            _f64_bits(witness.runtime_owned_scale.imag),
+        ):
+            continue
+        return CertifiedRecurrenceFinalizationIntrinsic(
+            runtime_template=witness.runtime_template,
+            contract_digest=witness.contract_digest,
+            constant_scale=constant,
+        )
     return None
 
 
@@ -518,10 +591,7 @@ def _extract_scalar_scale(
             if symbol.to_canonical_string() == canonical
         )
         coefficient = scale.coefficient(parameter)
-        if (
-            scale.to_canonical_string()
-            != (coefficient * parameter).expand().to_canonical_string()
-        ):
+        if not _symbolically_equal(scale, coefficient * parameter):
             return None
         parameter_index = parameter_symbols[canonical]
     else:
@@ -537,14 +607,28 @@ def _extract_scalar_scale(
     return value, parameter_index
 
 
-def _f64_bits(value: float) -> int:
-    return struct.unpack("<Q", struct.pack("<d", value))[0]
+def _symbolically_equal(left: object, right: object) -> bool:
+    """Compare exact algebra without conflating spelling with semantics.
+
+    Canonical expanded equality retains the compiler's common-scale
+    normalization when decimal binary64 coefficients are re-expanded.  The
+    exact-difference fallback also accepts a floating unit where a compact
+    witness uses an integer unit.  A perturbed coefficient satisfies neither
+    condition and remains rejected.
+    """
+
+    expanded_left = left.expand()
+    expanded_right = right.expand()
+    if expanded_left.to_canonical_string() == expanded_right.to_canonical_string():
+        return True
+    return (expanded_left - expanded_right).expand().to_canonical_string() == "0"
 
 
 __all__ = [
     "RECURRENCE_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES",
     "RECURRENCE_INTRINSIC_SCALE_KIND",
+    "CertifiedRecurrenceFinalizationIntrinsic",
     "CertifiedRecurrenceIntrinsic",
     "certify_recurrence_contribution_intrinsic",
     "certify_recurrence_finalization_intrinsic",

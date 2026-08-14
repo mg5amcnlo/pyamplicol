@@ -632,6 +632,12 @@ class BenchmarkBackend:
                                     "timing is unavailable"
                                 )
                             evaluator_samples.append(native_sample.orchestration_time)
+                        elif native_sample.execution_mode == "spinor":
+                            if native_sample.orchestration_time is None:
+                                raise EvaluationError(
+                                    "native spinor orchestration timing is unavailable"
+                                )
+                            evaluator_samples.append(native_sample.orchestration_time)
                         else:
                             evaluator_samples.append(
                                 native_sample.stage_evaluator_call_time
@@ -781,6 +787,8 @@ class BenchmarkBackend:
             timing_breakdown = _timing_breakdown(native_profile_samples)
             if timing_breakdown.execution_mode in _RECURRENCE_LIKE_EXECUTION_MODES:
                 evaluator_time_source = "runtime_profile_core_recurrence_schedule_time"
+            elif timing_breakdown.execution_mode == "spinor":
+                evaluator_time_source = "runtime_profile_core_spinor_orchestration_time"
             elif compiled_direct_arena_active:
                 evaluator_time_source = (
                     "runtime_profile_core_compiled_direct_arena_orchestration_time"
@@ -1914,10 +1922,16 @@ def _profile_execution_mode(
 ) -> str | None:
     value = profile.get("execution_mode")
     if value is not None:
-        if value not in {"compiled", "eager", "recurrence", "on-the-fly"}:
+        if value not in {
+            "compiled",
+            "eager",
+            "recurrence",
+            "on-the-fly",
+            "spinor",
+        }:
             raise EvaluationError(
                 "native runtime profile execution_mode must be compiled, eager, "
-                "recurrence, or on-the-fly"
+                "recurrence, on-the-fly, or spinor"
             )
         return str(value)
     stage_aggregate = profile.get("stage_evaluator_call_time_s")
@@ -2021,7 +2035,7 @@ def _native_profile_sample(
     )
     if (
         stage_evaluator_call_total is None
-        and execution_mode not in _RECURRENCE_LIKE_EXECUTION_MODES
+        and execution_mode not in {"spinor", *_RECURRENCE_LIKE_EXECUTION_MODES}
     ):
         raise EvaluationError("native runtime stage evaluator timing is unavailable")
     if stage_evaluator_call_total is None:
@@ -2047,7 +2061,11 @@ def _native_profile_sample(
         else _profile_float_or_none(profile, "stage_evaluator_output_gather_time_s")
     )
     amplitude_evaluator_call: float | None = None
-    if execution_mode not in {"eager", *_RECURRENCE_LIKE_EXECUTION_MODES}:
+    if execution_mode not in {
+        "eager",
+        "spinor",
+        *_RECURRENCE_LIKE_EXECUTION_MODES,
+    }:
         amplitude_evaluator_call = _profile_float_or_none(
             profile, "amplitude_evaluator_call_time_s"
         )
@@ -2093,6 +2111,7 @@ def _native_profile_sample(
             )
     compiled_profile = execution_mode not in {
         "eager",
+        "spinor",
         *_RECURRENCE_LIKE_EXECUTION_MODES,
     }
     stage_input_pack_time = (
@@ -2196,6 +2215,8 @@ def _native_profile_sample(
     )
     if execution_mode == "eager":
         mode_accounted = (eager_execution_time,)
+    elif execution_mode == "spinor":
+        mode_accounted = ()
     elif execution_mode in _RECURRENCE_LIKE_EXECUTION_MODES:
         mode_accounted = (
             recurrence_momentum_fill_time,
@@ -2583,7 +2604,7 @@ def _timing_breakdown(
     if len(execution_modes) > 1:
         raise EvaluationError("native runtime profile changed execution mode")
     execution_mode = cast(
-        Literal["compiled", "eager", "recurrence", "on-the-fly"],
+        Literal["compiled", "eager", "recurrence", "on-the-fly", "spinor"],
         next(iter(execution_modes), "compiled"),
     )
     evaluator_call_time = _component_timing(
@@ -2628,7 +2649,8 @@ def _timing_breakdown(
         ),
         stage_evaluator_call_time=(
             None
-            if execution_mode in {"eager", *_RECURRENCE_LIKE_EXECUTION_MODES}
+            if execution_mode
+            in {"eager", "spinor", *_RECURRENCE_LIKE_EXECUTION_MODES}
             else evaluator_call_time
         ),
         stage_backend_call_time=_component_timing(

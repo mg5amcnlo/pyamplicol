@@ -482,6 +482,73 @@ def test_topology_replay_projects_exact_axes_and_generation_coverage() -> None:
     assert len(build_recurrence_builder_input_v1(logical).canonical_digest) == 64
 
 
+@pytest.mark.parametrize(
+    ("policy", "expected_anchors"),
+    (("left", (1, 1)), ("both", (1, 0))),
+)
+def test_single_open_line_endpoint_study_authenticates_selected_anchors(
+    policy: str,
+    expected_anchors: tuple[int, int],
+) -> None:
+    process = _process()
+    logical = project_recurrence_process_v1(
+        process,
+        _color_plan(process),
+        _catalog(),
+        layout="all-flow-union",
+        normalization=_normalization(),
+        closure_anchor_policy=policy,  # type: ignore[arg-type]
+    )
+
+    assert tuple(
+        sector.closure_source_slot for sector in logical.physical_sectors
+    ) == expected_anchors
+    assert {
+        sector.closure_proof_algorithm for sector in logical.physical_sectors
+    } == {"experimental-single-open-line-endpoint-anchor-v1"}
+
+    # The experimental proof is accepted by the deterministic encoder.
+    assert len(build_recurrence_builder_input_v1(logical).canonical_digest) == 64
+
+
+def test_mixed_endpoint_study_rejects_topology_replay() -> None:
+    process = _process()
+    with pytest.raises(
+        RecurrenceProjectionError,
+        match=r"mixed-endpoint.*all-flow-union",
+    ):
+        project_recurrence_process_v1(
+            process,
+            _color_plan(process),
+            _catalog(),
+            layout="topology-replay",
+            topology_replay=_replay(),
+            normalization=_normalization(),
+            closure_anchor_policy="both",
+        )
+
+
+def test_explicit_right_endpoint_preserves_default_projection_identity() -> None:
+    process = _process()
+    common = {
+        "process": process,
+        "color_plan": _color_plan(process),
+        "template_catalog": _catalog(),
+        "layout": "all-flow-union",
+        "normalization": _normalization(),
+    }
+
+    implicit = project_recurrence_process_v1(**common)
+    explicit = project_recurrence_process_v1(
+        **common,
+        closure_anchor_policy="right",
+    )
+
+    assert build_recurrence_builder_input_v1(implicit).canonical_digest == (
+        build_recurrence_builder_input_v1(explicit).canonical_digest
+    )
+
+
 def test_projection_binds_global_helicity_flip_proof_only_for_complete_axes() -> None:
     process = _process()
     common = {

@@ -102,6 +102,81 @@ pub struct PreparedDirectExecutorBinding {
     pub parent_permutation: [u8; 2],
 }
 
+/// Exact scalar scale authenticated by one prepared intrinsic payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedDirectIntrinsicScale {
+    constant_real_bits: u64,
+    constant_imag_bits: u64,
+    prepared_parameter_slot: Option<u32>,
+}
+
+impl PreparedDirectIntrinsicScale {
+    pub const fn new(
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        prepared_parameter_slot: Option<u32>,
+    ) -> Self {
+        Self {
+            constant_real_bits,
+            constant_imag_bits,
+            prepared_parameter_slot,
+        }
+    }
+
+    pub const fn constant_real_bits(self) -> u64 {
+        self.constant_real_bits
+    }
+
+    pub const fn constant_imag_bits(self) -> u64 {
+        self.constant_imag_bits
+    }
+
+    pub const fn prepared_parameter_slot(self) -> Option<u32> {
+        self.prepared_parameter_slot
+    }
+}
+
+/// Execution-semantic metadata retained from one authenticated intrinsic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedDirectIntrinsicDescriptor {
+    key: PreparedDirectExecutorKey,
+    runtime_template: Box<str>,
+    contract_digest: Option<SemanticDigest>,
+    scale: Option<PreparedDirectIntrinsicScale>,
+}
+
+impl PreparedDirectIntrinsicDescriptor {
+    pub fn new(
+        key: PreparedDirectExecutorKey,
+        runtime_template: String,
+        contract_digest: Option<SemanticDigest>,
+        scale: Option<PreparedDirectIntrinsicScale>,
+    ) -> Self {
+        Self {
+            key,
+            runtime_template: runtime_template.into_boxed_str(),
+            contract_digest,
+            scale,
+        }
+    }
+
+    pub const fn key(&self) -> PreparedDirectExecutorKey {
+        self.key
+    }
+
+    pub fn runtime_template(&self) -> &str {
+        &self.runtime_template
+    }
+
+    pub const fn contract_digest(&self) -> Option<SemanticDigest> {
+        self.contract_digest
+    }
+
+    pub const fn scale(&self) -> Option<PreparedDirectIntrinsicScale> {
+        self.scale
+    }
+}
+
 impl PreparedDirectExecutorBinding {
     pub const fn evaluator(
         role: DirectExecutorRole,
@@ -152,6 +227,7 @@ impl PreparedDirectExecutorBinding {
 pub struct PreparedDirectExecutorCatalog {
     direct_template_catalog_digest: SemanticDigest,
     bindings: BTreeMap<PreparedDirectExecutorKey, PreparedDirectExecutorBinding>,
+    intrinsic_descriptors: BTreeMap<PreparedDirectExecutorKey, PreparedDirectIntrinsicDescriptor>,
     executor_roles: Box<[DirectExecutorRole]>,
 }
 
@@ -159,6 +235,14 @@ impl PreparedDirectExecutorCatalog {
     pub fn new(
         direct_template_catalog_digest: SemanticDigest,
         bindings: Vec<PreparedDirectExecutorBinding>,
+    ) -> RusticolResult<Self> {
+        Self::new_with_intrinsics(direct_template_catalog_digest, bindings, Vec::new())
+    }
+
+    pub fn new_with_intrinsics(
+        direct_template_catalog_digest: SemanticDigest,
+        bindings: Vec<PreparedDirectExecutorBinding>,
+        intrinsic_descriptors: Vec<PreparedDirectIntrinsicDescriptor>,
     ) -> RusticolResult<Self> {
         if bindings.is_empty() {
             return Err(invalid(
@@ -214,9 +298,54 @@ impl PreparedDirectExecutorCatalog {
             .into_values()
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let mut descriptors_by_key = BTreeMap::new();
+        for descriptor in intrinsic_descriptors {
+            let key = descriptor.key;
+            if !by_key.contains_key(&key) {
+                return Err(invalid(format!(
+                    "prepared intrinsic descriptor has no executor mapping for key {key:?}"
+                )));
+            }
+            if descriptor.runtime_template.is_empty() {
+                return Err(invalid(
+                    "prepared intrinsic descriptor has an empty runtime template",
+                ));
+            }
+            let requires_scale = matches!(
+                key,
+                PreparedDirectExecutorKey::Evaluator {
+                    role: DirectExecutorRole::Contribution | DirectExecutorRole::Finalization,
+                    ..
+                }
+            ) && descriptor.runtime_template.as_ref()
+                != "rusticol.identity-finalize-in-place.v1";
+            let requires_contract = !matches!(key, PreparedDirectExecutorKey::IdentityFinalizer);
+            if requires_contract != descriptor.contract_digest.is_some()
+                || requires_scale != descriptor.scale.is_some()
+            {
+                return Err(invalid(format!(
+                    "prepared intrinsic descriptor for key {key:?} has incomplete execution metadata"
+                )));
+            }
+            if key.role() != DirectExecutorRole::Contribution
+                && descriptor
+                    .scale
+                    .is_some_and(|scale| scale.prepared_parameter_slot.is_some())
+            {
+                return Err(invalid(format!(
+                    "prepared non-contribution intrinsic for key {key:?} binds a model parameter"
+                )));
+            }
+            if descriptors_by_key.insert(key, descriptor).is_some() {
+                return Err(invalid(format!(
+                    "prepared intrinsic descriptor repeats key {key:?}"
+                )));
+            }
+        }
         Ok(Self {
             direct_template_catalog_digest,
             bindings: by_key,
+            intrinsic_descriptors: descriptors_by_key,
             executor_roles,
         })
     }
@@ -257,6 +386,25 @@ impl PreparedDirectExecutorCatalog {
         Err(invalid(format!(
             "prepared direct-template catalog has no {role:?} mapping for evaluator binding {evaluator_binding_id}"
         )))
+    }
+
+    pub fn intrinsic_descriptor(
+        &self,
+        role: DirectExecutorRole,
+        evaluator_binding_id: u32,
+    ) -> Option<&PreparedDirectIntrinsicDescriptor> {
+        self.intrinsic_descriptors
+            .get(&PreparedDirectExecutorKey::Evaluator {
+                role,
+                evaluator_binding_id,
+            })
+    }
+
+    pub fn intrinsic_descriptor_by_key(
+        &self,
+        key: PreparedDirectExecutorKey,
+    ) -> Option<&PreparedDirectIntrinsicDescriptor> {
+        self.intrinsic_descriptors.get(&key)
     }
 
     pub fn resolve_contribution(

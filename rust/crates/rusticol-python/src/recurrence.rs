@@ -16,7 +16,8 @@ use rusticol_core::recurrence::template;
 use rusticol_core::recurrence::{
     AuthenticatedRecurrenceBuilderInput, CheckedTableRange, DIRECT_NONE_U32, DirectExecutorRole,
     DirectRecurrencePlan, DirectRecurrenceRuntimeOptions, DirectSelectorWorkSummary,
-    PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog, RECURRENCE_BUILDER_INPUT_ABI,
+    PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog, PreparedDirectExecutorKey,
+    PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale, RECURRENCE_BUILDER_INPUT_ABI,
     RECURRENCE_CONTRACTED_COLOR_CAPABILITY, RECURRENCE_DIRECT_PLAN_ABI,
     RECURRENCE_DIRECT_RUNTIME_CAPABILITY, RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI,
     RECURRENCE_DIRECT_SCHEDULE_MEMBER, RECURRENCE_DIRECT_TEMPLATE_ABI,
@@ -40,7 +41,8 @@ use rusticol_core::{
 };
 use rusticol_core::{
     NativeRecurrenceExactExecutor, NativeRecurrenceExactFactor, NativeRecurrenceExactSections,
-    RusticolError, RusticolResult,
+    RusticolError, RusticolResult, recurrence::lower_authenticated_recurrence_to_spinor_payload_v2,
+    spinor::encode_spinor_dag_v2,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
@@ -911,6 +913,46 @@ struct AuthenticatedDirectTemplateCatalog {
     prepared_kernel_pack_digest: SemanticDigest,
     prepared_kernel_count: usize,
     exact_executors: Vec<NativeRecurrenceExactExecutor>,
+}
+
+/// Private cold-path bridge for the authenticated recurrence-to-spinor slice.
+/// The return value is the complete executable v2 payload; no parallel graph
+/// metadata or digest is synthesized at this boundary.
+#[pyfunction]
+pub(crate) fn _lower_recurrence_spinor_dag_v2(
+    py: Python<'_>,
+    builder_input: &Bound<'_, PyAny>,
+    prepared_template_input: &Bound<'_, PyAny>,
+    direct_template_catalog_json: &Bound<'_, PyBytes>,
+    prepared_kernel_pack_digest: String,
+) -> PyResult<Py<PyBytes>> {
+    let input = parse_input(builder_input)?;
+    let prepared_template = parse_prepared_template_input(prepared_template_input)?;
+    let direct_template_catalog_json = direct_template_catalog_json.as_bytes().to_vec();
+    validate_sha256_text(&prepared_kernel_pack_digest, "prepared kernel pack digest")?;
+    let payload = py
+        .detach(move || {
+            let expected_pack_digest = semantic_digest_from_hex(
+                &prepared_kernel_pack_digest,
+                "prepared kernel pack digest",
+            )?;
+            let authenticated =
+                authenticate_builder_inputs(input, prepared_template, expected_pack_digest)?
+                    .authenticated;
+            let direct = parse_direct_template_catalog(
+                &direct_template_catalog_json,
+                expected_pack_digest,
+                authenticated.template().summary().catalog_digest,
+                authenticated.template().summary().compiled_model_digest,
+            )?;
+            let payload = lower_authenticated_recurrence_to_spinor_payload_v2(
+                &authenticated,
+                &direct.catalog,
+            )?;
+            encode_spinor_dag_v2(&payload)
+        })
+        .map_err(python_error)?;
+    Ok(PyBytes::new(py, &payload).unbind())
 }
 
 #[pyfunction(signature = (
@@ -2397,6 +2439,7 @@ fn parse_direct_template_catalog(
         ));
     }
     let mut bindings = Vec::with_capacity(templates.len());
+    let mut intrinsic_descriptors = Vec::new();
     let mut exact_executors = Vec::with_capacity(templates.len());
     let mut prepared_kernel_ids = BTreeSet::new();
     let mut identity_finalizer_seen = false;
@@ -2508,7 +2551,7 @@ fn parse_direct_template_catalog(
             "evaluator_resolver_key",
             &format!("{context} evaluator resolver key"),
         )?;
-        json_sha256(
+        let exact_expression_digest = json_sha256(
             template,
             "exact_expression_digest",
             &format!("{context} exact-expression digest"),
@@ -2675,18 +2718,11 @@ fn parse_direct_template_catalog(
             payload,
             "intrinsic_contract_digest",
             &format!("{context} intrinsic contract digest"),
-        )?;
-        if let Some(digest) = intrinsic_contract_digest {
-            semantic_digest_from_hex(digest, &format!("{context} intrinsic contract digest"))?;
-        }
-        if payload_kind == "rusticol-intrinsic"
-            && role == DirectExecutorRole::Contribution
-            && intrinsic_contract_digest.is_none()
-        {
-            return Err(invalid(format!(
-                "{context} contribution intrinsic has no certified contract digest"
-            )));
-        }
+        )?
+        .map(|digest| {
+            semantic_digest_from_hex(digest, &format!("{context} intrinsic contract digest"))
+        })
+        .transpose()?;
         if payload_kind != "rusticol-intrinsic" && intrinsic_contract_digest.is_some() {
             return Err(invalid(format!(
                 "{context} non-intrinsic payload carries an intrinsic contract digest"
@@ -2703,6 +2739,59 @@ fn parse_direct_template_catalog(
 
         let identity_finalizer =
             runtime_template.is_some_and(|name| name == DIRECT_IDENTITY_FINALIZER);
+        let scalar_projections = json_array(
+            payload,
+            "scalar_projections",
+            &format!("{context} scalar projections"),
+        )?;
+        let scalar_input_count = json_u32(
+            payload,
+            "scalar_input_count",
+            &format!("{context} scalar-input count"),
+        )?;
+        if usize::try_from(scalar_input_count).ok() != Some(scalar_projections.len()) {
+            return Err(invalid(format!(
+                "{context} scalar-input count does not match its projections"
+            )));
+        }
+        let intrinsic_scale = if payload_kind == "rusticol-intrinsic"
+            && matches!(
+                role,
+                DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
+            )
+            && !identity_finalizer
+        {
+            if scalar_projections.len() != 1 {
+                return Err(invalid(format!(
+                    "{context} executable scalar intrinsic must carry one scale projection"
+                )));
+            }
+            let scale_context = format!("{context} intrinsic scale");
+            let scale = json_object(&scalar_projections[0], &scale_context)?;
+            require_json_fields(
+                scale,
+                &[
+                    "constant_imag_bits",
+                    "constant_real_bits",
+                    "kind",
+                    "parameter_index",
+                ],
+                &scale_context,
+            )?;
+            require_json_string_value(scale, "kind", "intrinsic-scale-v1", &scale_context)?;
+            Some(PreparedDirectIntrinsicScale::new(
+                json_u64(scale, "constant_real_bits", &scale_context)?,
+                json_u64(scale, "constant_imag_bits", &scale_context)?,
+                json_optional_u32(scale, "parameter_index", &scale_context)?,
+            ))
+        } else {
+            if payload_kind == "rusticol-intrinsic" && !scalar_projections.is_empty() {
+                return Err(invalid(format!(
+                    "{context} non-scalar intrinsic carries scalar projections"
+                )));
+            }
+            None
+        };
         if identity_finalizer {
             if identity_finalizer_seen {
                 return Err(invalid(
@@ -2721,10 +2810,20 @@ fn parse_direct_template_catalog(
             bindings.push(PreparedDirectExecutorBinding::identity_finalizer(
                 direct_executor_id,
             ));
+            intrinsic_descriptors.push(PreparedDirectIntrinsicDescriptor::new(
+                PreparedDirectExecutorKey::IdentityFinalizer,
+                runtime_template.unwrap().to_owned(),
+                None,
+                intrinsic_scale,
+            ));
         } else {
             if let Some(kernel_id) = prepared_kernel_id {
                 prepared_kernel_ids.insert(kernel_id);
             }
+            let key = PreparedDirectExecutorKey::Evaluator {
+                role,
+                evaluator_binding_id,
+            };
             bindings.push(
                 PreparedDirectExecutorBinding::evaluator_with_parent_permutation(
                     role,
@@ -2733,10 +2832,37 @@ fn parse_direct_template_catalog(
                     parent_permutation,
                 ),
             );
+            if payload_kind == "rusticol-intrinsic" {
+                intrinsic_descriptors.push(PreparedDirectIntrinsicDescriptor::new(
+                    key,
+                    runtime_template
+                        .ok_or_else(|| {
+                            invalid(format!("{context} intrinsic has no runtime template"))
+                        })?
+                        .to_owned(),
+                    if matches!(
+                        role,
+                        DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
+                    ) {
+                        intrinsic_contract_digest
+                    } else {
+                        Some(exact_expression_digest)
+                    },
+                    intrinsic_scale,
+                ));
+            } else if runtime_template.is_some() {
+                return Err(invalid(format!(
+                    "{context} non-intrinsic payload names a runtime template"
+                )));
+            }
         }
     }
 
-    let catalog = PreparedDirectExecutorCatalog::new(catalog_digest, bindings)?;
+    let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+        catalog_digest,
+        bindings,
+        intrinsic_descriptors,
+    )?;
     Ok(AuthenticatedDirectTemplateCatalog {
         catalog,
         catalog_digest,
@@ -2998,6 +3124,16 @@ pub(super) fn json_u32(
     context: &str,
 ) -> RusticolResult<u32> {
     json_value_u32(json_field(object, field, context)?, context)
+}
+
+fn json_u64(
+    object: &JsonMap<String, JsonValue>,
+    field: &str,
+    context: &str,
+) -> RusticolResult<u64> {
+    json_field(object, field, context)?
+        .as_u64()
+        .ok_or_else(|| invalid(format!("{context} must be a nonnegative u64")))
 }
 
 fn json_value_u32(value: &JsonValue, context: &str) -> RusticolResult<u32> {

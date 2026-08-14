@@ -454,6 +454,31 @@ def test_certifies_one_model_parameter_scale() -> None:
     assert result.model_parameter_index == 17
 
 
+@pytest.mark.parametrize("parameter_index", (None, 51))
+def test_certifies_scalar_product_with_exact_prepared_parameter_owner(
+    parameter_index: int | None,
+) -> None:
+    scale = "" if parameter_index is None else "model::prepared::parameter*"
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=(
+            f"{scale}model::prepared::left_0*model::prepared::right_0",
+        ),
+        input_contracts=_contracts(1, 1, parameter_index=parameter_index),
+        parent_component_counts=(1, 1),
+        destination_component_count=1,
+        binding_coupling=None,
+    )
+
+    assert result is not None
+    assert (
+        result.runtime_template
+        == "rusticol.recurrence-intrinsic.scalar-product.v1"
+    )
+    assert result.constant_scale == 1.0 + 0.0j
+    assert result.model_parameter_index == parameter_index
+    assert result.parent_permutation == (0, 1)
+
+
 def test_certifies_color_ordered_three_vector_with_momentum_operands() -> None:
     dot_lr = "(l0*r0-l1*r1-l2*r2-l3*r3)"
     dot_lq = "(l0*q0-l1*q1-l2*q2-l3*q3)"
@@ -481,6 +506,45 @@ def test_certifies_color_ordered_three_vector_with_momentum_operands() -> None:
     )
     assert result.constant_scale == 0.0 + 1.5j
     assert result.model_parameter_index is None
+
+
+def test_certifies_binary64_scaled_three_vector_without_tolerance() -> None:
+    dot_lr = "(l0*r0-l1*r1-l2*r2-l3*r3)"
+    dot_lq = "(l0*q0-l1*q1-l2*q2-l3*q3)"
+    dot_rp = "(r0*p0-r1*p1-r2*p2-r3*p3)"
+    scale = "7.07106781186547e-1𝑖"
+    expressions = tuple(
+        _substitute_three_vector(
+            f"{scale}*({dot_lr}*(p{component}-q{component})"
+            f"+2*({dot_lq}*r{component}-{dot_rp}*l{component}))"
+        )
+        for component in range(4)
+    )
+
+    result = certify_recurrence_contribution_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_three_vector_contracts(),
+        parent_component_counts=(4, 4),
+        destination_component_count=4,
+        binding_coupling=None,
+    )
+    assert result is not None
+    assert result.constant_scale == 0.0 + 0.707106781186547j
+
+    perturbed = (
+        expressions[0].replace(scale, "7.07106781186548e-1𝑖"),
+        *expressions[1:],
+    )
+    assert (
+        certify_recurrence_contribution_intrinsic(
+            exact_expressions=perturbed,
+            input_contracts=_three_vector_contracts(),
+            parent_component_counts=(4, 4),
+            destination_component_count=4,
+            binding_coupling=None,
+        )
+        is None
+    )
 
 
 def test_substitutes_exact_binding_coupling_before_certification() -> None:
@@ -565,4 +629,60 @@ def test_certifies_finalization_intrinsics(
         component_count=components,
     )
 
-    assert result == expected_template
+    assert result is not None
+    assert result.runtime_template == expected_template
+    assert result.constant_scale == (
+        -1.0j if expected_template.endswith("vector-propagator-feynman.v1") else 1.0
+    )
+    assert len(result.contract_digest) == 64
+
+
+def test_certifies_binary64_unit_weyl_finalizer_without_tolerance() -> None:
+    denominator = "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+    unit = "1.00000000000000"
+    expressions = (
+        f"{denominator}*(-{unit}*l1*p2+{unit}𝑖*l0*p0"
+        f"+{unit}𝑖*l0*p3+{unit}𝑖*l1*p1)",
+        f"{denominator}*(-{unit}𝑖*l1*p3+{unit}*l0*p2"
+        f"+{unit}𝑖*l0*p1+{unit}𝑖*l1*p0)",
+    )
+    prepared = tuple(_substitute_finalization(item, 2) for item in expressions)
+
+    result = certify_recurrence_finalization_intrinsic(
+        exact_expressions=prepared,
+        input_contracts=_finalization_contracts(2),
+        component_count=2,
+    )
+    assert result is not None
+    assert result.runtime_template.endswith("weyl-propagator-b.v1")
+
+    perturbed = (prepared[0].replace(unit, "1.00000000000001", 1), prepared[1])
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=perturbed,
+            input_contracts=_finalization_contracts(2),
+            component_count=2,
+        )
+        is None
+    )
+
+
+def test_rejects_finalization_intrinsic_with_wrong_global_scale() -> None:
+    expressions = tuple(
+        f"2*({_substitute_finalization(item, 4)})"
+        for item in (
+            "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l0",
+            "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l1",
+            "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l2",
+            "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l3",
+        )
+    )
+
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=expressions,
+            input_contracts=_finalization_contracts(4),
+            component_count=4,
+        )
+        is None
+    )

@@ -55,12 +55,18 @@ from pyamplicol.reporting import (
 from ..color.plan import (
     ColorTopologyReplayCertificate,
     GenericColorPlan,
+    LCColorSector,
     LCColorTopologyReplayPlan,
     build_color_plan,
     build_color_topology_replay_certificate,
     build_lc_topology_replay_plan,
 )
 from ..models.base import Model
+from ..models.builtin import BuiltinSMModel
+from ..models.kernel_primitives import (
+    SpinorAlgebraCertificationError,
+    certify_spinor_process_algebra,
+)
 from ..models.loading import CompiledModel as _CompiledModelPayload
 from ..models.prepared import PreparedKernelPack, PreparedModelBundle
 from ..models.prepared_target import PreparedTargetError, validate_prepared_target
@@ -95,6 +101,7 @@ from .artifact_writer import (
     EagerPlanV3ProcessArtifact,
     OnTheFlyProcessArtifact,
     RecurrenceProcessArtifact,
+    SpinorProcessArtifact,
     _GenerationConfigProvenance,
     write_schema_v3_artifact,
 )
@@ -172,6 +179,7 @@ from .recurrence_numerical_current_warmup import (
     validate_recurrence_numerical_evidence_fallback,
 )
 from .recurrence_physics import (
+    build_graph_spinor_physics,
     build_on_the_fly_color_contraction,
     build_on_the_fly_public_metadata,
     build_on_the_fly_runtime_metadata,
@@ -185,6 +193,7 @@ from .recurrence_physics import (
     recurrence_referenced_kernel_ids,
 )
 from .recurrence_projection import (
+    RecurrenceClosureAnchorPolicy,
     RecurrenceGenerationSliceV1,
     project_recurrence_process_v1,
 )
@@ -198,6 +207,11 @@ from .recurrence_template_columnar import (
     build_recurrence_template_input_v1,
 )
 from .runtime_schema import build_runtime_expression_schema
+from .spinor_physics import (
+    SpinorProcessFamily,
+    build_spinor_physics,
+    spinor_graph_parameters,
+)
 from .stage_compiler import (
     build_and_write_generic_stage_evaluator_artifacts,
     write_model_parameter_evaluator_artifact,
@@ -466,6 +480,17 @@ class _RustRecurrenceLoweringBinding(Protocol):
         color_accuracy: str,
         relation_discovery_evidence_json: bytes | None,
         progress_callback: Callable[[Mapping[str, object]], None] | None,
+    ) -> object: ...
+
+
+class _RustSpinorGraphLoweringBinding(Protocol):
+    def __call__(
+        self,
+        builder_input: RecurrenceBuilderInputV1,
+        template_input: RecurrenceTemplateInputV1,
+        direct_template_catalog_json: bytes,
+        prepared_kernel_pack_digest: str,
+        /,
     ) -> object: ...
 
 
@@ -1411,6 +1436,45 @@ def _invoke_rust_on_the_fly_seed_inspector_v1(
     return _validate_on_the_fly_process_seed_identity_v1(decoded)
 
 
+def _invoke_rust_spinor_graph_lowering_v2(
+    builder_input: RecurrenceBuilderInputV1,
+    template_input: RecurrenceTemplateInputV1,
+    direct_template_catalog_json: bytes,
+    prepared_kernel_pack_digest: str,
+) -> bytes:
+    try:
+        module = importlib.import_module("pyamplicol._rusticol")
+        verify_native_module(module)
+    except (ImportError, OSError, RuntimeError) as exc:
+        raise GenerationError(
+            "spinor graph generation requires the current native "
+            "_lower_recurrence_spinor_dag_v2 binding"
+        ) from exc
+    candidate = getattr(module, "_lower_recurrence_spinor_dag_v2", None)
+    if not callable(candidate):
+        raise GenerationError(
+            "pyamplicol._rusticol does not provide the private "
+            "_lower_recurrence_spinor_dag_v2 binding"
+        )
+    binding = cast(_RustSpinorGraphLoweringBinding, candidate)
+    try:
+        payload = binding(
+            builder_input,
+            template_input,
+            direct_template_catalog_json,
+            prepared_kernel_pack_digest,
+        )
+    except Exception as exc:
+        raise GenerationError(
+            f"authenticated recurrence-to-spinor lowering failed: {exc}"
+        ) from exc
+    if not isinstance(payload, bytes) or not payload:
+        raise GenerationError(
+            "native recurrence-to-spinor lowering returned an empty payload"
+        )
+    return payload
+
+
 def _invoke_rust_recurrence_lowering_v2(
     builder_input: RecurrenceBuilderInputV1,
     template_input: RecurrenceTemplateInputV1,
@@ -2116,8 +2180,11 @@ class _ProcessSelection:
     reference_color_order: tuple[int, ...] | None = None
     selected_color_sector_ids: frozenset[int] | None = None
     selected_source_helicities: Mapping[int, int] | None = None
+    experimental_spinor_dag: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.experimental_spinor_dag, bool):
+            raise TypeError("experimental_spinor_dag must be a boolean")
         if self.reference_color_order is not None:
             object.__setattr__(
                 self,
@@ -2150,6 +2217,168 @@ class _ExpandedProcess:
     aliases: tuple[Mapping[str, object], ...] = ()
     source_expansion_size: int = 1
     source_request: ProcessRequest | None = None
+
+
+def _spinor_process_semantics(
+    process: CanonicalProcessIR,
+    model: Model,
+    sector: LCColorSector,
+    requested_order: Sequence[int],
+) -> tuple[SpinorProcessFamily, tuple[int, ...], tuple[int, ...]]:
+    """Authenticate one supported spinor family and its source traversal."""
+
+    external_count = len(process.legs)
+    order = tuple(int(label) for label in requested_order)
+    if (
+        process.color_accuracy != "lc"
+        or len(process.initial_legs) != 2
+        or external_count not in {3, 4, 5, 6}
+        or tuple(int(leg.label) for leg in process.legs)
+        != tuple(range(1, external_count + 1))
+    ):
+        raise GenerationError(
+            "experimental spinor DAG generation requires built-in LC, two "
+            "initial particles, and three to six canonically labelled external "
+            "particles"
+        )
+    if all(leg.pdg == 21 and leg.outgoing_pdg == 21 for leg in process.legs):
+        if (
+            external_count not in {4, 5, 6}
+            or sorted(order) != list(range(1, external_count + 1))
+            or sector.kind != "single-trace"
+            or sector.color_words != (order,)
+        ):
+            raise GenerationError(
+                "the requested pure-gluon spinor order did not materialize as "
+                "the selected LC trace"
+            )
+        return "pure-gluon", order, order
+
+    if (
+        len(process.fundamental_labels) != 1
+        or len(process.antifundamental_labels) != 1
+        or sector.kind != "open-lines"
+        or len(sector.open_color_lines) != 1
+    ):
+        raise GenerationError(
+            "experimental spinor DAG generation supports only pure gluons or "
+            "one supported quark line with vector insertions"
+        )
+    color_order = sector.canonical_closure_traversal_word(process)
+    if color_order != order or sector.color_words != (color_order,):
+        raise GenerationError(
+            "the requested quark-line spinor order did not materialize as the "
+            "selected fundamental-to-antifundamental LC open string"
+        )
+    by_label = {int(leg.label): leg for leg in process.legs}
+    ordered_legs = tuple(by_label[label] for label in color_order)
+    outgoing_pdgs = tuple(int(leg.outgoing_pdg or 0) for leg in ordered_legs)
+    if not process.singlet_labels and outgoing_pdgs == (6, 21, 21, -6):
+        if (
+            external_count != 4
+            or tuple(int(leg.pdg) for leg in process.legs) != (21, 21, 6, -6)
+            or tuple(bool(leg.is_initial) for leg in process.legs)
+            != (True, True, False, False)
+            or len(process.adjoint_labels) != 2
+            or sector.singlet_labels
+            or ordered_legs[0].color_role != "fundamental"
+            or ordered_legs[0].statistics != "fermion"
+            or ordered_legs[0].wavefunction_family != "fermion"
+            or ordered_legs[-1].color_role != "antifundamental"
+            or ordered_legs[-1].statistics != "fermion"
+            or ordered_legs[-1].wavefunction_family != "fermion"
+            or any(
+                leg.color_role != "adjoint"
+                or leg.statistics != "boson"
+                or leg.wavefunction_family != "vector"
+                for leg in ordered_legs[1:-1]
+            )
+            or not model.is_fundamental_colored_fermion(6)
+            or model.mass(6) <= 0.0
+            or model.width(6) < 0.0
+        ):
+            raise GenerationError(
+                "the massive-quark spinor family requires g g > t t~ and an "
+                "outgoing t-gluon-gluon-tbar open string"
+            )
+        return "single-massive-quark-line", color_order, color_order
+    if (
+        ordered_legs[0].color_role != "fundamental"
+        or ordered_legs[0].statistics != "fermion"
+        or ordered_legs[0].wavefunction_family != "fermion"
+        or ordered_legs[-1].color_role != "antifundamental"
+        or ordered_legs[-1].statistics != "fermion"
+        or ordered_legs[-1].wavefunction_family != "fermion"
+        or outgoing_pdgs[0] not in range(1, 6)
+        or outgoing_pdgs[-1] != -outgoing_pdgs[0]
+        or model.mass(outgoing_pdgs[0]) != 0.0
+        or model.mass(outgoing_pdgs[-1]) != 0.0
+    ):
+        raise GenerationError(
+            "the selected spinor open string must have matching massless "
+            "outgoing quark endpoints"
+        )
+    if not process.singlet_labels:
+        if (
+            external_count not in {4, 5, 6}
+            or len(process.adjoint_labels) != external_count - 2
+            or sector.singlet_labels
+            or any(
+                leg.color_role != "adjoint"
+                or leg.statistics != "boson"
+                or leg.wavefunction_family != "vector"
+                or outgoing_pdg != 21
+                for leg, outgoing_pdg in zip(
+                    ordered_legs[1:-1],
+                    outgoing_pdgs[1:-1],
+                    strict=True,
+                )
+            )
+        ):
+            raise GenerationError(
+                "the selected spinor open string must traverse outgoing q, two "
+                "to four gluons, and the matching outgoing antiquark"
+            )
+        return "single-massless-quark-line", color_order, color_order
+
+    if (
+        external_count not in {3, 4, 5}
+        or len(process.adjoint_labels) != external_count - 3
+        or len(process.singlet_labels) != 1
+        or sector.singlet_labels != process.singlet_labels
+        or any(
+            leg.color_role != "adjoint"
+            or leg.statistics != "boson"
+            or leg.wavefunction_family != "vector"
+            or outgoing_pdg != 21
+            for leg, outgoing_pdg in zip(
+                ordered_legs[1:-1],
+                outgoing_pdgs[1:-1],
+                strict=True,
+            )
+        )
+    ):
+        raise GenerationError(
+            "the massive-vector spinor family requires outgoing q, zero to two "
+            "gluons, matching outgoing antiquark, and one color singlet"
+        )
+    singlet_label = process.singlet_labels[0]
+    singlet = by_label[singlet_label]
+    if (
+        singlet.statistics != "boson"
+        or singlet.wavefunction_family != "vector"
+        or singlet.color_role != "singlet"
+        or singlet.outgoing_pdg != 23
+        or model.mass(23) <= 0.0
+    ):
+        raise GenerationError(
+            "the massive-vector spinor family currently requires one outgoing Z"
+        )
+    return (
+        "single-massless-quark-line-massive-neutral-vector",
+        color_order,
+        (*color_order, singlet_label),
+    )
 
 
 class _NoModelSupportedAmplitudes(GenerationError):
@@ -2620,6 +2849,7 @@ class GenerationBackend:
         *,
         api_bundle_hook: ApiBundleHook | None = None,
         process_selection: _ProcessSelection | None = None,
+        recurrence_closure_anchor_policy: RecurrenceClosureAnchorPolicy = "right",
     ) -> None:
         self._resource_config = config
         self._configuration = _GenerationConfigProvenance.from_config(config)
@@ -2627,6 +2857,11 @@ class GenerationBackend:
         self._progress = progress
         self._api_bundle_hook = api_bundle_hook
         self._process_selection_override = process_selection
+        if recurrence_closure_anchor_policy not in {"right", "left", "both"}:
+            raise ValueError(
+                "recurrence closure-anchor policy must be 'right', 'left', or 'both'"
+            )
+        self._recurrence_closure_anchor_policy = recurrence_closure_anchor_policy
         self._prepared_pack_warning_emitted = False
 
     def plan(
@@ -2745,6 +2980,8 @@ class GenerationBackend:
             if run_config is None
             else str(run_config.evaluator.execution_mode)
         )
+        if self._spinor_execution_enabled:
+            execution_mode = "spinor"
         numerical_current_warning_required = False
         backend = "jit" if run_config is None else str(run_config.evaluator.backend)
         if run_config is None:
@@ -2756,7 +2993,7 @@ class GenerationBackend:
         reporter.start_generation(
             total=(
                 5
-                if execution_mode in {"recurrence", "on-the-fly"}
+                if execution_mode in {"recurrence", "on-the-fly", "spinor"}
                 else 7
                 if execution_mode == "eager"
                 else 8
@@ -2802,6 +3039,19 @@ class GenerationBackend:
 
             if self._on_the_fly_execution_enabled:
                 return self._generate_on_the_fly_processes(
+                    expanded,
+                    output=Path(output),
+                    write_mode=write_mode,
+                    requested_processes=processes,
+                    resolved_model=resolved_model,
+                    artifact_model=artifact_model,
+                    generation_model=generation_model,
+                    reporter=reporter,
+                    generation_started=generation_started,
+                )
+
+            if self._spinor_execution_enabled:
+                return self._generate_spinor_processes(
                     expanded,
                     output=Path(output),
                     write_mode=write_mode,
@@ -3496,6 +3746,348 @@ class GenerationBackend:
             artifact=artifact,
             validation_points=points,
             validation_selectors=validation_selectors,
+        )
+
+    def _generate_spinor_processes(
+        self,
+        expanded: tuple[_ExpandedProcess, ...],
+        *,
+        output: Path,
+        write_mode: Literal["error", "append", "replace"],
+        requested_processes: ProcessSet,
+        resolved_model: _ResolvedModel,
+        artifact_model: _CompiledModelPayload,
+        generation_model: Model,
+        reporter: GenerationPhaseReporter,
+        generation_started: float,
+    ) -> GenerationResult:
+        """Publish compact semantics for deterministic native spinor graphs."""
+
+        if len(expanded) != 1:
+            raise GenerationError(
+                "experimental spinor DAG generation currently requires exactly "
+                "one concrete process"
+            )
+        if write_mode == "append":
+            raise GenerationError(
+                "experimental spinor DAG artifacts do not support append mode"
+            )
+        selection = self._process_selection
+        model_inputs = self._recurrence_model_inputs(resolved_model)
+        legacy_fallback_enabled = (
+            resolved_model.source.kind == "built-in-sm"
+            and isinstance(generation_model, BuiltinSMModel)
+            and selection.reference_color_order is not None
+            and selection.selected_color_sector_ids == frozenset({0})
+            and selection.max_color_sectors is None
+            and selection.selected_source_helicities is None
+        )
+        validation = self._generation_config.validation
+        sample_count = (
+            validation.samples
+            if validation.enabled and validation.post_build_validation
+            else 1
+        )
+        artifact_processes: list[SpinorProcessArtifact] = []
+        validation_points_by_process: dict[str, tuple[ValidationPointRecord, ...]] = {}
+        with reporter.phase(
+            "spinor-construction",
+            "Authenticating fixed-color spinor graph semantics",
+            total=len(expanded),
+        ) as phase:
+            for index, entry in enumerate(expanded):
+                process = entry.process_ir
+                external_count = len(process.legs)
+                if entry.aliases:
+                    raise GenerationError(
+                        "experimental spinor DAG artifacts do not support "
+                        "process aliases"
+                    )
+                process_id = entry.request.name
+                points = tuple(
+                    build_process_validation_point(
+                        process,
+                        generation_model,
+                        process_id=process_id,
+                        seed=validation.seed + index * sample_count + sample_index,
+                    )
+                    for sample_index in range(sample_count)
+                )
+                prepared = self._prepare_process_construction(
+                    process,
+                    generation_model,
+                )
+                normalization_contract, normalization_payload = (
+                    build_recurrence_normalization(process, generation_model)
+                )
+                projection_color_plan = prepared.complete_color_plan
+                if selection.selected_color_sector_ids is not None:
+                    projection_color_plan = replace(
+                        prepared.restricted_color_plan,
+                        sectors=tuple(
+                            replace(sector, id=dense_id)
+                            for dense_id, sector in enumerate(
+                                prepared.restricted_color_plan.sectors
+                            )
+                        ),
+                    )
+                source_selection = (
+                    None
+                    if selection.selected_source_helicities is None
+                    else tuple(sorted(selection.selected_source_helicities.items()))
+                )
+                logical = project_recurrence_process_v1(
+                    process,
+                    projection_color_plan,
+                    model_inputs.catalog,
+                    layout="topology-replay",
+                    normalization=normalization_contract,
+                    topology_replay=prepared.topology_replay,
+                    generation_slice=RecurrenceGenerationSliceV1(
+                        selected_source_helicities=source_selection,
+                    ),
+                    coupling_order_limits=prepared.coupling_order_limits,
+                    model=generation_model,
+                    closure_anchor_policy=self._recurrence_closure_anchor_policy,
+                )
+                if selection.selected_color_sector_ids is not None:
+                    logical = replace(
+                        logical,
+                        selected_public_flow_ids=tuple(
+                            flow.flow_id for flow in logical.public_flows
+                        ),
+                    )
+                try:
+                    graph_payload = _invoke_rust_spinor_graph_lowering_v2(
+                        build_recurrence_builder_input_v1(logical),
+                        model_inputs.template_input,
+                        model_inputs.direct_template_catalog_json,
+                        model_inputs.prepared_kernel_pack_digest,
+                    )
+                except GenerationError:
+                    if not legacy_fallback_enabled:
+                        raise
+                else:
+                    runtime_metadata = build_recurrence_runtime_metadata(
+                        logical,
+                        model_inputs.catalog,
+                        generation_model,
+                        normalization_payload,
+                    )
+                    physics = build_graph_spinor_physics(
+                        process,
+                        logical,
+                        model_inputs.catalog,
+                        process_id=process_id,
+                        normalization=normalization_payload,
+                        selected_color_sector_ids=(
+                            None
+                            if selection.selected_color_sector_ids is None
+                            else tuple(selection.selected_color_sector_ids)
+                        ),
+                    )
+                    parameter_kernel_id = (
+                        model_inputs.bundle.kernel_pack.resolver_manifest.get(
+                            "model_parameter_kernel_id"
+                        )
+                    )
+                    artifact_processes.append(
+                        SpinorProcessArtifact(
+                            process_id=process_id,
+                            expression=process.process,
+                            color_accuracy="lc",
+                            external_pdgs=tuple(int(leg.pdg) for leg in process.legs),
+                            aliases=(),
+                            physics=physics,
+                            fixed_color_order=(),
+                            validation_point=points[0],
+                            generation_filters={
+                                "execution": "graph-backed-spinor-dag",
+                                "helicity_reduction": "complete-incoherent-sum",
+                                "selected_color_sector_ids": (
+                                    []
+                                    if selection.selected_color_sector_ids is None
+                                    else sorted(selection.selected_color_sector_ids)
+                                ),
+                            },
+                            process_family=None,
+                            graph_payload=graph_payload,
+                            runtime_metadata=runtime_metadata,
+                            referenced_kernel_ids=frozenset(
+                                ()
+                                if parameter_kernel_id is None
+                                else (int(parameter_kernel_id),)
+                            ),
+                        )
+                    )
+                    validation_points_by_process[process_id] = points
+                    phase.advance(
+                        message=process_id,
+                        details={
+                            "process": process_id,
+                            "step": "authenticated spinor graph ready",
+                        },
+                    )
+                    continue
+
+                order = tuple(selection.reference_color_order or ())
+                if (
+                    process.color_accuracy != "lc"
+                    or len(process.initial_legs) != 2
+                    or external_count not in {3, 4, 5, 6}
+                    or not order
+                    or len(set(order)) != len(order)
+                    or any(label not in range(1, external_count + 1) for label in order)
+                ):
+                    raise GenerationError(
+                        "experimental spinor DAG generation requires built-in LC, "
+                        "two initial particles, three to six external particles, "
+                        "and one valid fixed color order"
+                    )
+                color_plan = build_color_plan(
+                    process,
+                    color_accuracy="lc",
+                    reference_color_order=order,
+                    fold_trace_reflections=False,
+                )
+                selected_plan, missing = _restrict_color_plan(
+                    color_plan,
+                    selection.selected_color_sector_ids,
+                )
+                if (
+                    missing
+                    or len(selected_plan.sectors) != 1
+                    or selected_plan.sectors[0].id != 0
+                ):
+                    raise GenerationError(
+                        "the requested spinor fixed color order did not materialize "
+                        "as LC sector 0"
+                    )
+                process_family, fixed_color_order, source_order = (
+                    _spinor_process_semantics(
+                        process,
+                        generation_model,
+                        selected_plan.sectors[0],
+                        order,
+                    )
+                )
+                graph_parameters = spinor_graph_parameters(
+                    process,
+                    generation_model,
+                    process_family=process_family,
+                    ordered_source_labels=source_order,
+                )
+                source_by_label = {int(leg.label): leg for leg in process.legs}
+                quark_pdg = (
+                    None
+                    if process_family == "pure-gluon"
+                    else int(source_by_label[source_order[0]].outgoing_pdg or 0)
+                )
+                try:
+                    certify_spinor_process_algebra(
+                        generation_model,
+                        process_family=process_family,
+                        gluon_count=len(process.adjoint_labels),
+                        quark_pdg=quark_pdg,
+                        spinor_parameters=graph_parameters,
+                    )
+                except SpinorAlgebraCertificationError as exc:
+                    raise GenerationError(
+                        f"experimental spinor DAG model algebra is unsupported: {exc}"
+                    ) from exc
+                physics = build_spinor_physics(
+                    process,
+                    generation_model,
+                    process_id=process_id,
+                    fixed_color_order=fixed_color_order,
+                    process_family=process_family,
+                    ordered_source_labels=(
+                        source_order if process_family != "pure-gluon" else None
+                    ),
+                )
+                artifact_processes.append(
+                    SpinorProcessArtifact(
+                        process_id=process_id,
+                        expression=process.process,
+                        color_accuracy="lc",
+                        external_pdgs=(*process.initial_pdgs, *process.final_pdgs),
+                        aliases=(),
+                        physics=physics,
+                        fixed_color_order=fixed_color_order,
+                        validation_point=points[0],
+                        generation_filters={
+                            "execution": "experimental-spinor-dag",
+                            "fixed_color_order": list(fixed_color_order),
+                            "ordered_source_labels": list(source_order),
+                            "helicity_reduction": "complete-incoherent-sum",
+                        },
+                        process_family=process_family,
+                        ordered_source_labels=(
+                            source_order if process_family != "pure-gluon" else ()
+                        ),
+                        spinor_parameter_names=tuple(
+                            name for name, _value in graph_parameters
+                        ),
+                    )
+                )
+                validation_points_by_process[process_id] = points
+                phase.advance(
+                    message=process_id,
+                    details={"process": process_id, "step": "spinor semantics ready"},
+                )
+
+        with reporter.phase(
+            "artifact-writing",
+            "Writing schema-v3 artifact",
+            total=1,
+        ) as phase:
+            write_result = write_schema_v3_artifact(
+                output,
+                mode=write_mode,
+                source=resolved_model.source,
+                compiled_model=artifact_model,
+                configuration=self._configuration,
+                processes=tuple(artifact_processes),
+                timings=reporter.timings,
+                api_bundle_hook=self._api_bundle_hook,
+            )
+            phase.update(1, message=str(write_result.output))
+
+        expected_process_ids = tuple(
+            process.process_id for process in artifact_processes
+        )
+        with reporter.phase(
+            "validation",
+            "Validating generated artifact",
+            total=1,
+        ) as phase:
+            if validation.post_build_validation:
+                self._validate_generated_artifact(
+                    write_result.output,
+                    expected_process_ids,
+                    validation_points=validation_points_by_process,
+                    expected_api_bundle_path=write_result.api_bundle_path,
+                    progress=phase,
+                )
+                message = (
+                    f"schema and {validation.samples} numerical samples"
+                    if validation.enabled
+                    else "schema, references, hashes, and target"
+                )
+            else:
+                message = "post-build validation disabled"
+            phase.update(1, message=message)
+
+        reporter.timings["total"] = time.perf_counter() - generation_started
+        reporter.finish_generation()
+        return GenerationResult(
+            output=write_result.output,
+            processes=ProcessSet(
+                requests=tuple(entry.request for entry in expanded),
+                aliases=requested_processes.aliases,
+            ),
+            mode=write_mode,
+            files=write_result.files,
         )
 
     def _generate_recurrence_processes(
@@ -4351,6 +4943,7 @@ class GenerationBackend:
                 ),
                 coupling_order_limits=prepared.coupling_order_limits,
                 model=model,
+                closure_anchor_policy=self._recurrence_closure_anchor_policy,
             )
             if selection.selected_color_sector_ids is not None:
                 selected_public_flow_ids = tuple(
@@ -6114,6 +6707,10 @@ class GenerationBackend:
         return run is not None and str(run.evaluator.execution_mode) == "eager"
 
     @property
+    def _spinor_execution_enabled(self) -> bool:
+        return self._process_selection.experimental_spinor_dag
+
+    @property
     def _recurrence_execution_enabled(self) -> bool:
         run = self._run_config
         return run is not None and str(run.evaluator.execution_mode) == "recurrence"
@@ -6129,11 +6726,26 @@ class GenerationBackend:
             self._eager_execution_enabled
             or self._recurrence_execution_enabled
             or self._on_the_fly_execution_enabled
+            or self._spinor_execution_enabled
         )
 
     def _validate_recurrence_request(self) -> None:
         """Keep recurrence-family requests out of compiled/eager lanes."""
 
+        if self._spinor_execution_enabled:
+            run = self._run_config
+            execution_mode = (
+                "compiled" if run is None else str(run.evaluator.execution_mode)
+            )
+            if execution_mode != "compiled":
+                raise GenerationError(
+                    "experimental spinor DAG generation is a compiled-mode override; "
+                    f"got evaluator.execution_mode={execution_mode!r}"
+                )
+            if self._color_accuracy != "lc":
+                raise GenerationError(
+                    "experimental spinor DAG generation requires color.accuracy='lc'"
+                )
         if self._on_the_fly_execution_enabled and self._color_accuracy not in {
             "lc",
             "nlc",
@@ -6409,7 +7021,9 @@ class GenerationBackend:
                 f"--backend {backend}"
             )
         pack = compiled.prepared_bundle.kernel_pack
-        recurrence_family = execution_mode in {"recurrence", "on-the-fly"}
+        recurrence_family = execution_mode in {"recurrence", "on-the-fly"} or (
+            self._spinor_execution_enabled
+        )
         if recurrence_family and pack.recurrence_template is None:
             source = resolved.source.path or resolved.source.kind
             backend = str(run.evaluator.backend)

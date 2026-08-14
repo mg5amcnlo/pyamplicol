@@ -180,6 +180,7 @@ pub const ON_THE_FLY_RUNTIME_CAPABILITY: &str = "rusticol.on-the-fly.complex-f64
 pub const ON_THE_FLY_CONTRACTED_COLOR_RUNTIME_CAPABILITY: &str =
     "rusticol.on-the-fly.contracted-color.v1";
 pub const ON_THE_FLY_LC_COLOR_RUNTIME_CAPABILITY: &str = "rusticol.on-the-fly.lc-color.v1";
+pub const SPINOR_DAG_RUNTIME_CAPABILITY: &str = "rusticol.spinor-dag.fixed-color-f64.v1";
 pub const COMPILED_RUNTIME_SELECTORS_CAPABILITY: &str = "rusticol.compiled.runtime-selectors.v1";
 pub const COMPILED_PLANE_ARENA_RUNTIME_CAPABILITY: &str = "compiled-plane-arena-v1";
 pub const COMPILED_PLANE_DIRECT_APPLICATION_ABI: &str = "pyamplicol-compiled-plane-kernel-v2";
@@ -255,6 +256,7 @@ pub enum RuntimeCapability {
     OnTheFlyRuntimeComplexF64V1,
     OnTheFlyContractedColorV1,
     OnTheFlyLcColorV1,
+    SpinorDagFixedColorF64V1,
     SymjitApplicationComplexF64V1,
     SymbolicaLegacyJitContainerComplexF64V1,
     SymbolicaCompiledCppComplexF64V1,
@@ -286,6 +288,7 @@ impl RuntimeCapability {
             Self::OnTheFlyRuntimeComplexF64V1 => ON_THE_FLY_RUNTIME_CAPABILITY,
             Self::OnTheFlyContractedColorV1 => ON_THE_FLY_CONTRACTED_COLOR_RUNTIME_CAPABILITY,
             Self::OnTheFlyLcColorV1 => ON_THE_FLY_LC_COLOR_RUNTIME_CAPABILITY,
+            Self::SpinorDagFixedColorF64V1 => SPINOR_DAG_RUNTIME_CAPABILITY,
             Self::SymjitApplicationComplexF64V1 => SYMJIT_APPLICATION_RUNTIME_CAPABILITY,
             Self::SymbolicaLegacyJitContainerComplexF64V1 => {
                 SYMBOLICA_LEGACY_JIT_RUNTIME_CAPABILITY
@@ -330,6 +333,8 @@ pub fn supported_runtime_capabilities() -> Vec<&'static str> {
         ON_THE_FLY_CONTRACTED_COLOR_RUNTIME_CAPABILITY,
         #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
         ON_THE_FLY_LC_COLOR_RUNTIME_CAPABILITY,
+        #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+        SPINOR_DAG_RUNTIME_CAPABILITY,
         #[cfg(feature = "f64-symjit")]
         SYMJIT_APPLICATION_RUNTIME_CAPABILITY,
         #[cfg(feature = "symbolica-runtime")]
@@ -4254,6 +4259,8 @@ enum NativeExecutionLane {
     Recurrence(Box<RecurrenceNativeRuntime>),
     #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
     OnTheFly(Box<native_runtime::OnTheFlyExecutionRuntime>),
+    #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+    Spinor(Box<spinor_lane::SpinorNativeRuntime>),
 }
 
 impl NativeExecutionLane {
@@ -4274,6 +4281,18 @@ impl NativeExecutionLane {
         #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
         {
             matches!(self, Self::Recurrence(_))
+        }
+        #[cfg(not(any(feature = "f64-compiled", feature = "f64-symjit")))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "symbolica-runtime")]
+    const fn is_spinor(&self) -> bool {
+        #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+        {
+            matches!(self, Self::Spinor(_))
         }
         #[cfg(not(any(feature = "f64-compiled", feature = "f64-symjit")))]
         {
@@ -4627,6 +4646,13 @@ mod on_the_fly_manifest;
 mod on_the_fly_public_metadata;
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 mod on_the_fly_selectors;
+
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+mod spinor_lane;
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+mod spinor_load;
+#[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
+mod spinor_manifest;
 
 #[cfg(any(feature = "f64-compiled", feature = "f64-symjit"))]
 #[allow(dead_code)]

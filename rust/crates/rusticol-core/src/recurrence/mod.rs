@@ -24,6 +24,7 @@ pub(crate) mod on_the_fly;
 pub mod process;
 mod program;
 mod relation;
+mod spinor_lowering;
 pub mod template;
 pub(crate) mod template_json;
 
@@ -57,8 +58,9 @@ pub use direct_codec::{decode_recurrence_direct_plan_v2, encode_recurrence_direc
 pub(crate) use direct_lowering::validated_template_fixture;
 pub use direct_lowering::{
     DirectRecurrenceRuntimeOptions, PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog,
-    PreparedDirectExecutorKey, lower_recurrence_direct_plan_v2,
-    lower_recurrence_direct_plan_v2_with_relation_discovery, lower_recurrence_direct_v2,
+    PreparedDirectExecutorKey, PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale,
+    lower_recurrence_direct_plan_v2, lower_recurrence_direct_plan_v2_with_relation_discovery,
+    lower_recurrence_direct_v2,
 };
 pub(crate) use direct_pacbin::validate_recurrence_color_projection_certificate;
 pub use direct_pacbin::{
@@ -115,6 +117,7 @@ pub use relation::{
     RecurrenceRelationDiscoveryReport, authenticate_recurrence_numerical_relation_provenance,
     recurrence_numerical_source_semantics_sha256, relation_certificate_algorithm,
 };
+pub use spinor_lowering::lower_authenticated_recurrence_to_spinor_payload_v2;
 /// Semantic prepared-model companion ABI.
 pub const RECURRENCE_TEMPLATE_ABI: &str = "pyamplicol-recurrence-template-v1";
 /// Python-to-Rust recurrence builder input ABI.

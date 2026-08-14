@@ -1903,6 +1903,84 @@ def _validate_logical_relations(
                         "v3 LC closure proof digest does not match the independently "
                         "reconstructed minimum-coloured-source block rotation"
                     )
+            elif (
+                sector.closure_proof_algorithm
+                == "experimental-single-open-line-endpoint-anchor-v1"
+            ):
+                if sector.kind != "open-lines" or len(sector.open_strings) != 1:
+                    raise RecurrenceColumnarInputError(
+                        "experimental endpoint anchoring requires exactly one "
+                        "open colour line"
+                    )
+                line = sector.open_strings[0]
+                open_string = (
+                    line.fundamental_source_slot,
+                    *line.adjoint_source_slots,
+                    line.antifundamental_source_slot,
+                )
+                if sector.word_source_slots != open_string:
+                    raise RecurrenceColumnarInputError(
+                        "experimental endpoint anchoring requires the public word "
+                        "to be one complete open colour line"
+                    )
+                interior = sector.word_source_slots[1:-1]
+                authenticated_policies: list[str] = []
+                for requested_policy in ("left", "both"):
+                    selected_endpoint = (
+                        requested_policy
+                        if requested_policy != "both"
+                        else (
+                            "left"
+                            if interior < tuple(reversed(interior))
+                            else "right"
+                        )
+                    )
+                    expected_anchor = (
+                        sector.word_source_slots[0]
+                        if selected_endpoint == "left"
+                        else sector.word_source_slots[-1]
+                    )
+                    if sector.closure_source_slot != expected_anchor:
+                        continue
+                    payload = {
+                        "algorithm": (
+                            "experimental-single-open-line-endpoint-anchor-v1"
+                        ),
+                        "closure_source_slot": sector.closure_source_slot,
+                        "closure_traversal_source_slots": sector.word_source_slots,
+                        "component_order_policy": "exact-ordered-components",
+                        "external_source_count": len(external_legs),
+                        "fermionic_source_slots": tuple(
+                            leg.source_slot
+                            for leg in external_legs
+                            if leg.is_fermionic
+                        ),
+                        "open_string_count": 1,
+                        "open_string_source_slots": open_string,
+                        "policy": f"{requested_policy}-endpoint-study",
+                        "requested_endpoint_policy": requested_policy,
+                        "sector_id": sector.sector_id,
+                        "sector_kind": sector.kind,
+                        "selected_endpoint": selected_endpoint,
+                        "singlet_source_slots": sector.singlet_source_slots,
+                        "word_source_slots": sector.word_source_slots,
+                    }
+                    expected_digest = hashlib.sha256(
+                        json.dumps(
+                            payload,
+                            allow_nan=False,
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("ascii")
+                    ).hexdigest()
+                    if sector.closure_proof_digest == expected_digest:
+                        authenticated_policies.append(requested_policy)
+                if len(authenticated_policies) != 1:
+                    raise RecurrenceColumnarInputError(
+                        "experimental endpoint closure proof does not authenticate "
+                        "one supported left/both policy"
+                    )
             else:
                 raise RecurrenceColumnarInputError(
                     "unsupported LC closure-anchor proof algorithm "

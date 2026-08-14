@@ -730,11 +730,16 @@ def _benchmark_summary(
     on_the_fly_timing = (
         breakdown is not None and breakdown.execution_mode == "on-the-fly"
     ) or environment.get("execution_mode") == "on-the-fly"
+    spinor_timing = (
+        breakdown is not None and breakdown.execution_mode == "spinor"
+    ) or environment.get("execution_mode") == "spinor"
     direct_arena_timing = environment.get("compiled_direct_arena_active") is True
     if recurrence_timing:
         profile_metric_label = "recurrence core"
     elif on_the_fly_timing:
         profile_metric_label = "OTF recurrence-schedule core"
+    elif spinor_timing:
+        profile_metric_label = "spinor DAG core"
     elif direct_arena_timing:
         profile_metric_label = "Direct-Arena runtime envelope"
     else:
@@ -1046,12 +1051,15 @@ def _benchmark_summary(
     eager_profile = breakdown.execution_mode == "eager"
     recurrence_profile = breakdown.execution_mode == "recurrence"
     on_the_fly_profile = breakdown.execution_mode == "on-the-fly"
+    spinor_profile = breakdown.execution_mode == "spinor"
     if eager_profile:
         breakdown_title = "Rusticol Eager Timing Breakdown"
     elif recurrence_profile:
         breakdown_title = "Rusticol Recurrence Timing Breakdown"
     elif on_the_fly_profile:
         breakdown_title = "Rusticol OTF Recurrence-Schedule Timing Breakdown"
+    elif spinor_profile:
+        breakdown_title = "Rusticol Spinor DAG Timing Breakdown"
     else:
         breakdown_title = "Rusticol Timing Breakdown"
     if separate_timing_samples:
