@@ -218,7 +218,7 @@ enum QcdContributionKind {
     WeylPairVector(SpinorChirality),
     DiracVector(CurrentOrientation),
     ChiralDiracVector(CurrentOrientation),
-    DiracScalar,
+    ComponentwiseFourScalar,
     VectorPairScalar,
 }
 
@@ -1405,26 +1405,43 @@ fn qcd_parameter_slots(
     if let Some(slot) = dirac_mass_prepared_slot {
         slots.insert(slot);
     }
-    for contribution in program.contributions() {
-        let transition = transition_row(templates, contribution.key().transition_template_id())?;
-        let descriptor = direct
-            .intrinsic_descriptor(
-                DirectExecutorRole::Contribution,
-                transition.evaluator_binding_id,
-            )
-            .ok_or_else(|| invalid("QCD transition has no authenticated intrinsic descriptor"))?;
-        qcd_contribution_kind(descriptor)?;
-        validate_transition_parameter_owner(templates, transition, descriptor)?;
-        if let Some(slot) = descriptor
-            .scale()
-            .and_then(|scale| scale.prepared_parameter_slot())
-        {
-            slots.insert(slot);
-        }
-        if let Some(chiral) = descriptor.chiral_dirac_vector() {
-            for scale in [chiral.left_scale(), chiral.right_scale()] {
-                if let Some(slot) = scale.prepared_parameter_slot() {
-                    slots.insert(slot);
+    for current in program
+        .currents()
+        .iter()
+        .filter(|current| !current.is_source())
+    {
+        let range = current.contribution_range().as_usize_range(
+            program.contributions().len(),
+            "QCD parameter contribution range",
+        )?;
+        let contributions = &program.contributions()[range];
+        for contribution in contributions {
+            let (kind, parents, descriptor) =
+                qcd_contribution_contract(contribution, program, templates, direct)?;
+            if kind == QcdContributionKind::ComponentwiseFourScalar
+                && has_preferred_componentwise_mirrored_alias(
+                    contribution,
+                    parents,
+                    descriptor,
+                    contributions,
+                    program,
+                    templates,
+                    direct,
+                )?
+            {
+                continue;
+            }
+            if let Some(slot) = descriptor
+                .scale()
+                .and_then(|scale| scale.prepared_parameter_slot())
+            {
+                slots.insert(slot);
+            }
+            if let Some(chiral) = descriptor.chiral_dirac_vector() {
+                for scale in [chiral.left_scale(), chiral.right_scale()] {
+                    if let Some(slot) = scale.prepared_parameter_slot() {
+                        slots.insert(slot);
+                    }
                 }
             }
         }
@@ -1571,7 +1588,7 @@ fn qcd_contribution_kind(
         CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE => {
             QcdContributionKind::ChiralDiracVector(CurrentOrientation::Antiparticle)
         }
-        DIRAC_SCALAR_TEMPLATE => QcdContributionKind::DiracScalar,
+        DIRAC_SCALAR_TEMPLATE => QcdContributionKind::ComponentwiseFourScalar,
         VECTOR_PAIR_SCALAR_TEMPLATE => QcdContributionKind::VectorPairScalar,
         _ => unreachable!("runtime template checked above"),
     })
@@ -2236,6 +2253,153 @@ fn qcd_contribution_contract<'a>(
     Ok((kind, parents, descriptor))
 }
 
+fn contribution_uses_construction_parent_order(
+    contribution: &super::RecurrenceContribution,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<bool> {
+    let [first, second] = contribution.parent_current_ids() else {
+        return Err(invalid("componentwise contribution is not binary"));
+    };
+    let transition = transition_row(templates, contribution.key().transition_template_id())?;
+    let concrete = match template_u32_sequence(
+        templates,
+        transition.canonical_input_order_sequence_id,
+        "componentwise transition canonical input order",
+    )? {
+        [0, 1] => [*first, *second],
+        [1, 0] => [*second, *first],
+        _ => {
+            return Err(invalid(
+                "componentwise transition canonical input order is invalid",
+            ));
+        }
+    };
+    Ok(concrete[0] < concrete[1])
+}
+
+fn componentwise_mirrored_alias_contracts_match(
+    left: &super::RecurrenceContribution,
+    left_parents: [u32; 2],
+    left_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    right: &super::RecurrenceContribution,
+    right_parents: [u32; 2],
+    right_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<bool> {
+    if left_parents != right_parents
+        || left.key().color_witness_term_id() != right.key().color_witness_term_id()
+        || left_descriptor.runtime_template() != right_descriptor.runtime_template()
+        || left_descriptor.contract_digest() != right_descriptor.contract_digest()
+        || left_descriptor.parent_permutation() != right_descriptor.parent_permutation()
+        || normalized_contribution_exact_factor(left, templates)?
+            != normalized_contribution_exact_factor(right, templates)?
+    {
+        return Ok(false);
+    }
+    let Some(left_scale) = left_descriptor.scale() else {
+        return Ok(false);
+    };
+    let Some(right_scale) = right_descriptor.scale() else {
+        return Ok(false);
+    };
+    if left_scale.constant_real_bits() != right_scale.constant_real_bits()
+        || left_scale.constant_imag_bits() != right_scale.constant_imag_bits()
+    {
+        return Ok(false);
+    }
+
+    let left_transition = transition_row(templates, left.key().transition_template_id())?;
+    let right_transition = transition_row(templates, right.key().transition_template_id())?;
+    let left_inputs = template_u32_sequence(
+        templates,
+        left_transition.input_state_sequence_id,
+        "left componentwise transition input states",
+    )?;
+    let right_inputs = template_u32_sequence(
+        templates,
+        right_transition.input_state_sequence_id,
+        "right componentwise transition input states",
+    )?;
+    if left_inputs.len() != 2
+        || right_inputs.len() != 2
+        || left_inputs != [right_inputs[1], right_inputs[0]]
+    {
+        return Ok(false);
+    }
+    Ok(
+        left_transition.result_state_template_id == right_transition.result_state_template_id
+            && left_transition.color_contraction_template_id
+                == right_transition.color_contraction_template_id
+            && left_transition.coupling_order_set_id == right_transition.coupling_order_set_id
+            && left_transition.output_factor_source == right_transition.output_factor_source
+            && left_transition.equivalence_class_string_id
+                == right_transition.equivalence_class_string_id
+            && left_transition.input_exchange_factor_id
+                == right_transition.input_exchange_factor_id
+            && left_transition.output_projection_string_id
+                == right_transition.output_projection_string_id
+            && left_transition.contact_orbit_step_sequence_id
+                == right_transition.contact_orbit_step_sequence_id
+            && left_transition.contact_orbit_step_semantic_digest_sequence_id
+                == right_transition.contact_orbit_step_semantic_digest_sequence_id
+            && template_exact_factor(
+                templates,
+                left_transition.binding_coupling_factor_id,
+                "left componentwise transition binding coupling",
+            )? == template_exact_factor(
+                templates,
+                right_transition.binding_coupling_factor_id,
+                "right componentwise transition binding coupling",
+            )?
+            && template_exact_factor(
+                templates,
+                left_transition.exact_factor_id,
+                "left componentwise transition exact factor",
+            )? == template_exact_factor(
+                templates,
+                right_transition.exact_factor_id,
+                "right componentwise transition exact factor",
+            )?,
+    )
+}
+
+fn has_preferred_componentwise_mirrored_alias(
+    contribution: &super::RecurrenceContribution,
+    parents: [u32; 2],
+    descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    contributions: &[super::RecurrenceContribution],
+    program: &RecurrenceProgram,
+    templates: &ValidatedRecurrenceTemplateInput,
+    direct: &PreparedDirectExecutorCatalog,
+) -> RusticolResult<bool> {
+    if contribution_uses_construction_parent_order(contribution, templates)? {
+        return Ok(false);
+    }
+    for candidate in contributions {
+        if candidate.id() == contribution.id()
+            || !contribution_uses_construction_parent_order(candidate, templates)?
+        {
+            continue;
+        }
+        let (kind, candidate_parents, candidate_descriptor) =
+            qcd_contribution_contract(candidate, program, templates, direct)?;
+        if kind == QcdContributionKind::ComponentwiseFourScalar
+            && componentwise_mirrored_alias_contracts_match(
+                contribution,
+                parents,
+                descriptor,
+                candidate,
+                candidate_parents,
+                candidate_descriptor,
+                templates,
+            )?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_qcd_current(
     current: &super::RecurrenceCurrent,
@@ -2347,12 +2511,26 @@ fn lower_qcd_current(
         | QcdStateKind::U1SubtractionVector
         | QcdStateKind::MassiveVector { .. }) => {
             let mut terms = Vec::new();
-            for contribution in &program.contributions()[range] {
+            let contributions = &program.contributions()[range];
+            for contribution in contributions {
                 if contribution.result_current_id() != current.id() {
                     return Err(invalid("QCD contribution belongs to the wrong current"));
                 }
                 let (kind, parents, descriptor) =
                     qcd_contribution_contract(contribution, program, templates, direct)?;
+                if kind == QcdContributionKind::ComponentwiseFourScalar
+                    && has_preferred_componentwise_mirrored_alias(
+                        contribution,
+                        parents,
+                        descriptor,
+                        contributions,
+                        program,
+                        templates,
+                        direct,
+                    )?
+                {
+                    continue;
+                }
                 let scale = intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;
                 let exact = qcd_contribution_exact_node(contribution, templates, builder)?;
                 let (numerator, scale) = match kind {
@@ -2408,6 +2586,15 @@ fn lower_qcd_current(
                         // one explicit sqrt(2).
                         let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                         (numerator, builder.product([sqrt_two, scale, exact])?)
+                    }
+                    QcdContributionKind::ComponentwiseFourScalar => {
+                        let vector = required_qcd_vector(current_values, parents[0])?;
+                        let scalar = required_qcd_scalar(current_values, parents[1])?;
+                        // The authenticated four-by-scalar tensor is the
+                        // identity on all four components. Sparse vector input
+                        // and output use the same V/sqrt(2) convention, so no
+                        // additional normalization factor is required.
+                        (vector.clone(), builder.product([scalar, scale, exact])?)
                     }
                     _ => {
                         return Err(invalid(
@@ -2693,7 +2880,7 @@ fn lower_qcd_current(
                         let sqrt_two = builder.kinematic(SpinorKinematicScalar::SqrtTwo)?;
                         (numerator, builder.product([sqrt_two, exact])?)
                     }
-                    QcdContributionKind::DiracScalar => {
+                    QcdContributionKind::ComponentwiseFourScalar => {
                         let scalar = required_qcd_scalar(current_values, parents[1])?;
                         let intrinsic =
                             intrinsic_scale_node(descriptor, dense_parameter_slots, builder)?;

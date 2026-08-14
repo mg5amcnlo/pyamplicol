@@ -96,6 +96,15 @@ _ZZTT_POINT = (
 _ZZTT_PROCESS_ID = "z_z_to_t_tbar"
 _ZZTT_FLOW = "flow:3,4"
 _ZZTT_ORDER = (3, 4)
+_DDZH_POINT = (
+    (500.0, 0.0, 0.0, 500.0),
+    (500.0, 0.0, 0.0, -500.0),
+    (496.345125672, 337.76636942010583, 302.27304478377016, 180.52179513915485),
+    (503.654874328, -337.76636942010583, -302.27304478377016, -180.52179513915485),
+)
+_DDZH_PROCESS_ID = "d_dbar_to_z_h"
+_DDZH_FLOW = "flow:2,1"
+_DDZH_ORDER = (2, 1)
 
 
 @dataclass(frozen=True)
@@ -340,6 +349,68 @@ def test_graph_spinor_massive_scalar_recurrence(
 
     for runtime in (candidate, reference):
         runtime.set_model_parameters({"coupling.17.23_23_25.component_0": 0.0})
+    zeroed_vertex_reference = value(reference)
+    assert zeroed_vertex_reference != pytest.approx(
+        shifted_width_reference,
+        rel=1.0e-9,
+    )
+    assert value(candidate) == pytest.approx(
+        zeroed_vertex_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+
+def test_graph_spinor_scalar_vector_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # Higgsstrahlung builds the internal Z from one external scalar and one
+    # external vector. The catalog already proves that this is the same exact
+    # componentwise four-by-scalar tensor used by a Dirac Yukawa current; this
+    # test checks its model-driven vector-result dispatch and propagation.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_DDZH_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("d d~ > z h", name=_DDZH_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                reference_color_order=_DDZH_ORDER,
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(0, 2),
+            model=prepared_model,
+        )
+        runtimes[mode] = Runtime.load(artifact, process=_DDZH_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate((_DDZH_POINT,), color_flows=(_DDZH_FLOW,))[0]
+        )
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"particle.23.width": 20.0})
+    shifted_width_reference = value(reference)
+    assert shifted_width_reference != pytest.approx(baseline, rel=1.0e-9)
+    assert value(candidate) == pytest.approx(
+        shifted_width_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"coupling.19.23_25_23.component_0": 0.0})
     zeroed_vertex_reference = value(reference)
     assert zeroed_vertex_reference != pytest.approx(
         shifted_width_reference,
