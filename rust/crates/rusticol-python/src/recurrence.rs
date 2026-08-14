@@ -18,14 +18,14 @@ use rusticol_core::recurrence::{
     DirectRecurrencePlan, DirectRecurrenceRuntimeOptions, DirectSelectorWorkSummary,
     PreparedDirectExecutorBinding, PreparedDirectExecutorCatalog, PreparedDirectExecutorKey,
     PreparedDirectIntrinsicDescriptor, PreparedDirectIntrinsicScale,
-    PreparedDirectMassiveDiracFinalizer, RECURRENCE_BUILDER_INPUT_ABI,
-    RECURRENCE_CONTRACTED_COLOR_CAPABILITY, RECURRENCE_DIRECT_PLAN_ABI,
-    RECURRENCE_DIRECT_RUNTIME_CAPABILITY, RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI,
-    RECURRENCE_DIRECT_SCHEDULE_MEMBER, RECURRENCE_DIRECT_TEMPLATE_ABI,
-    RECURRENCE_LC_COLOR_CAPABILITY, RecurrenceBuildProgress, RecurrenceGenerationTelemetry,
-    RecurrenceRelationDiscoveryMode, RecurrenceRelationDiscoveryOptions,
-    RecurrenceRelationDiscoveryReport, RecurrenceStrategy, SemanticDigest,
-    authenticate_recurrence_numerical_relation_provenance,
+    PreparedDirectMassiveDiracFinalizer, PreparedDirectMassiveVectorFinalizer,
+    RECURRENCE_BUILDER_INPUT_ABI, RECURRENCE_CONTRACTED_COLOR_CAPABILITY,
+    RECURRENCE_DIRECT_PLAN_ABI, RECURRENCE_DIRECT_RUNTIME_CAPABILITY,
+    RECURRENCE_DIRECT_RUNTIME_LAYOUT_ABI, RECURRENCE_DIRECT_SCHEDULE_MEMBER,
+    RECURRENCE_DIRECT_TEMPLATE_ABI, RECURRENCE_LC_COLOR_CAPABILITY, RecurrenceBuildProgress,
+    RecurrenceGenerationTelemetry, RecurrenceRelationDiscoveryMode,
+    RecurrenceRelationDiscoveryOptions, RecurrenceRelationDiscoveryReport, RecurrenceStrategy,
+    SemanticDigest, authenticate_recurrence_numerical_relation_provenance,
     bind_recurrence_color_projection_certificate, checked_usize, lower_recurrence_direct_plan_v2,
     lower_recurrence_direct_plan_v2_with_relation_discovery,
     write_recurrence_direct_plan_pacbin_with_projection_certificate,
@@ -66,12 +66,15 @@ const DIRECT_CANONICALIZATION_ABI: &str = "pyamplicol-canonical-json-v1";
 const DIRECT_BACKEND_ABI: &str = "rusticol.recurrence-direct-backend.v1";
 const DIRECT_PAYLOAD_BINDING_ABI: &str = "pyamplicol-recurrence-plane-binding-v2";
 const DIRECT_IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1";
+const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
 
 struct ParsedGraphIntrinsic {
     runtime_template: String,
     contract_digest: SemanticDigest,
     scale: Option<PreparedDirectIntrinsicScale>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
     parent_permutation: [u8; 2],
 }
 
@@ -2761,7 +2764,8 @@ fn parse_direct_template_catalog(
                 "{context} scalar-input count does not match its projections"
             )));
         }
-        let (intrinsic_scale, massive_dirac_finalizer) = if payload_kind == "rusticol-intrinsic"
+        let (intrinsic_scale, massive_dirac_finalizer, massive_vector_finalizer) = if payload_kind
+            == "rusticol-intrinsic"
             && matches!(
                 role,
                 DirectExecutorRole::Contribution | DirectExecutorRole::Finalization
@@ -2784,11 +2788,16 @@ fn parse_direct_template_catalog(
                     "{context} non-scalar intrinsic carries scalar projections"
                 )));
             }
-            (None, None)
+            (None, None, None)
         };
         if payload_kind == "rusticol-intrinsic" && massive_dirac_finalizer.is_some() {
             return Err(RusticolError::compatibility(format!(
                 "{context} massive Dirac algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
+            )));
+        }
+        if payload_kind == "rusticol-intrinsic" && massive_vector_finalizer.is_some() {
+            return Err(RusticolError::compatibility(format!(
+                "{context} massive vector algebra must retain its prepared direct executor and carry graph-intrinsic side metadata"
             )));
         }
         if identity_finalizer {
@@ -2843,27 +2852,39 @@ fn parse_direct_template_catalog(
                 } else {
                     Some(exact_expression_digest)
                 };
-                intrinsic_descriptors.push(if let Some(finalizer) = massive_dirac_finalizer {
-                    PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
-                        key,
-                        runtime_template,
-                        contract_digest.ok_or_else(|| {
-                            invalid(format!(
-                                "{context} massive Dirac intrinsic has no contract digest"
-                            ))
-                        })?,
-                        finalizer,
-                    )
-                    .with_parent_permutation(parent_permutation)
-                } else {
-                    PreparedDirectIntrinsicDescriptor::new(
-                        key,
-                        runtime_template,
-                        contract_digest,
-                        intrinsic_scale,
-                    )
-                    .with_parent_permutation(parent_permutation)
-                });
+                intrinsic_descriptors.push(
+                    if let Some(finalizer) = massive_dirac_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+                            key,
+                            runtime_template,
+                            contract_digest.ok_or_else(|| {
+                                invalid(format!(
+                                    "{context} massive Dirac intrinsic has no contract digest"
+                                ))
+                            })?,
+                            finalizer,
+                        )
+                    } else if let Some(finalizer) = massive_vector_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_vector_finalizer(
+                            key,
+                            runtime_template,
+                            contract_digest.ok_or_else(|| {
+                                invalid(format!(
+                                    "{context} massive vector intrinsic has no contract digest"
+                                ))
+                            })?,
+                            finalizer,
+                        )
+                    } else {
+                        PreparedDirectIntrinsicDescriptor::new(
+                            key,
+                            runtime_template,
+                            contract_digest,
+                            intrinsic_scale,
+                        )
+                    }
+                    .with_parent_permutation(parent_permutation),
+                );
             } else if runtime_template.is_some() {
                 return Err(invalid(format!(
                     "{context} non-intrinsic payload names a runtime template"
@@ -2872,6 +2893,13 @@ fn parse_direct_template_catalog(
                 intrinsic_descriptors.push(
                     if let Some(finalizer) = graph.massive_dirac_finalizer {
                         PreparedDirectIntrinsicDescriptor::new_with_massive_dirac_finalizer(
+                            key,
+                            graph.runtime_template,
+                            graph.contract_digest,
+                            finalizer,
+                        )
+                    } else if let Some(finalizer) = graph.massive_vector_finalizer {
+                        PreparedDirectIntrinsicDescriptor::new_with_massive_vector_finalizer(
                             key,
                             graph.runtime_template,
                             graph.contract_digest,
@@ -3071,6 +3099,7 @@ fn parse_intrinsic_scalar_projection(
 ) -> RusticolResult<(
     Option<PreparedDirectIntrinsicScale>,
     Option<PreparedDirectMassiveDiracFinalizer>,
+    Option<PreparedDirectMassiveVectorFinalizer>,
 )> {
     let projection = json_object(value, context)?;
     match json_string(projection, "kind", &format!("{context} kind"))? {
@@ -3091,6 +3120,7 @@ fn parse_intrinsic_scalar_projection(
                     json_u64(projection, "constant_imag_bits", context)?,
                     json_optional_u32(projection, "parameter_index", context)?,
                 )),
+                None,
                 None,
             ))
         }
@@ -3121,6 +3151,30 @@ fn parse_intrinsic_scalar_projection(
                 None,
                 Some(PreparedDirectMassiveDiracFinalizer::new(
                     orientation,
+                    json_u64(projection, "constant_real_bits", context)?,
+                    json_u64(projection, "constant_imag_bits", context)?,
+                    json_u32(projection, "mass_parameter_index", context)?,
+                    json_u32(projection, "width_parameter_index", context)?,
+                )),
+                None,
+            ))
+        }
+        "massive-vector-propagator-v1" if role == DirectExecutorRole::Finalization => {
+            require_json_fields(
+                projection,
+                &[
+                    "constant_imag_bits",
+                    "constant_real_bits",
+                    "kind",
+                    "mass_parameter_index",
+                    "width_parameter_index",
+                ],
+                context,
+            )?;
+            Ok((
+                None,
+                None,
+                Some(PreparedDirectMassiveVectorFinalizer::new(
                     json_u64(projection, "constant_real_bits", context)?,
                     json_u64(projection, "constant_imag_bits", context)?,
                     json_u32(projection, "mass_parameter_index", context)?,
@@ -3159,18 +3213,33 @@ fn parse_graph_intrinsic(
         role,
         context,
     )?;
-    let (scale, massive_dirac_finalizer) = parse_intrinsic_scalar_projection(
-        json_field(graph, "scalar_projection", context)?,
-        role,
-        &format!("{context} scalar projection"),
-    )?;
+    let (scale, massive_dirac_finalizer, massive_vector_finalizer) =
+        parse_intrinsic_scalar_projection(
+            json_field(graph, "scalar_projection", context)?,
+            role,
+            &format!("{context} scalar projection"),
+        )?;
+    let runtime_template = json_nonempty_string(
+        graph,
+        "runtime_template",
+        &format!("{context} runtime template"),
+    )?
+    .to_owned();
+    if let Some(finalizer) = massive_vector_finalizer {
+        if runtime_template != MASSIVE_VECTOR_UNITARY_TEMPLATE
+            || (
+                finalizer.constant_real_bits(),
+                finalizer.constant_imag_bits(),
+            ) != (0.0_f64.to_bits(), (-1.0_f64).to_bits())
+            || finalizer.mass_prepared_parameter_slot() == finalizer.width_prepared_parameter_slot()
+        {
+            return Err(invalid(format!(
+                "{context} massive-vector projection disagrees with its runtime primitive"
+            )));
+        }
+    }
     Ok(ParsedGraphIntrinsic {
-        runtime_template: json_nonempty_string(
-            graph,
-            "runtime_template",
-            &format!("{context} runtime template"),
-        )?
-        .to_owned(),
+        runtime_template,
         contract_digest: json_sha256(
             graph,
             "contract_digest",
@@ -3178,6 +3247,7 @@ fn parse_graph_intrinsic(
         )?,
         scale,
         massive_dirac_finalizer,
+        massive_vector_finalizer,
         parent_permutation,
     })
 }
@@ -5979,6 +6049,62 @@ mod direct_binding_tests {
             0
         );
         assert_eq!(parsed.prepared_kernel_count, 0);
+    }
+
+    #[test]
+    fn massive_vector_graph_intrinsic_parser_is_typed_and_closed() {
+        let graph = json!({
+            "contract_digest": digest(9),
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": MASSIVE_VECTOR_UNITARY_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": (-1.0_f64).to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-vector-propagator-v1",
+                "mass_parameter_index": 8,
+                "width_parameter_index": 9,
+            },
+        });
+        let parsed = parse_graph_intrinsic(
+            &graph,
+            DirectExecutorRole::Finalization,
+            "test massive-vector graph intrinsic",
+        )
+        .unwrap();
+        let finalizer = parsed.massive_vector_finalizer.unwrap();
+        assert_eq!(parsed.runtime_template, MASSIVE_VECTOR_UNITARY_TEMPLATE);
+        assert_eq!(finalizer.constant_real_bits(), 0.0_f64.to_bits());
+        assert_eq!(finalizer.constant_imag_bits(), (-1.0_f64).to_bits());
+        assert_eq!(finalizer.mass_prepared_parameter_slot(), 8);
+        assert_eq!(finalizer.width_prepared_parameter_slot(), 9);
+
+        let mut wrong_template = graph.clone();
+        wrong_template["runtime_template"] = json!("rusticol.identity-finalize-in-place.v1");
+        assert!(
+            parse_graph_intrinsic(
+                &wrong_template,
+                DirectExecutorRole::Finalization,
+                "test massive-vector graph intrinsic",
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disagrees with its runtime primitive")
+        );
+
+        let mut aliased_slots = graph;
+        aliased_slots["scalar_projection"]["width_parameter_index"] = json!(8);
+        assert!(
+            parse_graph_intrinsic(
+                &aliased_slots,
+                DirectExecutorRole::Finalization,
+                "test massive-vector graph intrinsic",
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disagrees with its runtime primitive")
+        );
     }
 
     #[test]

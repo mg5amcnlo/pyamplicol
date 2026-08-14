@@ -23,9 +23,9 @@ use crate::spinor::{
     dirac_scale, dirac_sum, dirac_vector_expression, external_polarization_expression,
     linear_weyl_scale, linear_weyl_sum, massive_dirac_propagator_denominator,
     massive_dirac_source_expression, massive_vector_longitudinal_polarization_expression,
-    massive_vector_polarization_expression, quark_vector_weyl_bilinear,
-    quark_vector_weyl_numerator_with_momentum, signed_momentum_expression,
-    three_vector_bispinor_expression, weyl_pair_vector_expression,
+    massive_vector_polarization_expression, massive_vector_propagator_expression,
+    quark_vector_weyl_bilinear, quark_vector_weyl_numerator_with_momentum,
+    signed_momentum_expression, three_vector_bispinor_expression, weyl_pair_vector_expression,
 };
 use crate::{RusticolError, RusticolResult};
 
@@ -91,6 +91,10 @@ const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
 const MASSIVE_DIRAC_ANTIPARTICLE_CONTRACT: &str =
     "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c";
+const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
+const MASSIVE_VECTOR_UNITARY_CONTRACT: &str =
+    "4293b6a7a8a7433fc598e2031a031c353491ba76404fa984f9a803daad9cfb40";
 
 fn invalid(message: impl Into<String>) -> RusticolError {
     RusticolError::invalid_argument(format!(
@@ -949,6 +953,7 @@ fn lower_qcd_source(
     if descriptor.contract_digest().is_none()
         || descriptor.scale().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid("QCD source intrinsic descriptor is malformed"));
     }
@@ -1144,30 +1149,46 @@ fn qcd_parameter_slots(
         .iter()
         .filter(|current| !current.is_source())
     {
-        let QcdStateKind::Dirac { orientation } =
-            qcd_state_kind(templates, current.key().current_state_template_id())?
-        else {
-            continue;
-        };
         if qcd_optional_finalization(current, program)?
             .and_then(|finalization| finalization.propagator_template_id())
             .is_none()
         {
             continue;
         }
-        let source_mass = dirac_mass_prepared_slot.ok_or_else(|| {
-            invalid("massive Dirac finalization has no authenticated source-mass owner")
-        })?;
-        let finalizer = qcd_massive_finalizer_contract(
-            current,
-            orientation,
-            program,
-            templates,
-            direct,
-            source_mass,
-        )?;
-        slots.insert(finalizer.mass_prepared_parameter_slot());
-        slots.insert(finalizer.width_prepared_parameter_slot());
+        match qcd_state_kind(templates, current.key().current_state_template_id())? {
+            QcdStateKind::Dirac { orientation } => {
+                let source_mass = dirac_mass_prepared_slot.ok_or_else(|| {
+                    invalid("massive Dirac finalization has no authenticated source-mass owner")
+                })?;
+                let finalizer = qcd_massive_finalizer_contract(
+                    current,
+                    orientation,
+                    program,
+                    templates,
+                    direct,
+                    source_mass,
+                )?;
+                slots.insert(finalizer.mass_prepared_parameter_slot());
+                slots.insert(finalizer.width_prepared_parameter_slot());
+            }
+            QcdStateKind::MassiveVector {
+                mass_parameter_id,
+                mass_prepared_slot,
+                ..
+            } => {
+                let finalizer = qcd_massive_vector_finalizer_contract(
+                    current,
+                    mass_parameter_id,
+                    mass_prepared_slot,
+                    program,
+                    templates,
+                    direct,
+                )?;
+                slots.insert(finalizer.mass_prepared_parameter_slot());
+                slots.insert(finalizer.width_prepared_parameter_slot());
+            }
+            _ => {}
+        }
     }
     Ok(slots.into_iter().collect())
 }
@@ -1194,6 +1215,7 @@ fn qcd_contribution_kind(
     };
     if descriptor.scale().is_none()
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
         || descriptor
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != expected_digest)
@@ -1390,6 +1412,7 @@ fn qcd_massive_finalizer_contract(
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != contract_digest)
         || descriptor.scale().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
         || typed.orientation() != orientation
     {
         return Err(invalid(format!(
@@ -1433,6 +1456,106 @@ fn qcd_massive_finalizer_contract(
     Ok(typed)
 }
 
+fn qcd_massive_vector_finalizer_contract(
+    current: &super::RecurrenceCurrent,
+    state_mass_parameter_id: u32,
+    state_mass_prepared_slot: u32,
+    program: &RecurrenceProgram,
+    templates: &ValidatedRecurrenceTemplateInput,
+    direct: &PreparedDirectExecutorCatalog,
+) -> RusticolResult<super::PreparedDirectMassiveVectorFinalizer> {
+    let finalization = qcd_finalization(current, program)?;
+    let propagator_id = finalization
+        .propagator_template_id()
+        .ok_or_else(|| invalid("active massive-vector current has an identity finalization"))?;
+    let propagator = templates
+        .input()
+        .propagators
+        .get(propagator_id as usize)
+        .ok_or_else(|| invalid(format!("propagator template {propagator_id} is absent")))?;
+    let state_id = current.key().current_state_template_id();
+    let state = templates
+        .input()
+        .current_states
+        .get(state_id as usize)
+        .ok_or_else(|| invalid(format!("current-state template {state_id} is absent")))?;
+    if propagator.id != propagator_id
+        || propagator.applies_propagator != 1
+        || propagator.state_template_id != state_id
+        || state.mass_parameter_id != state_mass_parameter_id
+        || state.width_parameter_id != MISSING_U32
+    {
+        return Err(invalid(format!(
+            "propagator template {propagator_id} is not the current's authenticated massive-vector propagator"
+        )));
+    }
+    let evaluator = evaluator_row(
+        templates,
+        propagator.evaluator_binding_id,
+        EvaluatorContractKind::Propagator,
+    )?;
+    direct.resolve_evaluator(DirectExecutorRole::Finalization, evaluator.id)?;
+    let descriptor = direct
+        .intrinsic_descriptor(DirectExecutorRole::Finalization, evaluator.id)
+        .ok_or_else(|| {
+            invalid("massive-vector propagator has no authenticated intrinsic descriptor")
+        })?;
+    validate_intrinsic_runtime_binding(
+        templates,
+        evaluator,
+        descriptor,
+        "massive-vector finalization",
+    )?;
+    let typed = descriptor.massive_vector_finalizer().ok_or_else(|| {
+        invalid("massive-vector finalization has no authenticated typed operands")
+    })?;
+    if descriptor.runtime_template() != MASSIVE_VECTOR_UNITARY_TEMPLATE
+        || descriptor
+            .contract_digest()
+            .is_none_or(|digest| digest.to_string() != MASSIVE_VECTOR_UNITARY_CONTRACT)
+        || descriptor.scale().is_some()
+        || descriptor.massive_dirac_finalizer().is_some()
+        || typed.constant_real_bits() != 0.0_f64.to_bits()
+        || typed.constant_imag_bits() != (-1.0_f64).to_bits()
+    {
+        return Err(invalid(format!(
+            "unsupported massive-vector finalization primitive {:?}",
+            descriptor.runtime_template()
+        )));
+    }
+    if typed.mass_prepared_parameter_slot() != state_mass_prepared_slot {
+        return Err(invalid(
+            "massive-vector finalizer mass disagrees with authenticated state ownership",
+        ));
+    }
+    if propagator.mass_parameter_id != MISSING_U32 {
+        let propagator_mass = prepared_real_parameter_slot(
+            templates,
+            propagator.mass_parameter_id,
+            "massive-vector propagator mass",
+        )?;
+        if propagator.mass_parameter_id != state_mass_parameter_id
+            || propagator_mass != typed.mass_prepared_parameter_slot()
+        {
+            return Err(invalid(
+                "massive-vector propagator mass disagrees with state/finalizer ownership",
+            ));
+        }
+    }
+    let width_owner = prepared_real_parameter_owner(
+        templates,
+        typed.width_prepared_parameter_slot(),
+        "massive-vector finalizer width",
+    )?;
+    if propagator.width_parameter_id != MISSING_U32 && propagator.width_parameter_id != width_owner
+    {
+        return Err(invalid(
+            "massive-vector propagator width disagrees with finalizer ownership",
+        ));
+    }
+    Ok(typed)
+}
+
 fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> RusticolResult<()> {
     direct.resolve_identity_finalizer()?;
     let descriptor = direct
@@ -1442,6 +1565,7 @@ fn require_identity_finalizer(direct: &PreparedDirectExecutorCatalog) -> Rustico
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid(
             "authenticated identity-finalizer descriptor is malformed",
@@ -1529,6 +1653,7 @@ fn qcd_finalization_scale(
             .scale()
             .is_none_or(|scale| scale.prepared_parameter_slot().is_some())
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid(format!(
             "unsupported QCD finalization primitive {:?}",
@@ -1586,33 +1711,6 @@ fn qcd_contribution_contract<'a>(
             transition.id
         )));
     }
-    let expected_states = template_u32_sequence(
-        templates,
-        transition.input_state_sequence_id,
-        "QCD transition input states",
-    )?;
-    if expected_states.len() != 2 {
-        return Err(invalid(format!(
-            "QCD transition {} is not binary",
-            transition.id
-        )));
-    }
-    for (expected, parent_id) in expected_states
-        .iter()
-        .copied()
-        .zip([*semantic_left, *semantic_right])
-    {
-        let parent = program
-            .currents()
-            .get(parent_id as usize)
-            .ok_or_else(|| invalid("QCD contribution parent is absent"))?;
-        if parent.key().current_state_template_id() != expected {
-            return Err(invalid(format!(
-                "QCD transition {} input state order disagrees with its semantic parents",
-                transition.id
-            )));
-        }
-    }
     let evaluator = evaluator_row(
         templates,
         transition.evaluator_binding_id,
@@ -1636,6 +1734,11 @@ fn qcd_contribution_contract<'a>(
             ));
         }
     };
+    // Authenticated recurrence construction has already validated the
+    // transition's concrete parent states against its canonical input order
+    // and any proven exchange. The graph descriptor's parent permutation is
+    // a separate evaluator-algebra contract, so it must not be compared to
+    // the transition's semantic state sequence here.
     Ok((kind, parents, descriptor))
 }
 
@@ -1666,10 +1769,9 @@ fn lower_qcd_current(
         QcdStateKind::Scalar => Err(invalid(
             "the mixed QCD slice supports scalar insertions only as authenticated sources",
         )),
-        QcdStateKind::MassiveVector { .. } => Err(invalid(
-            "the massive-vector slice supports authenticated external sources only",
-        )),
-        QcdStateKind::Vector | QcdStateKind::U1SubtractionVector => {
+        state @ (QcdStateKind::Vector
+        | QcdStateKind::U1SubtractionVector
+        | QcdStateKind::MassiveVector { .. }) => {
             let mut terms = Vec::new();
             for contribution in &program.contributions()[range] {
                 if contribution.result_current_id() != current.id() {
@@ -1742,20 +1844,69 @@ fn lower_qcd_current(
                 terms.push(bispinor_scale(builder, scale, &numerator)?);
             }
             let numerator = bispinor_sum(builder, terms)?;
-            let scale = if finalization
+            let propagated = if finalization
                 .and_then(|finalization| finalization.propagator_template_id())
                 .is_some()
             {
-                qcd_finalization_scale(
-                    current,
-                    state,
-                    program,
-                    templates,
-                    direct,
-                    dense_parameter_slots,
-                    representative_signs,
-                    builder,
-                )?
+                match state {
+                    QcdStateKind::MassiveVector {
+                        mass_parameter_id,
+                        mass_prepared_slot,
+                        ..
+                    } => {
+                        let typed = qcd_massive_vector_finalizer_contract(
+                            current,
+                            mass_parameter_id,
+                            mass_prepared_slot,
+                            program,
+                            templates,
+                            direct,
+                        )?;
+                        let dense_mass = dense_parameter_slots
+                            .get(&typed.mass_prepared_parameter_slot())
+                            .copied()
+                            .ok_or_else(|| invalid("massive-vector mass has no graph binding"))?;
+                        let dense_width = dense_parameter_slots
+                            .get(&typed.width_prepared_parameter_slot())
+                            .copied()
+                            .ok_or_else(|| invalid("massive-vector width has no graph binding"))?;
+                        let mass = builder.parameter(dense_mass)?;
+                        let width = builder.parameter(dense_width)?;
+                        let runtime_scale = builder.constant(exact_binary64_scale(
+                            typed.constant_real_bits(),
+                            typed.constant_imag_bits(),
+                        )?)?;
+                        let final_exact = builder.constant(
+                            finalization
+                                .ok_or_else(|| invalid("massive-vector finalization is absent"))?
+                                .exact_factor(),
+                        )?;
+                        let (momentum, _) =
+                            qcd_current_momentum(current, representative_signs, builder)?;
+                        massive_vector_propagator_expression(
+                            builder,
+                            &numerator,
+                            &momentum,
+                            mass,
+                            width,
+                            runtime_scale,
+                            final_exact,
+                        )?
+                    }
+                    _ => {
+                        let scale = qcd_finalization_scale(
+                            current,
+                            state,
+                            program,
+                            templates,
+                            direct,
+                            dense_parameter_slots,
+                            representative_signs,
+                            builder,
+                        )?;
+                        bispinor_scale(builder, scale, &numerator)?
+                    }
+                }
             } else {
                 require_identity_finalizer(direct)?;
                 if program.contributions().iter().any(|contribution| {
@@ -1766,15 +1917,14 @@ fn lower_qcd_current(
                         "an identity-finalized vector current is reused as a contribution parent",
                     ));
                 }
-                builder.constant(
+                let scale = builder.constant(
                     finalization
                         .map(super::RecurrenceFinalization::exact_factor)
                         .unwrap_or(ExactComplexRational::ONE),
-                )?
+                )?;
+                bispinor_scale(builder, scale, &numerator)?
             };
-            Ok(QcdCurrent::Vector(bispinor_scale(
-                builder, scale, &numerator,
-            )?))
+            Ok(QcdCurrent::Vector(propagated))
         }
         QcdStateKind::Bivector => {
             if finalization
@@ -2186,6 +2336,7 @@ fn lower_qcd_closures(
             || descriptor.contract_digest().is_none()
             || descriptor.scale().is_some()
             || descriptor.massive_dirac_finalizer().is_some()
+            || descriptor.massive_vector_finalizer().is_some()
         {
             return Err(invalid("QCD closure intrinsic descriptor is malformed"));
         }
@@ -2908,6 +3059,7 @@ fn validate_identity_finalizations(
         || descriptor.contract_digest().is_some()
         || descriptor.scale().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid("scalar identity-finalizer descriptor is malformed"));
     }
@@ -3337,6 +3489,8 @@ fn require_scalar_product_descriptor(
             .contract_digest()
             .is_none_or(|digest| digest.to_string() != SCALAR_PRODUCT_CONTRACT)
         || descriptor.scale().is_none()
+        || descriptor.massive_dirac_finalizer().is_some()
+        || descriptor.massive_vector_finalizer().is_some()
     {
         return Err(invalid(format!(
             "unsupported contribution primitive {:?}",

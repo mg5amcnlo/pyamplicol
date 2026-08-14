@@ -125,6 +125,52 @@ pub struct PreparedDirectMassiveDiracFinalizer {
     width_prepared_parameter_slot: u32,
 }
 
+/// Authenticated runtime inputs for one unitary-gauge massive-vector
+/// propagator intrinsic.
+///
+/// The mass and width slots are semantic operands of the finalizer and remain
+/// distinct in the typed descriptor.  This prevents lowering from recovering
+/// either role from parameter names or particle identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedDirectMassiveVectorFinalizer {
+    constant_real_bits: u64,
+    constant_imag_bits: u64,
+    mass_prepared_parameter_slot: u32,
+    width_prepared_parameter_slot: u32,
+}
+
+impl PreparedDirectMassiveVectorFinalizer {
+    pub const fn new(
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_prepared_parameter_slot: u32,
+        width_prepared_parameter_slot: u32,
+    ) -> Self {
+        Self {
+            constant_real_bits,
+            constant_imag_bits,
+            mass_prepared_parameter_slot,
+            width_prepared_parameter_slot,
+        }
+    }
+
+    pub const fn constant_real_bits(self) -> u64 {
+        self.constant_real_bits
+    }
+
+    pub const fn constant_imag_bits(self) -> u64 {
+        self.constant_imag_bits
+    }
+
+    pub const fn mass_prepared_parameter_slot(self) -> u32 {
+        self.mass_prepared_parameter_slot
+    }
+
+    pub const fn width_prepared_parameter_slot(self) -> u32 {
+        self.width_prepared_parameter_slot
+    }
+}
+
 impl PreparedDirectMassiveDiracFinalizer {
     pub const fn new(
         orientation: CurrentOrientation,
@@ -197,6 +243,7 @@ pub struct PreparedDirectIntrinsicDescriptor {
     contract_digest: Option<SemanticDigest>,
     scale: Option<PreparedDirectIntrinsicScale>,
     massive_dirac_finalizer: Option<PreparedDirectMassiveDiracFinalizer>,
+    massive_vector_finalizer: Option<PreparedDirectMassiveVectorFinalizer>,
     parent_permutation: [u8; 2],
 }
 
@@ -213,6 +260,7 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest,
             scale,
             massive_dirac_finalizer: None,
+            massive_vector_finalizer: None,
             parent_permutation: [0, 1],
         }
     }
@@ -229,6 +277,24 @@ impl PreparedDirectIntrinsicDescriptor {
             contract_digest: Some(contract_digest),
             scale: None,
             massive_dirac_finalizer: Some(finalizer),
+            massive_vector_finalizer: None,
+            parent_permutation: [0, 1],
+        }
+    }
+
+    pub fn new_with_massive_vector_finalizer(
+        key: PreparedDirectExecutorKey,
+        runtime_template: String,
+        contract_digest: SemanticDigest,
+        finalizer: PreparedDirectMassiveVectorFinalizer,
+    ) -> Self {
+        Self {
+            key,
+            runtime_template: runtime_template.into_boxed_str(),
+            contract_digest: Some(contract_digest),
+            scale: None,
+            massive_dirac_finalizer: None,
+            massive_vector_finalizer: Some(finalizer),
             parent_permutation: [0, 1],
         }
     }
@@ -256,6 +322,10 @@ impl PreparedDirectIntrinsicDescriptor {
 
     pub const fn massive_dirac_finalizer(&self) -> Option<PreparedDirectMassiveDiracFinalizer> {
         self.massive_dirac_finalizer
+    }
+
+    pub const fn massive_vector_finalizer(&self) -> Option<PreparedDirectMassiveVectorFinalizer> {
+        self.massive_vector_finalizer
     }
 
     pub const fn parent_permutation(&self) -> [u8; 2] {
@@ -410,6 +480,7 @@ impl PreparedDirectExecutorCatalog {
                     descriptor.contract_digest.is_none()
                         && descriptor.scale.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_vector_finalizer.is_none()
                 }
                 PreparedDirectExecutorKey::Evaluator {
                     role: DirectExecutorRole::Contribution,
@@ -418,19 +489,23 @@ impl PreparedDirectExecutorCatalog {
                     descriptor.contract_digest.is_some()
                         && descriptor.scale.is_some()
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_vector_finalizer.is_none()
                 }
                 PreparedDirectExecutorKey::Evaluator {
                     role: DirectExecutorRole::Finalization,
                     ..
                 } => {
                     descriptor.contract_digest.is_some()
-                        && (descriptor.scale.is_some()
-                            ^ descriptor.massive_dirac_finalizer.is_some())
+                        && usize::from(descriptor.scale.is_some())
+                            + usize::from(descriptor.massive_dirac_finalizer.is_some())
+                            + usize::from(descriptor.massive_vector_finalizer.is_some())
+                            == 1
                 }
                 PreparedDirectExecutorKey::Evaluator { .. } => {
                     descriptor.contract_digest.is_some()
                         && descriptor.scale.is_none()
                         && descriptor.massive_dirac_finalizer.is_none()
+                        && descriptor.massive_vector_finalizer.is_none()
                 }
             };
             if !complete {
@@ -458,6 +533,16 @@ impl PreparedDirectExecutorCatalog {
                 {
                     return Err(invalid(format!(
                         "prepared massive-Dirac finalizer for key {key:?} has invalid typed metadata"
+                    )));
+                }
+            }
+            if let Some(finalizer) = descriptor.massive_vector_finalizer {
+                if key.role() != DirectExecutorRole::Finalization
+                    || finalizer.mass_prepared_parameter_slot
+                        == finalizer.width_prepared_parameter_slot
+                {
+                    return Err(invalid(format!(
+                        "prepared massive-vector finalizer for key {key:?} has invalid typed metadata"
                     )));
                 }
             }

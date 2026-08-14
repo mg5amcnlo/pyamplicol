@@ -14,8 +14,10 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     DIRAC_VECTOR_PARTICLE_TEMPLATE,
     MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+    MASSIVE_VECTOR_UNITARY_TEMPLATE,
     RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+    RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
     certify_recurrence_contribution_intrinsic,
@@ -332,6 +334,28 @@ def _massive_finalization_expressions(
     return tuple(
         _substitute_finalization(f"1\U0001d456*{denominator}*({numerator})", 4)
         for numerator in numerators
+    )
+
+
+def _massive_vector_finalization_expressions(
+    *,
+    mass_symbol: str = "model::prepared::alpha",
+    width_symbol: str = "model::prepared::beta",
+) -> tuple[str, ...]:
+    denominator = (
+        "(p0^2-p1^2-p2^2-p3^2"
+        f"-{mass_symbol}^2+1.00000000000000\U0001d456*"
+        f"{mass_symbol}*{width_symbol})^(-1)"
+    )
+    current_dot_momentum = "(l0*p0-l1*p1-l2*p2-l3*p3)"
+    return tuple(
+        _substitute_finalization(
+            f"-1.00000000000000\U0001d456*{denominator}*"
+            f"(l{component}-p{component}*{mass_symbol}^(-2)*"
+            f"{current_dot_momentum})",
+            4,
+        )
+        for component in range(4)
     )
 
 
@@ -1209,6 +1233,99 @@ def test_massive_dirac_finalizer_rejects_wrong_orientation_formula() -> None:
         certify_recurrence_finalization_intrinsic(
             exact_expressions=tuple(mixed),
             input_contracts=_massive_finalization_contracts(3, 8),
+            component_count=4,
+        )
+        is None
+    )
+
+
+def test_certifies_massive_vector_unitary_finalizer_and_discovers_parameter_roles() -> (
+    None
+):
+    contracts = list(_massive_finalization_contracts(41, 9))
+    contracts[-2:] = reversed(contracts[-2:])
+    result = certify_recurrence_finalization_intrinsic(
+        exact_expressions=_massive_vector_finalization_expressions(),
+        input_contracts=tuple(contracts),
+        component_count=4,
+    )
+
+    assert result is not None
+    assert result.runtime_template == MASSIVE_VECTOR_UNITARY_TEMPLATE
+    assert result.constant_scale == -1.0j
+    assert result.orientation is None
+    assert result.mass_parameter_index == 41
+    assert result.width_parameter_index == 9
+    assert result.scale_projection() == {
+        "constant_imag_bits": 13830554455654793216,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
+        "mass_parameter_index": 41,
+        "width_parameter_index": 9,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "longitudinal-sign",
+        "dot-metric",
+        "mass-power",
+        "width-sign",
+        "overall-scale",
+        "duplicate-parameter-index",
+    ),
+)
+def test_massive_vector_unitary_finalizer_fails_closed_on_contract_drift(
+    mutation: str,
+) -> None:
+    expressions = list(_massive_vector_finalization_expressions())
+    contracts = list(_massive_finalization_contracts(41, 9))
+    if mutation == "longitudinal-sign":
+        expressions[0] = expressions[0].replace(
+            "current_0-model::prepared::momentum_0",
+            "current_0+model::prepared::momentum_0",
+            1,
+        )
+    elif mutation == "dot-metric":
+        expressions = [
+            item.replace(
+                "current_0*model::prepared::momentum_0-"
+                "model::prepared::current_1*model::prepared::momentum_1",
+                "current_0*model::prepared::momentum_0+"
+                "model::prepared::current_1*model::prepared::momentum_1",
+            )
+            for item in expressions
+        ]
+    elif mutation == "mass-power":
+        expressions = [
+            item.replace("model::prepared::alpha^(-2)", "model::prepared::alpha^(-1)")
+            for item in expressions
+        ]
+    elif mutation == "width-sign":
+        expressions = [
+            item.replace(
+                "+1.00000000000000\U0001d456*model::prepared::alpha*"
+                "model::prepared::beta",
+                "-1.00000000000000\U0001d456*model::prepared::alpha*"
+                "model::prepared::beta",
+            )
+            for item in expressions
+        ]
+    elif mutation == "overall-scale":
+        expressions = [
+            item.replace("-1.00000000000000\U0001d456", "1.00000000000000\U0001d456", 1)
+            for item in expressions
+        ]
+    else:
+        second = json.loads(contracts[-1])
+        second["model_parameter_index"] = 41
+        contracts[-1] = json.dumps(second, separators=(",", ":"), sort_keys=True)
+
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=tuple(expressions),
+            input_contracts=tuple(contracts),
             component_count=4,
         )
         is None

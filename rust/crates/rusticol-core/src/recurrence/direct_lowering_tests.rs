@@ -160,6 +160,60 @@ fn prepared_massive_dirac_finalizer_metadata_is_typed_and_role_closed() {
     );
 }
 
+#[test]
+fn prepared_massive_vector_finalizer_metadata_is_typed_and_role_closed() {
+    let key = PreparedDirectExecutorKey::Evaluator {
+        role: DirectExecutorRole::Finalization,
+        evaluator_binding_id: 43,
+    };
+    let typed =
+        PreparedDirectMassiveVectorFinalizer::new(0.0_f64.to_bits(), (-1.0_f64).to_bits(), 8, 9);
+    let descriptor = PreparedDirectIntrinsicDescriptor::new_with_massive_vector_finalizer(
+        key,
+        "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1".to_owned(),
+        digest(21),
+        typed,
+    );
+    let catalog = PreparedDirectExecutorCatalog::new_with_intrinsics(
+        digest(3),
+        vec![PreparedDirectExecutorBinding::evaluator(
+            DirectExecutorRole::Finalization,
+            43,
+            0,
+        )],
+        vec![descriptor],
+    )
+    .unwrap();
+    assert_eq!(
+        catalog
+            .intrinsic_descriptor(DirectExecutorRole::Finalization, 43)
+            .unwrap()
+            .massive_vector_finalizer(),
+        Some(typed)
+    );
+
+    let invalid = PreparedDirectIntrinsicDescriptor::new_with_massive_vector_finalizer(
+        key,
+        "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1".to_owned(),
+        digest(21),
+        PreparedDirectMassiveVectorFinalizer::new(0.0_f64.to_bits(), (-1.0_f64).to_bits(), 8, 8),
+    );
+    assert!(
+        PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![PreparedDirectExecutorBinding::evaluator(
+                DirectExecutorRole::Finalization,
+                43,
+                0,
+            )],
+            vec![invalid],
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invalid typed metadata")
+    );
+}
+
 fn rational(numerator: i128) -> ExactComplexRational {
     ExactComplexRational::new(
         ExactRational::new(numerator, 1).unwrap(),

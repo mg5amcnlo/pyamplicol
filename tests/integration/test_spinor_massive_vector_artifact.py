@@ -32,8 +32,10 @@ class _MassiveVectorCase:
     color_order: tuple[int, ...]
     color_flow: str
     qcd_order: int
+    qed_order: int
     point: tuple[tuple[float, ...], ...]
     tracked_oracle: float | None = None
+    tracked_alpha_ew: float | None = None
 
 
 _CASES = (
@@ -43,6 +45,7 @@ _CASES = (
         color_order=(2, 1),
         color_flow="flow:2,1",
         qcd_order=0,
+        qed_order=1,
         point=(
             (45.594, 0.0, 0.0, 45.594),
             (45.594, 0.0, 0.0, -45.594),
@@ -55,6 +58,7 @@ _CASES = (
         color_order=(2, 4, 1),
         color_flow="flow:2,4,1",
         qcd_order=1,
+        qed_order=1,
         point=(
             (500.0, 0.0, 0.0, 500.0),
             (500.0, 0.0, 0.0, -500.0),
@@ -78,23 +82,50 @@ _CASES = (
         color_order=(2, 1),
         color_flow="flow:2,1",
         qcd_order=0,
+        qed_order=1,
         point=(
             (40.20950122287808, 0.0, 0.0, 40.20950122287808),
             (40.20950122287808, 0.0, 0.0, -40.20950122287808),
             (80.41900244575616, 0.0, 0.0, 0.0),
         ),
         tracked_oracle=229.9705676139197,
+        tracked_alpha_ew=0.007546771114,
+    ),
+    _MassiveVectorCase(
+        expression="u d~ > e+ ve",
+        process_id="u_dbar_to_positron_nue",
+        color_order=(2, 1),
+        color_flow="flow:2,1",
+        qcd_order=0,
+        qed_order=2,
+        point=(
+            (500.0, 0.0, 0.0, 500.0),
+            (500.0, 0.0, 0.0, -500.0),
+            (
+                499.99999999999994,
+                -306.65836769058797,
+                210.51071473894038,
+                334.13453054936508,
+            ),
+            (
+                499.99999999999994,
+                306.65836769058797,
+                -210.51071473894038,
+                -334.13453054936508,
+            ),
+        ),
+        tracked_oracle=0.000422900873179271016676804851172109,
     ),
 )
 
 
-def _config(qcd_order: int) -> RunConfig:
+def _config(qcd_order: int, qed_order: int) -> RunConfig:
     return RunConfig(
         action="generate",
         color=ColorConfig(accuracy="lc", lc_flow_layout="topology-replay"),
         process=ProcessConfig(
             coupling_order_policy="explicit",
-            max_coupling_orders={"QCD": qcd_order, "QED": 1},
+            max_coupling_orders={"QCD": qcd_order, "QED": qed_order},
         ),
         generation=GenerationConfig(
             workers=1,
@@ -133,13 +164,16 @@ def _value(runtime: Runtime, case: _MassiveVectorCase, point: object) -> complex
     return complex(runtime.evaluate((point,), color_flows=(case.color_flow,))[0])
 
 
-def test_graph_spinor_massive_vector_source(tmp_path: Path) -> None:
+def test_graph_spinor_massive_vector_processes(tmp_path: Path) -> None:
     if importlib.util.find_spec("pyamplicol._rusticol") is None:
         pytest.skip("the Rusticol extension has not been built")
     if importlib.util.find_spec("symbolica") is None:
         pytest.skip("Symbolica is unavailable")
 
-    compile_config = _config(max(case.qcd_order for case in _CASES))
+    compile_config = _config(
+        max(case.qcd_order for case in _CASES),
+        max(case.qed_order for case in _CASES),
+    )
     prepared = ModelSource.built_in_sm().compile(
         cache_dir=tmp_path / "model-cache",
         use_cache=False,
@@ -160,7 +194,7 @@ def test_graph_spinor_massive_vector_source(tmp_path: Path) -> None:
                     selected_color_sector_ids=(0,),
                     experimental_spinor_dag=mode == "spinor",
                 ),
-                config=_config(case.qcd_order),
+                config=_config(case.qcd_order, case.qed_order),
                 model=prepared,
             )
             artifacts[mode] = artifact
@@ -180,9 +214,11 @@ def test_graph_spinor_massive_vector_source(tmp_path: Path) -> None:
         reference = Runtime.load(artifacts["component"], process=case.process_id)
         assert candidate.execution_mode == "spinor"
         assert reference.execution_mode == "compiled"
-        if case.tracked_oracle is not None:
+        if case.tracked_alpha_ew is not None:
             for runtime in (candidate, reference):
-                runtime.set_model_parameters({"normalization.alpha_ew": 0.007546771114})
+                runtime.set_model_parameters(
+                    {"normalization.alpha_ew": case.tracked_alpha_ew}
+                )
         reference_value = _value(reference, case, case.point)
         assert _value(candidate, case, case.point) == pytest.approx(
             reference_value,
@@ -217,3 +253,29 @@ def test_graph_spinor_massive_vector_source(tmp_path: Path) -> None:
         rel=2.0e-12,
         abs=1.0e-15,
     )
+
+    internal_w_case = _CASES[3]
+    candidate, reference = runtimes[internal_w_case.process_id]
+    baseline = _value(reference, internal_w_case, internal_w_case.point)
+    for update in (
+        {"particle.24.width": 20.0},
+        {"particle.24.mass": 100.0},
+    ):
+        for runtime in (candidate, reference):
+            runtime.set_model_parameters(update)
+        shifted_reference = _value(reference, internal_w_case, internal_w_case.point)
+        shifted_candidate = _value(
+            candidate,
+            internal_w_case,
+            internal_w_case.point,
+        )
+        assert shifted_candidate == pytest.approx(
+            shifted_reference,
+            rel=2.0e-12,
+            abs=1.0e-15,
+        )
+        assert shifted_reference != pytest.approx(
+            baseline,
+            rel=1.0e-9,
+            abs=1.0e-15,
+        )

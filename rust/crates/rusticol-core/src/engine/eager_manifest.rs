@@ -26,6 +26,8 @@ const MASSIVE_DIRAC_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1";
 const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
+const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
 const DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1";
 const DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
@@ -400,6 +402,13 @@ pub(super) enum RecurrenceDirectScalarProjectionManifest {
         constant_imag_bits: u64,
         mass_parameter_index: u32,
         orientation: RecurrenceDirectDiracOrientationManifest,
+        width_parameter_index: u32,
+    },
+    #[serde(rename = "massive-vector-propagator-v1")]
+    MassiveVectorPropagator {
+        constant_real_bits: u64,
+        constant_imag_bits: u64,
+        mass_parameter_index: u32,
         width_parameter_index: u32,
     },
 }
@@ -1345,6 +1354,7 @@ impl RecurrenceDirectPayloadBindingManifest {
                         projection,
                         RecurrenceDirectScalarProjectionManifest::IntrinsicScale { .. }
                             | RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator { .. }
+                            | RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator { .. }
                     )
                 }) {
                     return Err(RusticolError::integrity(
@@ -1603,6 +1613,25 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                 {
                     return Err(RusticolError::integrity(
                         "prepared massive-Dirac graph intrinsic disagrees with its runtime primitive",
+                    ));
+                }
+            }
+            (
+                "finalization",
+                RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    mass_parameter_index,
+                    width_parameter_index,
+                },
+            ) => {
+                if self.runtime_template != MASSIVE_VECTOR_UNITARY_TEMPLATE
+                    || (*constant_real_bits, *constant_imag_bits)
+                        != (0.0_f64.to_bits(), (-1.0_f64).to_bits())
+                    || mass_parameter_index == width_parameter_index
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared massive-vector graph intrinsic disagrees with its runtime primitive",
                     ));
                 }
             }
@@ -2626,5 +2655,55 @@ mod typed_finalizer_tests {
         }))
         .unwrap();
         graph.validate("finalization").unwrap();
+    }
+
+    #[test]
+    fn massive_vector_projection_deserializes_to_closed_typed_metadata() {
+        let projection: RecurrenceDirectScalarProjectionManifest = serde_json::from_value(json!({
+            "constant_imag_bits": (-1.0_f64).to_bits(),
+            "constant_real_bits": 0.0_f64.to_bits(),
+            "kind": "massive-vector-propagator-v1",
+            "mass_parameter_index": 8,
+            "width_parameter_index": 9,
+        }))
+        .unwrap();
+        assert!(matches!(
+            projection,
+            RecurrenceDirectScalarProjectionManifest::MassiveVectorPropagator {
+                mass_parameter_index: 8,
+                width_parameter_index: 9,
+                ..
+            }
+        ));
+
+        let graph: RecurrenceDirectGraphIntrinsicManifest = serde_json::from_value(json!({
+            "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": MASSIVE_VECTOR_UNITARY_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": (-1.0_f64).to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-vector-propagator-v1",
+                "mass_parameter_index": 8,
+                "width_parameter_index": 9,
+            },
+        }))
+        .unwrap();
+        graph.validate("finalization").unwrap();
+
+        let invalid_graph: RecurrenceDirectGraphIntrinsicManifest = serde_json::from_value(json!({
+            "contract_digest": "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+            "contribution_parent_permutation": [0, 1],
+            "runtime_template": MASSIVE_VECTOR_UNITARY_TEMPLATE,
+            "scalar_projection": {
+                "constant_imag_bits": (-1.0_f64).to_bits(),
+                "constant_real_bits": 0.0_f64.to_bits(),
+                "kind": "massive-vector-propagator-v1",
+                "mass_parameter_index": 8,
+                "width_parameter_index": 8,
+            },
+        }))
+        .unwrap();
+        assert!(invalid_graph.validate("finalization").is_err());
     }
 }

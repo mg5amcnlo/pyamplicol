@@ -31,6 +31,7 @@ _sym = _LazyCompilerSymbolica()
 
 RECURRENCE_INTRINSIC_SCALE_KIND = "intrinsic-scale-v1"
 RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND = "massive-dirac-propagator-v1"
+RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND = "massive-vector-propagator-v1"
 WEYL_PROPAGATOR_POSITIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-a.v1"
 WEYL_PROPAGATOR_NEGATIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-b.v1"
 FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE = (
@@ -57,6 +58,9 @@ MASSIVE_DIRAC_PARTICLE_TEMPLATE = (
 MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1"
 )
+MASSIVE_VECTOR_UNITARY_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1"
+)
 
 DiracOrientation: TypeAlias = Literal["particle", "antiparticle"]
 
@@ -66,6 +70,7 @@ def _f64_bits(value: float) -> int:
 
 
 MASSIVE_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
+MASSIVE_VECTOR_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(-1.0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +114,7 @@ class CertifiedRecurrenceFinalizationIntrinsic:
         if parameterized == (None, None, None):
             return
         if (
-            self.orientation not in {"particle", "antiparticle"}
+            self.orientation not in {None, "particle", "antiparticle"}
             or type(self.mass_parameter_index) is not int
             or self.mass_parameter_index < 0
             or type(self.width_parameter_index) is not int
@@ -117,24 +122,30 @@ class CertifiedRecurrenceFinalizationIntrinsic:
             or self.mass_parameter_index == self.width_parameter_index
         ):
             raise ValueError(
-                "massive Dirac finalization requires an orientation and distinct "
-                "nonnegative mass/width parameter indices"
+                "massive finalization requires distinct nonnegative mass/width "
+                "parameter indices and an optional Dirac orientation"
             )
 
     def scale_projection(self) -> dict[str, object]:
         real = 0.0 if self.constant_scale.real == 0.0 else self.constant_scale.real
         imag = 0.0 if self.constant_scale.imag == 0.0 else self.constant_scale.imag
-        if self.orientation is not None:
+        if self.mass_parameter_index is not None:
             assert self.mass_parameter_index is not None
             assert self.width_parameter_index is not None
-            return {
+            projection: dict[str, object] = {
                 "constant_imag_bits": _f64_bits(imag),
                 "constant_real_bits": _f64_bits(real),
-                "kind": RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
+                "kind": (
+                    RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND
+                    if self.orientation is not None
+                    else RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND
+                ),
                 "mass_parameter_index": self.mass_parameter_index,
-                "orientation": self.orientation,
                 "width_parameter_index": self.width_parameter_index,
             }
+            if self.orientation is not None:
+                projection["orientation"] = self.orientation
+            return projection
         return {
             "constant_imag_bits": _f64_bits(imag),
             "constant_real_bits": _f64_bits(real),
@@ -464,11 +475,60 @@ _MASSIVE_DIRAC_FINALIZATION_WITNESSES = (
     ),
 )
 
+
+@dataclass(frozen=True, slots=True)
+class _MassiveVectorFinalizationWitness:
+    runtime_template: str
+    expressions: tuple[str, str, str, str]
+    runtime_owned_scale: complex = 0.0 - 1.0j
+    contract_digest: str = ""
+
+    def __post_init__(self) -> None:
+        payload = {
+            "component_count": 4,
+            "expressions": list(self.expressions),
+            "parameter_roles": ["mass", "width"],
+            "runtime_owned_scale_bits": [
+                _f64_bits(self.runtime_owned_scale.real),
+                _f64_bits(self.runtime_owned_scale.imag),
+            ],
+            "runtime_template": self.runtime_template,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        object.__setattr__(self, "contract_digest", digest)
+
+
+_MASSIVE_VECTOR_DENOMINATOR = (
+    "(p0^2-p1^2-p2^2-p3^2-m^2+1.00000000000000\U0001d456*m*w)^(-1)"
+)
+_MASSIVE_VECTOR_CURRENT_DOT_MOMENTUM = "(l0*p0-l1*p1-l2*p2-l3*p3)"
+_MASSIVE_VECTOR_FINALIZATION_WITNESSES = (
+    _MassiveVectorFinalizationWitness(
+        runtime_template=MASSIVE_VECTOR_UNITARY_TEMPLATE,
+        expressions=tuple(
+            f"{_MASSIVE_VECTOR_DENOMINATOR}*"
+            f"(l{component}-p{component}*m^(-2)*"
+            f"{_MASSIVE_VECTOR_CURRENT_DOT_MOMENTUM})"
+            for component in range(4)
+        ),  # type: ignore[arg-type]
+    ),
+)
+
+
 RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS = {
     witness.runtime_template: witness.contract_digest
     for witness in (
         *_FINALIZATION_WITNESSES,
         *_MASSIVE_DIRAC_FINALIZATION_WITNESSES,
+        *_MASSIVE_VECTOR_FINALIZATION_WITNESSES,
     )
 }
 
@@ -595,7 +655,14 @@ def certify_recurrence_finalization_intrinsic(
             return None
         if set(parameter_symbols.values()) != set(parameter_indices):
             return None
-        return _certify_massive_dirac_finalization(
+        massive_dirac = _certify_massive_dirac_finalization(
+            normalized,
+            parameter_indices=parameter_indices,
+            component_count=component_count,
+        )
+        if massive_dirac is not None:
+            return massive_dirac
+        return _certify_massive_vector_finalization(
             normalized,
             parameter_indices=parameter_indices,
             component_count=component_count,
@@ -677,6 +744,58 @@ def _certify_massive_dirac_finalization(
                 contract_digest=witness.contract_digest,
                 constant_scale=witness.runtime_owned_scale,
                 orientation=witness.orientation,
+                mass_parameter_index=mass_index,
+                width_parameter_index=width_index,
+            )
+    return None
+
+
+def _certify_massive_vector_finalization(
+    normalized: Sequence[object],
+    *,
+    parameter_indices: tuple[int, int],
+    component_count: int,
+) -> CertifiedRecurrenceFinalizationIntrinsic | None:
+    if component_count != 4:
+        return None
+    _sym._ensure_symbolica()
+    generic_mass = _sym.E("m")
+    generic_width = _sym.E("w")
+    for witness in _MASSIVE_VECTOR_FINALIZATION_WITNESSES:
+        for mass_index, width_index in (
+            parameter_indices,
+            tuple(reversed(parameter_indices)),
+        ):
+            mass = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{mass_index}"
+            )
+            width = _sym.Expression.symbol(
+                f"recurrence_intrinsic::parameter_{width_index}"
+            )
+            replacements = (
+                _sym.Replacement(generic_mass, mass),
+                _sym.Replacement(generic_width, width),
+            )
+            references = tuple(
+                _sym.E(expression).replace_multiple(replacements).expand()
+                for expression in witness.expressions
+            )
+            if any(
+                not _symbolically_equal(
+                    candidate,
+                    witness.runtime_owned_scale * reference,
+                )
+                for candidate, reference in zip(
+                    normalized,
+                    references,
+                    strict=True,
+                )
+            ):
+                continue
+            return CertifiedRecurrenceFinalizationIntrinsic(
+                runtime_template=witness.runtime_template,
+                contract_digest=witness.contract_digest,
+                constant_scale=witness.runtime_owned_scale,
                 mass_parameter_index=mass_index,
                 width_parameter_index=width_index,
             )
@@ -957,11 +1076,14 @@ __all__ = [
     "MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_PARTICLE_TEMPLATE",
     "MASSIVE_DIRAC_RUNTIME_SCALE_BITS",
+    "MASSIVE_VECTOR_RUNTIME_SCALE_BITS",
+    "MASSIVE_VECTOR_UNITARY_TEMPLATE",
     "RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_CONTRACT_DIGESTS",
     "RECURRENCE_INTRINSIC_RUNTIME_TEMPLATES",
     "RECURRENCE_INTRINSIC_SCALE_KIND",
     "RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND",
+    "RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND",
     "WEYL_PAIR_TO_VECTOR_A_TEMPLATE",
     "WEYL_PAIR_TO_VECTOR_B_TEMPLATE",
     "CertifiedRecurrenceFinalizationIntrinsic",

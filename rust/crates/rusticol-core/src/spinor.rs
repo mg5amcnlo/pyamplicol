@@ -3100,6 +3100,34 @@ pub(crate) fn massive_dirac_propagator_denominator(
     builder.sum([momentum_squared, negative_mass_squared, width_term])
 }
 
+/// Apply the authenticated unitary-gauge massive-vector propagator to one
+/// sparse current. Both `current` and the returned expression use the DAG's
+/// `V/sqrt(2)` convention, while `momentum` is the unscaled momentum
+/// bispinor. `runtime_scale` is the model-catalog-owned `-i` factor and
+/// `exact_factor` is the recurrence row's coherent coefficient.
+pub(crate) fn massive_vector_propagator_expression(
+    builder: &mut SpinorDagBuilder,
+    current: &BispinorExpression,
+    momentum: &BispinorExpression,
+    mass: SpinorNodeId,
+    width: SpinorNodeId,
+    runtime_scale: SpinorNodeId,
+    exact_factor: SpinorNodeId,
+) -> RusticolResult<BispinorExpression> {
+    let mass_squared = builder.product([mass, mass])?;
+    let inverse_mass_squared = builder.reciprocal(mass_squared)?;
+    let current_dot_momentum = bispinor_dot_expression(builder, current, momentum)?;
+    let longitudinal_scale = builder.product([current_dot_momentum, inverse_mass_squared])?;
+    let longitudinal_scale = builder.negate(longitudinal_scale)?;
+    let longitudinal = bispinor_scale(builder, longitudinal_scale, momentum)?;
+    let numerator = bispinor_sum(builder, [current.clone(), longitudinal])?;
+
+    let denominator = massive_dirac_propagator_denominator(builder, momentum, mass, width)?;
+    let inverse_denominator = builder.reciprocal(denominator)?;
+    let scale = builder.product([runtime_scale, exact_factor, inverse_denominator])?;
+    bispinor_scale(builder, scale, &numerator)
+}
+
 fn massive_dirac_vector_numerator(
     builder: &mut SpinorDagBuilder,
     quark: &DiracExpression,
