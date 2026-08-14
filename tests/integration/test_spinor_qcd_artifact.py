@@ -142,6 +142,18 @@ _WWZH_COUPLINGS = (
         1053109007290901 / 562949953421312,
     ),
 )
+_AAWW_POINT = (
+    (200.0, 0.0, 0.0, 200.0),
+    (200.0, 0.0, 0.0, -200.0),
+    (200.0, 146.49567157156167, 0.0, 109.87175367867125),
+    (200.0, -146.49567157156167, 0.0, -109.87175367867125),
+)
+_AAWW_PROCESS_ID = "photon_photon_to_wplus_wminus"
+_AAWW_FLOW = "flow:singlet"
+_AAWW_CHARGED_BIVECTOR_OWNERS = (
+    ("coupling.13.22_24_26.component_0", -1.0),
+    ("coupling.13.22_-24_-26.component_0", -1.0),
+)
 _DDZG_CHARGE_CONJUGATE_POINT = (
     (500.0, 0.0, 0.0, 500.0),
     (500.0, 0.0, 0.0, -500.0),
@@ -594,6 +606,73 @@ def test_graph_spinor_full_electroweak_three_vector_recurrence(
         rel=2.0e-12,
         abs=1.0e-15,
     )
+
+
+def test_graph_spinor_charged_bivector_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # Photon fusion creates both charged auxiliary-bivector orientations. The
+    # two canonical kind-13 owners distinguish that route from the remaining
+    # electroweak exchange diagrams in the same singlet projection.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_AAWW_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("a a > w+ w-", name=_AAWW_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(0, 2),
+            model=prepared_model,
+        )
+        runtimes[mode] = Runtime.load(artifact, process=_AAWW_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+    for runtime in (candidate, reference):
+        assert runtime.physics.helicity_coverage == "complete"
+        assert runtime.physics.color_ids == (_AAWW_FLOW,)
+    assert candidate.physics.helicity_ids == ("h:sum",)
+    assert len(reference.physics.helicity_ids) == 36
+
+    # A fixed nonzero width in the internal W lines breaks the Ward identity,
+    # making otherwise equivalent photon gauge representatives numerically
+    # inequivalent.  Stable W propagation isolates the gauge-invariant charged
+    # bivector algebra that this test owns.
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"particle.24.width": 0.0})
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate((_AAWW_POINT,), color_flows=(_AAWW_FLOW,))[0]
+        )
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert baseline.imag == pytest.approx(0.0, abs=1.0e-15)
+    candidate_baseline = value(candidate)
+    assert candidate_baseline == pytest.approx(
+        baseline,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+
+    # Removing only the contact route is not gauge invariant, so the two
+    # backends need not agree after these diagnostic mutations. Probe each
+    # canonical orientation independently against its own physical baseline.
+    for coupling_name, default in _AAWW_CHARGED_BIVECTOR_OWNERS:
+        for runtime, runtime_baseline in (
+            (candidate, candidate_baseline),
+            (reference, baseline),
+        ):
+            runtime.set_model_parameters({coupling_name: 0.0})
+            assert value(runtime) != pytest.approx(runtime_baseline, rel=1.0e-9)
+            runtime.set_model_parameters({coupling_name: default})
 
 
 def test_graph_spinor_charge_conjugate_weyl_recurrence(

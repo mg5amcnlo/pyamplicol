@@ -538,18 +538,11 @@ fn qcd_state_kind(
             (ParticleStatistics::Boson, "lorentz-vector", 4, 0, orientation, None)
                 if state.mass_parameter_id != MISSING_U32 =>
             {
-                let orientation_is_authenticated = match orientation {
-                    CurrentOrientation::SelfConjugate => {
-                        state.particle_id == state.anti_particle_id
-                    }
-                    CurrentOrientation::Particle | CurrentOrientation::Antiparticle => {
-                        state.particle_id != state.anti_particle_id
-                            && massive_vector_conjugate_state_count(
-                                &templates.input().current_states,
-                                state,
-                            ) == 1
-                    }
-                };
+                let orientation_is_authenticated = state_orientation_is_authenticated(
+                    &templates.input().current_states,
+                    state,
+                    orientation,
+                );
                 if !orientation_is_authenticated {
                     return Err(invalid(format!(
                         "massive-vector current-state template {state_id} has no unique authenticated charge conjugate"
@@ -579,11 +572,20 @@ fn qcd_state_kind(
                 "auxiliary:antisymmetric-tensor",
                 6,
                 0,
-                CurrentOrientation::SelfConjugate,
+                orientation,
                 Some("antisymmetric-tensor"),
             ) if state.mass_parameter_id == MISSING_U32
                 && state.width_parameter_id == MISSING_U32 =>
             {
+                if !state_orientation_is_authenticated(
+                    &templates.input().current_states,
+                    state,
+                    orientation,
+                ) {
+                    return Err(invalid(format!(
+                        "bivector current-state template {state_id} has no unique authenticated charge conjugate"
+                    )));
+                }
                 QcdStateKind::Bivector
             }
             (
@@ -702,17 +704,30 @@ fn is_u1_subtraction_vector_state(
     )
 }
 
-fn massive_vector_conjugate_state_count(
+fn state_orientation_is_authenticated(
+    states: &[super::template::CurrentStateRow],
+    state: &super::template::CurrentStateRow,
+    orientation: CurrentOrientation,
+) -> bool {
+    match orientation {
+        CurrentOrientation::SelfConjugate => state.particle_id == state.anti_particle_id,
+        CurrentOrientation::Particle | CurrentOrientation::Antiparticle => {
+            state.particle_id != state.anti_particle_id && conjugate_state_count(states, state) == 1
+        }
+    }
+}
+
+fn conjugate_state_count(
     states: &[super::template::CurrentStateRow],
     state: &super::template::CurrentStateRow,
 ) -> usize {
     states
         .iter()
-        .filter(|candidate| massive_vector_states_are_mutually_conjugate(state, candidate))
+        .filter(|candidate| states_are_mutually_conjugate(state, candidate))
         .count()
 }
 
-fn massive_vector_states_are_mutually_conjugate(
+fn states_are_mutually_conjugate(
     state: &super::template::CurrentStateRow,
     candidate: &super::template::CurrentStateRow,
 ) -> bool {
@@ -1527,6 +1542,8 @@ fn qcd_parameter_slots(
                 QcdContributionKind::ComponentwiseFourScalar
                     | QcdContributionKind::VectorPairScalar
                     | QcdContributionKind::FullThreeVector
+                    | QcdContributionKind::VectorWedgeVector
+                    | QcdContributionKind::AntisymmetricTensorVector
             ) && has_preferred_mirrored_alias(
                 contribution,
                 parents,
@@ -2667,7 +2684,7 @@ fn mirrored_effective_parents_match(left: [u32; 2], right: [u32; 2], reverse: bo
     }
 }
 
-fn full_three_vector_mirrored_alias_contracts_match(
+fn antisymmetric_vector_mirrored_alias_contracts_match(
     left: &super::RecurrenceContribution,
     left_parents: [u32; 2],
     left_descriptor: &super::PreparedDirectIntrinsicDescriptor,
@@ -2675,11 +2692,12 @@ fn full_three_vector_mirrored_alias_contracts_match(
     right_parents: [u32; 2],
     right_descriptor: &super::PreparedDirectIntrinsicDescriptor,
     templates: &ValidatedRecurrenceTemplateInput,
+    runtime_template: &str,
 ) -> RusticolResult<bool> {
     if left_parents != [right_parents[1], right_parents[0]]
         || left.key().color_witness_term_id() != right.key().color_witness_term_id()
-        || left_descriptor.runtime_template() != FULL_THREE_VECTOR_TEMPLATE
-        || right_descriptor.runtime_template() != FULL_THREE_VECTOR_TEMPLATE
+        || left_descriptor.runtime_template() != runtime_template
+        || right_descriptor.runtime_template() != runtime_template
         || left_descriptor.contract_digest() != right_descriptor.contract_digest()
         || left_descriptor.parent_permutation() != [0, 1]
         || right_descriptor.parent_permutation() != [0, 1]
@@ -2708,12 +2726,12 @@ fn full_three_vector_mirrored_alias_contracts_match(
     let left_inputs = template_u32_sequence(
         templates,
         left_transition.input_state_sequence_id,
-        "left full-three-vector transition input states",
+        "left antisymmetric-vector transition input states",
     )?;
     let right_inputs = template_u32_sequence(
         templates,
         right_transition.input_state_sequence_id,
-        "right full-three-vector transition input states",
+        "right antisymmetric-vector transition input states",
     )?;
     if left_inputs.len() != 2
         || right_inputs.len() != 2
@@ -2724,12 +2742,12 @@ fn full_three_vector_mirrored_alias_contracts_match(
     let left_binding = template_exact_factor(
         templates,
         left_transition.binding_coupling_factor_id,
-        "left full-three-vector transition binding coupling",
+        "left antisymmetric-vector transition binding coupling",
     )?;
     let right_binding = template_exact_factor(
         templates,
         right_transition.binding_coupling_factor_id,
-        "right full-three-vector transition binding coupling",
+        "right antisymmetric-vector transition binding coupling",
     )?;
     if left_binding != right_binding.checked_neg()? {
         return Ok(false);
@@ -2740,42 +2758,42 @@ fn full_three_vector_mirrored_alias_contracts_match(
     let left_flow_states = template_u32_sequence(
         templates,
         left_flow.input_state_sequence_id,
-        "left full-three-vector quantum-flow input states",
+        "left antisymmetric-vector quantum-flow input states",
     )?;
     let right_flow_states = template_u32_sequence(
         templates,
         right_flow.input_state_sequence_id,
-        "right full-three-vector quantum-flow input states",
+        "right antisymmetric-vector quantum-flow input states",
     )?;
     let left_flow_spins = template_i32_sequence(
         templates,
         left_flow.input_spin_sequence_id,
-        "left full-three-vector quantum-flow input spins",
+        "left antisymmetric-vector quantum-flow input spins",
     )?;
     let right_flow_spins = template_i32_sequence(
         templates,
         right_flow.input_spin_sequence_id,
-        "right full-three-vector quantum-flow input spins",
+        "right antisymmetric-vector quantum-flow input spins",
     )?;
     let left_flow_flavours = template_u32_sequence(
         templates,
         left_flow.input_flavour_sequence_id,
-        "left full-three-vector quantum-flow input flavours",
+        "left antisymmetric-vector quantum-flow input flavours",
     )?;
     let right_flow_flavours = template_u32_sequence(
         templates,
         right_flow.input_flavour_sequence_id,
-        "right full-three-vector quantum-flow input flavours",
+        "right antisymmetric-vector quantum-flow input flavours",
     )?;
     let left_flow_quantum_numbers = template_u32_sequence(
         templates,
         left_flow.input_quantum_sequence_id,
-        "left full-three-vector quantum-flow input quantum numbers",
+        "left antisymmetric-vector quantum-flow input quantum numbers",
     )?;
     let right_flow_quantum_numbers = template_u32_sequence(
         templates,
         right_flow.input_quantum_sequence_id,
-        "right full-three-vector quantum-flow input quantum numbers",
+        "right antisymmetric-vector quantum-flow input quantum numbers",
     )?;
     if left_flow_states.len() != 2
         || right_flow_states.len() != 2
@@ -2796,12 +2814,12 @@ fn full_three_vector_mirrored_alias_contracts_match(
     let left_flow_coupling = template_exact_factor(
         templates,
         left_flow.exact_coupling_factor_id,
-        "left full-three-vector quantum-flow coupling",
+        "left antisymmetric-vector quantum-flow coupling",
     )?;
     let right_flow_coupling = template_exact_factor(
         templates,
         right_flow.exact_coupling_factor_id,
-        "right full-three-vector quantum-flow coupling",
+        "right antisymmetric-vector quantum-flow coupling",
     )?;
 
     Ok(
@@ -2827,11 +2845,229 @@ fn full_three_vector_mirrored_alias_contracts_match(
             && template_exact_factor(
                 templates,
                 left_transition.exact_factor_id,
-                "left full-three-vector transition exact factor",
+                "left antisymmetric-vector transition exact factor",
             )? == template_exact_factor(
                 templates,
                 right_transition.exact_factor_id,
-                "right full-three-vector transition exact factor",
+                "right antisymmetric-vector transition exact factor",
+            )?
+            && left_flow.result_state_template_id == right_flow.result_state_template_id
+            && left_flow.result_spin_state == right_flow.result_spin_state
+            && left_flow.result_flavour_flow_id == right_flow.result_flavour_flow_id
+            && left_flow.result_quantum_number_flow_id == right_flow.result_quantum_number_flow_id
+            && left_flow.flavour_flow_operation_string_id
+                == right_flow.flavour_flow_operation_string_id
+            && left_flow.quantum_number_flow_operation_string_id
+                == right_flow.quantum_number_flow_operation_string_id
+            && left_flow.coupling_order_set_id == right_flow.coupling_order_set_id
+            && left_flow.coupling_order_set_id == left_transition.coupling_order_set_id
+            && left_flow_coupling == left_binding
+            && right_flow_coupling == right_binding,
+    )
+}
+
+fn antisymmetric_tensor_vector_alias_contracts_match(
+    left: &super::RecurrenceContribution,
+    left_parents: [u32; 2],
+    left_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    right: &super::RecurrenceContribution,
+    right_parents: [u32; 2],
+    right_descriptor: &super::PreparedDirectIntrinsicDescriptor,
+    templates: &ValidatedRecurrenceTemplateInput,
+) -> RusticolResult<bool> {
+    let permutations_are_opposite = matches!(
+        (
+            left_descriptor.parent_permutation(),
+            right_descriptor.parent_permutation(),
+        ),
+        ([0, 1], [1, 0]) | ([1, 0], [0, 1])
+    );
+    if left_parents != right_parents
+        || left_descriptor.runtime_template() != ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE
+        || right_descriptor.runtime_template() != ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE
+        || left_descriptor.contract_digest() != right_descriptor.contract_digest()
+        || !permutations_are_opposite
+        || normalized_contribution_exact_factor(left, templates)?
+            != normalized_contribution_exact_factor(right, templates)?
+    {
+        return Ok(false);
+    }
+    let Some(left_scale) = left_descriptor.scale() else {
+        return Ok(false);
+    };
+    let Some(right_scale) = right_descriptor.scale() else {
+        return Ok(false);
+    };
+    if left_scale.prepared_parameter_slot().is_none()
+        || right_scale.prepared_parameter_slot().is_none()
+        || left_scale.prepared_parameter_slot() == right_scale.prepared_parameter_slot()
+        || exact_binary64_scale(
+            left_scale.constant_real_bits(),
+            left_scale.constant_imag_bits(),
+        )? != exact_binary64_scale(
+            right_scale.constant_real_bits(),
+            right_scale.constant_imag_bits(),
+        )?
+        .checked_neg()?
+    {
+        return Ok(false);
+    }
+
+    let left_transition = transition_row(templates, left.key().transition_template_id())?;
+    let right_transition = transition_row(templates, right.key().transition_template_id())?;
+    let left_inputs = template_u32_sequence(
+        templates,
+        left_transition.input_state_sequence_id,
+        "left antisymmetric-tensor-vector transition input states",
+    )?;
+    let right_inputs = template_u32_sequence(
+        templates,
+        right_transition.input_state_sequence_id,
+        "right antisymmetric-tensor-vector transition input states",
+    )?;
+    let left_canonical_order = template_u32_sequence(
+        templates,
+        left_transition.canonical_input_order_sequence_id,
+        "left antisymmetric-tensor-vector canonical input order",
+    )?;
+    let right_canonical_order = template_u32_sequence(
+        templates,
+        right_transition.canonical_input_order_sequence_id,
+        "right antisymmetric-tensor-vector canonical input order",
+    )?;
+    let left_parameters = template_u32_sequence(
+        templates,
+        left_transition.coupling_parameter_sequence_id,
+        "left antisymmetric-tensor-vector coupling parameters",
+    )?;
+    let right_parameters = template_u32_sequence(
+        templates,
+        right_transition.coupling_parameter_sequence_id,
+        "right antisymmetric-tensor-vector coupling parameters",
+    )?;
+    if left_inputs.len() != 2
+        || right_inputs.len() != 2
+        || left_inputs != [right_inputs[1], right_inputs[0]]
+        || left_canonical_order.len() != 2
+        || left_canonical_order != right_canonical_order
+        || left_parameters.len() != 1
+        || right_parameters.len() != 1
+        || left_parameters == right_parameters
+    {
+        return Ok(false);
+    }
+    let left_binding = template_exact_factor(
+        templates,
+        left_transition.binding_coupling_factor_id,
+        "left antisymmetric-tensor-vector transition binding coupling",
+    )?;
+    let right_binding = template_exact_factor(
+        templates,
+        right_transition.binding_coupling_factor_id,
+        "right antisymmetric-tensor-vector transition binding coupling",
+    )?;
+    if left_binding != right_binding.checked_neg()? {
+        return Ok(false);
+    }
+
+    let left_flow = quantum_flow_row(templates, left_transition.quantum_flow_template_id)?;
+    let right_flow = quantum_flow_row(templates, right_transition.quantum_flow_template_id)?;
+    let left_flow_states = template_u32_sequence(
+        templates,
+        left_flow.input_state_sequence_id,
+        "left antisymmetric-tensor-vector quantum-flow input states",
+    )?;
+    let right_flow_states = template_u32_sequence(
+        templates,
+        right_flow.input_state_sequence_id,
+        "right antisymmetric-tensor-vector quantum-flow input states",
+    )?;
+    let left_flow_spins = template_i32_sequence(
+        templates,
+        left_flow.input_spin_sequence_id,
+        "left antisymmetric-tensor-vector quantum-flow input spins",
+    )?;
+    let right_flow_spins = template_i32_sequence(
+        templates,
+        right_flow.input_spin_sequence_id,
+        "right antisymmetric-tensor-vector quantum-flow input spins",
+    )?;
+    let left_flow_flavours = template_u32_sequence(
+        templates,
+        left_flow.input_flavour_sequence_id,
+        "left antisymmetric-tensor-vector quantum-flow input flavours",
+    )?;
+    let right_flow_flavours = template_u32_sequence(
+        templates,
+        right_flow.input_flavour_sequence_id,
+        "right antisymmetric-tensor-vector quantum-flow input flavours",
+    )?;
+    let left_flow_quantum_numbers = template_u32_sequence(
+        templates,
+        left_flow.input_quantum_sequence_id,
+        "left antisymmetric-tensor-vector quantum-flow input quantum numbers",
+    )?;
+    let right_flow_quantum_numbers = template_u32_sequence(
+        templates,
+        right_flow.input_quantum_sequence_id,
+        "right antisymmetric-tensor-vector quantum-flow input quantum numbers",
+    )?;
+    if left_flow_states.len() != 2
+        || right_flow_states.len() != 2
+        || left_flow_states != [right_flow_states[1], right_flow_states[0]]
+        || left_flow_spins.len() != 2
+        || right_flow_spins.len() != 2
+        || left_flow_spins != [right_flow_spins[1], right_flow_spins[0]]
+        || left_flow_flavours.len() != 2
+        || right_flow_flavours.len() != 2
+        || left_flow_flavours != [right_flow_flavours[1], right_flow_flavours[0]]
+        || left_flow_quantum_numbers.len() != 2
+        || right_flow_quantum_numbers.len() != 2
+        || left_flow_quantum_numbers
+            != [right_flow_quantum_numbers[1], right_flow_quantum_numbers[0]]
+    {
+        return Ok(false);
+    }
+    let left_flow_coupling = template_exact_factor(
+        templates,
+        left_flow.exact_coupling_factor_id,
+        "left antisymmetric-tensor-vector quantum-flow coupling",
+    )?;
+    let right_flow_coupling = template_exact_factor(
+        templates,
+        right_flow.exact_coupling_factor_id,
+        "right antisymmetric-tensor-vector quantum-flow coupling",
+    )?;
+
+    // The two prepared model vertices intentionally own distinct color and
+    // equivalence identities. Recurrence construction has already validated
+    // each selected witness and co-resides the terms only when their effective
+    // parents and result dynamic-color state agree; the normalized exact-factor
+    // equality above authenticates the remaining fixed-flow color weight.
+    Ok(
+        left_transition.result_state_template_id == right_transition.result_state_template_id
+            && left_transition.coupling_order_set_id == right_transition.coupling_order_set_id
+            && left_transition.momentum_convention_sequence_id
+                == right_transition.momentum_convention_sequence_id
+            && left_transition.output_factor_source == right_transition.output_factor_source
+            && OutputFactorSource::try_from(left_transition.output_factor_source)?
+                == OutputFactorSource::CouplingReal
+            && left_transition.input_exchange_factor_id == MISSING_U32
+            && right_transition.input_exchange_factor_id == MISSING_U32
+            && left_transition.output_projection_string_id
+                == right_transition.output_projection_string_id
+            && left_transition.contact_orbit_step_sequence_id
+                == right_transition.contact_orbit_step_sequence_id
+            && left_transition.contact_orbit_step_semantic_digest_sequence_id
+                == right_transition.contact_orbit_step_semantic_digest_sequence_id
+            && template_exact_factor(
+                templates,
+                left_transition.exact_factor_id,
+                "left antisymmetric-tensor-vector transition exact factor",
+            )? == template_exact_factor(
+                templates,
+                right_transition.exact_factor_id,
+                "right antisymmetric-tensor-vector transition exact factor",
             )?
             && left_flow.result_state_template_id == right_flow.result_state_template_id
             && left_flow.result_spin_state == right_flow.result_spin_state
@@ -2896,7 +3132,31 @@ fn has_preferred_mirrored_alias(
                 true,
             )?,
             QcdContributionKind::FullThreeVector => {
-                full_three_vector_mirrored_alias_contracts_match(
+                antisymmetric_vector_mirrored_alias_contracts_match(
+                    contribution,
+                    parents,
+                    descriptor,
+                    candidate,
+                    candidate_parents,
+                    candidate_descriptor,
+                    templates,
+                    FULL_THREE_VECTOR_TEMPLATE,
+                )?
+            }
+            QcdContributionKind::VectorWedgeVector => {
+                antisymmetric_vector_mirrored_alias_contracts_match(
+                    contribution,
+                    parents,
+                    descriptor,
+                    candidate,
+                    candidate_parents,
+                    candidate_descriptor,
+                    templates,
+                    VECTOR_WEDGE_VECTOR_TEMPLATE,
+                )?
+            }
+            QcdContributionKind::AntisymmetricTensorVector => {
+                antisymmetric_tensor_vector_alias_contracts_match(
                     contribution,
                     parents,
                     descriptor,
@@ -3049,6 +3309,7 @@ fn lower_qcd_current(
                     kind,
                     QcdContributionKind::ComponentwiseFourScalar
                         | QcdContributionKind::FullThreeVector
+                        | QcdContributionKind::AntisymmetricTensorVector
                 ) && has_preferred_mirrored_alias(
                     contribution,
                     parents,
@@ -3336,7 +3597,8 @@ fn lower_qcd_current(
             }
             require_identity_finalizer(direct)?;
             let mut terms = Vec::new();
-            for contribution in &program.contributions()[range] {
+            let contributions = &program.contributions()[range];
+            for contribution in contributions {
                 if contribution.result_current_id() != current.id() {
                     return Err(invalid("QCD contribution belongs to the wrong current"));
                 }
@@ -3346,6 +3608,17 @@ fn lower_qcd_current(
                     return Err(invalid(
                         "bivector current uses a non-vector-wedge-vector primitive",
                     ));
+                }
+                if has_preferred_mirrored_alias(
+                    contribution,
+                    parents,
+                    descriptor,
+                    contributions,
+                    program,
+                    templates,
+                    direct,
+                )? {
+                    continue;
                 }
                 let left = required_qcd_vector(current_values, parents[0])?;
                 let right = required_qcd_vector(current_values, parents[1])?;
@@ -5792,7 +6065,7 @@ mod tests {
     }
 
     #[test]
-    fn charged_massive_vector_requires_one_exact_conjugate_state() {
+    fn charged_oriented_states_require_one_exact_conjugate_state() {
         let templates = validated_template_fixture();
         let mut particle = templates.input().current_states[0];
         particle.id = 10;
@@ -5800,59 +6073,121 @@ mod tests {
         particle.anti_particle_id = -909;
         particle.orientation = CurrentOrientation::Particle as u8;
         particle.statistics = ParticleStatistics::Boson as u8;
-        particle.dimension = 4;
+        particle.dimension = 6;
         particle.chirality = 0;
-        particle.mass_parameter_id = 7;
-        particle.width_parameter_id = 9;
+        particle.auxiliary_kind_string_id = particle.basis_string_id;
+        particle.mass_parameter_id = MISSING_U32;
+        particle.width_parameter_id = MISSING_U32;
 
         let mut antiparticle = particle;
         antiparticle.id = 11;
         antiparticle.particle_id = particle.anti_particle_id;
         antiparticle.anti_particle_id = particle.particle_id;
         antiparticle.orientation = CurrentOrientation::Antiparticle as u8;
-        assert!(massive_vector_states_are_mutually_conjugate(
-            &particle,
-            &antiparticle
-        ));
-        assert!(massive_vector_states_are_mutually_conjugate(
-            &antiparticle,
-            &particle
-        ));
+        assert!(states_are_mutually_conjugate(&particle, &antiparticle));
+        assert!(states_are_mutually_conjugate(&antiparticle, &particle));
         assert_eq!(
-            massive_vector_conjugate_state_count(&[particle, antiparticle], &particle),
+            conjugate_state_count(&[particle, antiparticle], &particle),
             1
         );
+        assert!(state_orientation_is_authenticated(
+            &[particle, antiparticle],
+            &particle,
+            CurrentOrientation::Particle,
+        ));
+        assert!(!state_orientation_is_authenticated(
+            &[particle],
+            &particle,
+            CurrentOrientation::Particle,
+        ));
+
+        // The shared conjugacy contract must retain the already-supported
+        // charged massive-vector case, including its nonmissing mass/width
+        // ownership.
+        let mut massive_particle = particle;
+        massive_particle.dimension = 4;
+        massive_particle.auxiliary_kind_string_id = MISSING_U32;
+        massive_particle.mass_parameter_id = 7;
+        massive_particle.width_parameter_id = 9;
+        let mut massive_antiparticle = antiparticle;
+        massive_antiparticle.dimension = 4;
+        massive_antiparticle.auxiliary_kind_string_id = MISSING_U32;
+        massive_antiparticle.mass_parameter_id = 7;
+        massive_antiparticle.width_parameter_id = 9;
+        assert!(states_are_mutually_conjugate(
+            &massive_particle,
+            &massive_antiparticle,
+        ));
+        massive_antiparticle.width_parameter_id = 10;
+        assert!(!states_are_mutually_conjugate(
+            &massive_particle,
+            &massive_antiparticle,
+        ));
 
         let mut wrong_species = antiparticle;
         wrong_species.species_string_id = wrong_species.species_string_id.wrapping_add(1);
-        assert!(!massive_vector_states_are_mutually_conjugate(
+        assert!(!states_are_mutually_conjugate(&particle, &wrong_species));
+        let mut wrong_color = antiparticle;
+        wrong_color.color_representation = 8;
+        assert!(!states_are_mutually_conjugate(&particle, &wrong_color));
+        let mut wrong_color_shape = antiparticle;
+        wrong_color_shape.lc_color_shape_string_id =
+            wrong_color_shape.lc_color_shape_string_id.wrapping_add(1);
+        assert!(!states_are_mutually_conjugate(
             &particle,
-            &wrong_species
+            &wrong_color_shape
+        ));
+        let mut wrong_auxiliary_kind = antiparticle;
+        wrong_auxiliary_kind.auxiliary_kind_string_id = wrong_auxiliary_kind
+            .auxiliary_kind_string_id
+            .wrapping_add(1);
+        assert!(!states_are_mutually_conjugate(
+            &particle,
+            &wrong_auxiliary_kind
         ));
         let mut wrong_mass = antiparticle;
         wrong_mass.mass_parameter_id = wrong_mass.mass_parameter_id.wrapping_add(1);
-        assert!(!massive_vector_states_are_mutually_conjugate(
-            &particle,
-            &wrong_mass
-        ));
+        assert!(!states_are_mutually_conjugate(&particle, &wrong_mass));
         let mut wrong_width = antiparticle;
         wrong_width.width_parameter_id = 10;
-        assert!(!massive_vector_states_are_mutually_conjugate(
-            &particle,
-            &wrong_width
-        ));
+        assert!(!states_are_mutually_conjugate(&particle, &wrong_width));
         let mut wrong_orientation = antiparticle;
         wrong_orientation.orientation = CurrentOrientation::Particle as u8;
-        assert!(!massive_vector_states_are_mutually_conjugate(
+        assert!(!states_are_mutually_conjugate(
             &particle,
             &wrong_orientation
+        ));
+        assert!(!state_orientation_is_authenticated(
+            &[particle, wrong_species],
+            &particle,
+            CurrentOrientation::Particle,
         ));
         let mut duplicate = antiparticle;
         duplicate.id = 12;
         assert_eq!(
-            massive_vector_conjugate_state_count(&[particle, antiparticle, duplicate], &particle),
+            conjugate_state_count(&[particle, antiparticle, duplicate], &particle),
             2
         );
+        assert!(!state_orientation_is_authenticated(
+            &[particle, antiparticle, duplicate],
+            &particle,
+            CurrentOrientation::Particle,
+        ));
+
+        let mut self_conjugate = particle;
+        self_conjugate.anti_particle_id = self_conjugate.particle_id;
+        self_conjugate.orientation = CurrentOrientation::SelfConjugate as u8;
+        assert!(state_orientation_is_authenticated(
+            &[self_conjugate],
+            &self_conjugate,
+            CurrentOrientation::SelfConjugate,
+        ));
+        self_conjugate.anti_particle_id = -self_conjugate.particle_id;
+        assert!(!state_orientation_is_authenticated(
+            &[self_conjugate],
+            &self_conjugate,
+            CurrentOrientation::SelfConjugate,
+        ));
     }
 
     #[test]
