@@ -25,12 +25,17 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
+    RECURRENCE_INTRINSIC_SCALE_KIND,
     RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND,
     RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND,
     RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND,
     VECTOR_PAIR_TO_SCALAR_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
+    WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+    WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+    WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+    WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
     CertifiedChiralDiracVectorIntrinsic,
     CertifiedRecurrenceFinalizationIntrinsic,
     CertifiedRecurrenceIntrinsic,
@@ -1110,6 +1115,8 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             VECTOR_PAIR_TO_SCALAR_TEMPLATE,
             WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
             WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
         }.issubset(
             {
                 item.payload_binding.graph_intrinsic.runtime_template
@@ -1120,6 +1127,57 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
         assert all(
             item.payload_binding.kind == "prepared-direct-call"
             for item in graph_contributions
+        )
+        charge_conjugate_weyl_vectors = tuple(
+            item
+            for item in graph_contributions
+            if item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            in {
+                WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+                WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+            }
+        )
+        assert {
+            item.payload_binding.graph_intrinsic.runtime_template
+            for item in charge_conjugate_weyl_vectors
+            if item.payload_binding.graph_intrinsic is not None
+        } == {
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+        }
+        assert all(
+            item.parent_component_counts == (2, 4)
+            and item.destination_component_count == 2
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.runtime_template is None
+            and item.payload_binding.intrinsic_contract_digest is None
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.contribution_parent_permutation
+            == (0, 1)
+            and item.payload_binding.graph_intrinsic.projection.get(
+                "constant_real_bits"
+            )
+            == 4604544271217802184
+            and item.payload_binding.graph_intrinsic.projection.get(
+                "constant_imag_bits"
+            )
+            == 0
+            for item in charge_conjugate_weyl_vectors
+        )
+        charge_conjugate_parameter_indices = {
+            item.payload_binding.graph_intrinsic.projection["parameter_index"]
+            for item in charge_conjugate_weyl_vectors
+            if item.payload_binding.graph_intrinsic is not None
+        }
+        assert None in charge_conjugate_parameter_indices
+        assert any(
+            item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            == WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE
+            and item.payload_binding.graph_intrinsic.projection["parameter_index"]
+            == 61
+            for item in charge_conjugate_weyl_vectors
         )
         chiral_dirac_vectors = tuple(
             item
@@ -1178,6 +1236,41 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
             and item.payload_binding.graph_intrinsic.projection["parameter_index"]
             is not None
             for item in vector_pair_scalars
+        )
+        charge_conjugate_weyl_finalizers = tuple(
+            item
+            for item in direct.templates
+            if item.role == "finalization"
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            in {
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+            }
+        )
+        assert {
+            item.payload_binding.graph_intrinsic.runtime_template
+            for item in charge_conjugate_weyl_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        }
+        assert all(
+            item.parent_component_counts == (2,)
+            and item.destination_component_count == 2
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.runtime_template is None
+            and item.payload_binding.intrinsic_contract_digest is None
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection
+            == {
+                "constant_imag_bits": 0,
+                "constant_real_bits": 4607182418800017408,
+                "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+                "parameter_index": None,
+            }
+            for item in charge_conjugate_weyl_finalizers
         )
         massive_finalizers = tuple(
             item

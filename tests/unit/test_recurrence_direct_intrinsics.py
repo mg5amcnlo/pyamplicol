@@ -27,6 +27,10 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     VECTOR_PAIR_TO_SCALAR_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
     WEYL_PAIR_TO_VECTOR_B_TEMPLATE,
+    WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+    WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+    WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+    WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
     CertifiedChiralDiracVectorIntrinsic,
     certify_recurrence_contribution_intrinsic,
     certify_recurrence_finalization_intrinsic,
@@ -428,6 +432,26 @@ def _massive_scalar_finalization_expression(
         ),
         (
             (
+                "l1*r2+1𝑖*l0*r0+1𝑖*l0*r3+1𝑖*l1*r1",
+                "-l0*r2-1𝑖*l1*r3+1𝑖*l0*r1+1𝑖*l1*r0",
+            ),
+            (2, 4),
+            2,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+            1.0 + 0.0j,
+        ),
+        (
+            (
+                "-l1*r2-1𝑖*l0*r3-1𝑖*l1*r1+1𝑖*l0*r0",
+                "-1𝑖*l0*r1+l0*r2+1𝑖*l1*r0+1𝑖*l1*r3",
+            ),
+            (2, 4),
+            2,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+            1.0 + 0.0j,
+        ),
+        (
+            (
                 "1𝑖/2*(l0*r1+l1*r2+l2*r3)",
                 "1𝑖/2*(l0*r0+l3*r2+l4*r3)",
                 "1𝑖/2*(-l3*r1+l1*r0+l5*r3)",
@@ -493,6 +517,20 @@ def test_certifies_model_namespace_independent_intrinsics(
                 "-1𝑖*l1*r3+l0*r2+1𝑖*l0*r1+1𝑖*l1*r0",
             ),
             "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-b.v1",
+        ),
+        (
+            (
+                "l1*r2+1𝑖*l0*r0+1𝑖*l0*r3+1𝑖*l1*r1",
+                "-l0*r2-1𝑖*l1*r3+1𝑖*l0*r1+1𝑖*l1*r0",
+            ),
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+        ),
+        (
+            (
+                "-l1*r2-1𝑖*l0*r3-1𝑖*l1*r1+1𝑖*l0*r0",
+                "-1𝑖*l0*r1+l0*r2+1𝑖*l1*r0+1𝑖*l1*r3",
+            ),
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
         ),
     ),
 )
@@ -1252,6 +1290,26 @@ def test_reversed_dirac_scalar_transition_records_prepared_parent_order() -> Non
         ),
         (
             (
+                "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+                "*(-1𝑖*l0*p0+1𝑖*l0*p3+1𝑖*l1*p1+l1*p2)",
+                "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+                "*(-l0*p2-1𝑖*l1*p0-1𝑖*l1*p3+1𝑖*l0*p1)",
+            ),
+            2,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+        ),
+        (
+            (
+                "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+                "*(-l1*p2-1𝑖*l0*p0-1𝑖*l0*p3-1𝑖*l1*p1)",
+                "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+                "*(-1𝑖*l0*p1-1𝑖*l1*p0+1𝑖*l1*p3+l0*p2)",
+            ),
+            2,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        ),
+        (
+            (
                 "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l0",
                 "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l1",
                 "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)*-1𝑖*l2",
@@ -1279,6 +1337,37 @@ def test_certifies_finalization_intrinsics(
         -1.0j if expected_template.endswith("vector-propagator-feynman.v1") else 1.0
     )
     assert len(result.contract_digest) == 64
+
+
+def test_charge_conjugate_weyl_contract_digests_are_stable() -> None:
+    assert {
+        template: RECURRENCE_INTRINSIC_CONTRACT_DIGESTS[template]
+        for template in (
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+        )
+    } == {
+        WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE: (
+            "60c9f930fbf87b660465576973f8808b6170faaf8450cca9d2fe7f03a92ce650"
+        ),
+        WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE: (
+            "889a474e49649aac2fec994f2184960765bbc162e68a3f64c68276837eee17f6"
+        ),
+    }
+    assert {
+        template: RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[template]
+        for template in (
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        )
+    } == {
+        WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE: (
+            "59758189473600d789c56ecdf0df33c651ef6e4300449929e956f14db22006fc"
+        ),
+        WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE: (
+            "9320f6e95d50fe1f5425aa987672eddc574ccd558445bb419d5dd7ce57d81e23"
+        ),
+    }
 
 
 def test_certifies_binary64_unit_weyl_finalizer_without_tolerance() -> None:

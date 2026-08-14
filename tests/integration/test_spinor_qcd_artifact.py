@@ -105,6 +105,26 @@ _DDZH_POINT = (
 _DDZH_PROCESS_ID = "d_dbar_to_z_h"
 _DDZH_FLOW = "flow:2,1"
 _DDZH_ORDER = (2, 1)
+_DDZG_CHARGE_CONJUGATE_POINT = (
+    (500.0, 0.0, 0.0, 500.0),
+    (500.0, 0.0, 0.0, -500.0),
+    (
+        504.15762567199999,
+        -438.65194577979531,
+        1.0884904775248876,
+        -231.17730388450397,
+    ),
+    (
+        495.84237432800001,
+        438.65194577979531,
+        -1.0884904775248876,
+        231.17730388450397,
+    ),
+)
+_DDZG_CHARGE_CONJUGATE_PROCESS_ID = "d_dbar_to_z_g_charge_conjugate"
+_DDZG_CHARGE_CONJUGATE_FLOW = "flow:2,4,1"
+_DDZG_CHARGE_CONJUGATE_ORDER = (2, 4, 1)
+_DDZG_CHARGE_CONJUGATE_ORACLE = 0.2430807318374035
 
 
 @dataclass(frozen=True)
@@ -421,3 +441,92 @@ def test_graph_spinor_scalar_vector_recurrence(
         rel=2.0e-12,
         abs=1.0e-15,
     )
+
+
+def test_graph_spinor_charge_conjugate_weyl_recurrence(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # The left closure anchor grows the line from the crossed d source as an
+    # antiparticle current.  The complete helicity sum therefore needs both
+    # charge-conjugate A/B vertices and propagators rather than the
+    # already-covered particle-oriented Weyl primitives.
+    artifacts: dict[str, Path] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_DDZG_CHARGE_CONJUGATE_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse(
+                "d d~ > z g",
+                name=_DDZG_CHARGE_CONJUGATE_PROCESS_ID,
+            ),
+            artifact,
+            selection=GenerationSlice(
+                reference_color_order=_DDZG_CHARGE_CONJUGATE_ORDER,
+                selected_color_sector_ids=(0,),
+                recurrence_closure_anchor_policy="left",
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(1, 1),
+            model=prepared_model,
+        )
+        artifacts[mode] = artifact
+
+    candidate = Runtime.load(
+        artifacts["spinor"],
+        process=_DDZG_CHARGE_CONJUGATE_PROCESS_ID,
+    )
+    reference = Runtime.load(
+        artifacts["component"],
+        process=_DDZG_CHARGE_CONJUGATE_PROCESS_ID,
+    )
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+
+    def value(runtime: Runtime) -> complex:
+        return complex(
+            runtime.evaluate(
+                (_DDZG_CHARGE_CONJUGATE_POINT,),
+                color_flows=(_DDZG_CHARGE_CONJUGATE_FLOW,),
+            )[0]
+        )
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"normalization.alpha_ew": 0.007546771114})
+    baseline = value(reference)
+    assert baseline.imag == pytest.approx(0.0, abs=1.0e-15)
+    assert baseline.real == pytest.approx(
+        _DDZG_CHARGE_CONJUGATE_ORACLE,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+    # The recurrence represents the same Z coupling through the orientation
+    # appropriate to its line direction.  Mutating each chiral half through
+    # that authenticated owner proves both charge-conjugate graph bindings.
+    for component in (0, 1):
+        candidate = Runtime.load(
+            artifacts["spinor"],
+            process=_DDZG_CHARGE_CONJUGATE_PROCESS_ID,
+        )
+        reference = Runtime.load(
+            artifacts["component"],
+            process=_DDZG_CHARGE_CONJUGATE_PROCESS_ID,
+        )
+        for runtime in (candidate, reference):
+            runtime.set_model_parameters(
+                {"normalization.alpha_ew": 0.007546771114}
+            )
+        candidate.set_model_parameters(
+            {f"coupling.11.-1_23_-1.component_{component}": 0.0}
+        )
+        reference.set_model_parameters(
+            {f"coupling.10.1_23_1.component_{component}": 0.0}
+        )
+        shifted_reference = value(reference)
+        assert shifted_reference != pytest.approx(baseline, rel=1.0e-9)
+        assert value(candidate) == pytest.approx(
+            shifted_reference,
+            rel=2.0e-12,
+            abs=1.0e-15,
+        )

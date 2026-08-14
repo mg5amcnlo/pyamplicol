@@ -931,3 +931,34 @@ def test_spinor_generation_rejects_more_than_one_concrete_process(tmp_path) -> N
             reporter=cast(Any, None),
             generation_started=0.0,
         )
+
+
+def test_spinor_generation_rejects_selected_source_helicities(tmp_path) -> None:
+    process = _gluon_process(4)
+    request = ProcessRequest(process.process, process.key)
+    backend = service_module.GenerationBackend(
+        None,
+        None,
+        process_selection=service_module._ProcessSelection(
+            selected_source_helicities={1: -1},
+            experimental_spinor_dag=True,
+        ),
+    )
+
+    with pytest.raises(GenerationError, match="always-summed helicity axis"):
+        backend._generate_spinor_processes(
+            (
+                service_module._ExpandedProcess(
+                    request=request,
+                    process_ir=process,
+                ),
+            ),
+            output=tmp_path / "artifact",
+            write_mode="error",
+            requested_processes=ProcessSet((request,)),
+            resolved_model=cast(Any, None),
+            artifact_model=cast(Any, None),
+            generation_model=BuiltinSMModel(),
+            reporter=cast(Any, None),
+            generation_started=0.0,
+        )

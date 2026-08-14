@@ -36,8 +36,20 @@ RECURRENCE_MASSIVE_SCALAR_FINALIZER_KIND = "massive-scalar-propagator-v1"
 RECURRENCE_MASSIVE_VECTOR_FINALIZER_KIND = "massive-vector-propagator-v1"
 WEYL_PROPAGATOR_POSITIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-a.v1"
 WEYL_PROPAGATOR_NEGATIVE_TEMPLATE = "rusticol.recurrence-intrinsic.weyl-propagator-b.v1"
+WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-a.v1"
+)
+WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-b.v1"
+)
 FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE = (
     "rusticol.recurrence-intrinsic.vector-propagator-feynman.v1"
+)
+WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1"
+)
+WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-b.v1"
 )
 DIRAC_VECTOR_PARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-particle.v1"
@@ -343,6 +355,30 @@ _WITNESSES = (
         destination_component_count=2,
     ),
     _IntrinsicWitness(
+        runtime_template=WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_A_TEMPLATE,
+        # Antiparticle orientation, chirality +1.
+        expressions=(
+            "l1*r2+1𝑖*l0*r0+1𝑖*l0*r3+1𝑖*l1*r1",
+            "-l0*r2-1𝑖*l1*r3+1𝑖*l0*r1+1𝑖*l1*r0",
+        ),
+        anchor_monomial="l1*r2",
+        inverse_anchor_coefficient="1",
+        parent_component_counts=(2, 4),
+        destination_component_count=2,
+    ),
+    _IntrinsicWitness(
+        runtime_template=WEYL_VECTOR_TO_WEYL_CHARGE_CONJUGATE_B_TEMPLATE,
+        # Antiparticle orientation, chirality -1.
+        expressions=(
+            "-l1*r2-1𝑖*l0*r3-1𝑖*l1*r1+1𝑖*l0*r0",
+            "-1𝑖*l0*r1+l0*r2+1𝑖*l1*r0+1𝑖*l1*r3",
+        ),
+        anchor_monomial="l1*r2",
+        inverse_anchor_coefficient="-1",
+        parent_component_counts=(2, 4),
+        destination_component_count=2,
+    ),
+    _IntrinsicWitness(
         runtime_template=WEYL_PAIR_TO_VECTOR_A_TEMPLATE,
         expressions=(
             "l0*r0+l1*r1",
@@ -592,6 +628,30 @@ _FINALIZATION_WITNESSES = (
         expressions=(
             "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-l1*p2+1𝑖*l0*p0+1𝑖*l0*p3+1𝑖*l1*p1)",
             "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-1𝑖*l1*p3+l0*p2+1𝑖*l0*p1+1𝑖*l1*p0)",
+        ),
+        anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l1*p2",
+        inverse_anchor_coefficient="-1",
+        component_count=2,
+        runtime_owned_scale=1.0 + 0.0j,
+    ),
+    _FinalizationWitness(
+        runtime_template=WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+        # Antiparticle orientation, chirality +1; no particle-path minus.
+        expressions=(
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-1𝑖*l0*p0+1𝑖*l0*p3+1𝑖*l1*p1+l1*p2)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-l0*p2-1𝑖*l1*p0-1𝑖*l1*p3+1𝑖*l0*p1)",
+        ),
+        anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l0*p0",
+        inverse_anchor_coefficient="1𝑖",
+        component_count=2,
+        runtime_owned_scale=1.0 + 0.0j,
+    ),
+    _FinalizationWitness(
+        runtime_template=WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        # Antiparticle orientation, chirality -1; no particle-path minus.
+        expressions=(
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-l1*p2-1𝑖*l0*p0-1𝑖*l0*p3-1𝑖*l1*p1)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*(-1𝑖*l0*p1-1𝑖*l1*p0+1𝑖*l1*p3+l0*p2)",
         ),
         anchor_monomial="((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l1*p2",
         inverse_anchor_coefficient="-1",

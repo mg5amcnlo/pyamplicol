@@ -40,6 +40,14 @@ const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
 const DIRAC_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.dirac-scalar-to-dirac.v1";
 const VECTOR_PAIR_TO_SCALAR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.vector-pair-to-scalar.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-b.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-a.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-b.v1";
 const RECURRENCE_DIRECT_TEMPLATE_ABI_V1: &str = "pyamplicol-recurrence-direct-template-v1";
 const RECURRENCE_DIRECT_BACKEND_ABI_V1: &str = "rusticol.recurrence-direct-backend.v1";
 const RECURRENCE_DIRECT_CANONICALIZATION_ABI_V1: &str = "pyamplicol-canonical-json-v1";
@@ -1664,6 +1672,8 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                     | DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE
                     | DIRAC_SCALAR_TEMPLATE
                     | VECTOR_PAIR_TO_SCALAR_TEMPLATE
+                    | WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE
+                    | WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE
             ) =>
             {
                 let real = f64::from_bits(*constant_real_bits);
@@ -1672,6 +1682,28 @@ impl RecurrenceDirectGraphIntrinsicManifest {
                 {
                     return Err(RusticolError::integrity(
                         "prepared contribution graph intrinsic has a non-finite or zero scale",
+                    ));
+                }
+            }
+            (
+                "finalization",
+                RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    parameter_index,
+                },
+            ) if matches!(
+                self.runtime_template.as_str(),
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE
+                    | WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE
+            ) =>
+            {
+                if (*constant_real_bits, *constant_imag_bits)
+                    != (1.0_f64.to_bits(), 0.0_f64.to_bits())
+                    || parameter_index.is_some()
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared charge-conjugate Weyl propagator graph intrinsic disagrees with its runtime primitive",
                     ));
                 }
             }
@@ -2713,6 +2745,85 @@ fn contiguous_widths(name: &str, mut pairs: Vec<(usize, usize)>) -> RusticolResu
 mod typed_finalizer_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn charge_conjugate_weyl_graph_intrinsics_are_role_and_scale_closed() {
+        let contribution = |runtime_template: &str, real: f64, imaginary: f64| {
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": "60c9f930fbf87b660465576973f8808b6170faaf8450cca9d2fe7f03a92ce650",
+                "contribution_parent_permutation": [1, 0],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": 17,
+                },
+            }))
+            .unwrap()
+        };
+        for runtime_template in [
+            WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        ] {
+            contribution(runtime_template, 0.707106781186547, 0.0)
+                .validate("contribution")
+                .unwrap();
+            assert!(
+                contribution(runtime_template, 0.0, 0.0)
+                    .validate("contribution")
+                    .is_err()
+            );
+            assert!(
+                contribution(runtime_template, f64::INFINITY, 0.0)
+                    .validate("contribution")
+                    .is_err()
+            );
+            assert!(
+                contribution(runtime_template, 0.707106781186547, 0.0)
+                    .validate("finalization")
+                    .is_err()
+            );
+        }
+
+        let propagator = |runtime_template: &str, real: f64, parameter_index: Option<u32>| {
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": "59758189473600d789c56ecdf0df33c651ef6e4300449929e956f14db22006fc",
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": 0.0_f64.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": parameter_index,
+                },
+            }))
+            .unwrap()
+        };
+        for runtime_template in [
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        ] {
+            propagator(runtime_template, 1.0, None)
+                .validate("finalization")
+                .unwrap();
+            assert!(
+                propagator(runtime_template, -1.0, None)
+                    .validate("finalization")
+                    .is_err()
+            );
+            assert!(
+                propagator(runtime_template, 1.0, Some(17))
+                    .validate("finalization")
+                    .is_err()
+            );
+            assert!(
+                propagator(runtime_template, 1.0, None)
+                    .validate("contribution")
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn massive_dirac_projection_deserializes_to_closed_typed_metadata() {

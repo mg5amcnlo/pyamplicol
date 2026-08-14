@@ -3773,6 +3773,11 @@ class GenerationBackend:
                 "experimental spinor DAG artifacts do not support append mode"
             )
         selection = self._process_selection
+        if selection.selected_source_helicities is not None:
+            raise GenerationError(
+                "graph-backed spinor DAG artifacts expose an always-summed "
+                "helicity axis; remove process.selected_source_helicities"
+            )
         model_inputs = self._recurrence_model_inputs(resolved_model)
         legacy_fallback_enabled = (
             resolved_model.source.kind == "built-in-sm"

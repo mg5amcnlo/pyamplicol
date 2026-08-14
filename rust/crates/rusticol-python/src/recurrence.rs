@@ -74,6 +74,14 @@ const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-antiparticle.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-b.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-a.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-b.v1";
 
 struct ParsedGraphIntrinsic {
     runtime_template: String,
@@ -3362,6 +3370,46 @@ fn parse_graph_intrinsic(
         &format!("{context} runtime template"),
     )?
     .to_owned();
+    if matches!(
+        runtime_template.as_str(),
+        WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE | WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE
+    ) {
+        let scale = scale.ok_or_else(|| {
+            invalid(format!(
+                "{context} charge-conjugate Weyl-vector projection has no intrinsic scale"
+            ))
+        })?;
+        let real = f64::from_bits(scale.constant_real_bits());
+        let imaginary = f64::from_bits(scale.constant_imag_bits());
+        if role != DirectExecutorRole::Contribution
+            || !real.is_finite()
+            || !imaginary.is_finite()
+            || (real == 0.0 && imaginary == 0.0)
+        {
+            return Err(invalid(format!(
+                "{context} charge-conjugate Weyl-vector projection disagrees with its runtime primitive"
+            )));
+        }
+    }
+    if matches!(
+        runtime_template.as_str(),
+        WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE | WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE
+    ) {
+        let scale = scale.ok_or_else(|| {
+            invalid(format!(
+                "{context} charge-conjugate Weyl-propagator projection has no intrinsic scale"
+            ))
+        })?;
+        if role != DirectExecutorRole::Finalization
+            || (scale.constant_real_bits(), scale.constant_imag_bits())
+                != (1.0_f64.to_bits(), 0.0_f64.to_bits())
+            || scale.prepared_parameter_slot().is_some()
+        {
+            return Err(invalid(format!(
+                "{context} charge-conjugate Weyl-propagator projection disagrees with its runtime primitive"
+            )));
+        }
+    }
     if let Some((orientation, left_scale, right_scale)) = chiral_dirac_vector {
         let expected_template = match orientation {
             template::CurrentOrientation::Particle => CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE,
@@ -6230,6 +6278,114 @@ mod direct_binding_tests {
             0
         );
         assert_eq!(parsed.prepared_kernel_count, 0);
+    }
+
+    #[test]
+    fn charge_conjugate_weyl_graph_intrinsic_parser_is_role_and_scale_closed() {
+        let contribution = |runtime_template: &str, real: f64, imaginary: f64| {
+            json!({
+                "contract_digest": digest(10),
+                "contribution_parent_permutation": [1, 0],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": 17,
+                },
+            })
+        };
+        for runtime_template in [
+            WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        ] {
+            let graph = contribution(runtime_template, 0.707106781186547, 0.0);
+            let parsed = parse_graph_intrinsic(
+                &graph,
+                DirectExecutorRole::Contribution,
+                "test charge-conjugate Weyl-vector graph intrinsic",
+            )
+            .unwrap();
+            let scale = parsed.scale.unwrap();
+            assert_eq!(scale.constant_real_bits(), 0.707106781186547_f64.to_bits());
+            assert_eq!(scale.constant_imag_bits(), 0.0_f64.to_bits());
+            assert_eq!(scale.prepared_parameter_slot(), Some(17));
+            assert_eq!(parsed.parent_permutation, [1, 0]);
+
+            assert!(
+                parse_graph_intrinsic(
+                    &graph,
+                    DirectExecutorRole::Finalization,
+                    "test charge-conjugate Weyl-vector graph intrinsic",
+                )
+                .is_err()
+            );
+            for invalid_graph in [
+                contribution(runtime_template, 0.0, 0.0),
+                contribution(runtime_template, f64::INFINITY, 0.0),
+            ] {
+                assert!(
+                    parse_graph_intrinsic(
+                        &invalid_graph,
+                        DirectExecutorRole::Contribution,
+                        "test charge-conjugate Weyl-vector graph intrinsic",
+                    )
+                    .is_err()
+                );
+            }
+        }
+
+        let propagator = |runtime_template: &str, real: f64, parameter_index: Option<u32>| {
+            json!({
+                "contract_digest": digest(11),
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": 0.0_f64.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": parameter_index,
+                },
+            })
+        };
+        for runtime_template in [
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+        ] {
+            let graph = propagator(runtime_template, 1.0, None);
+            let parsed = parse_graph_intrinsic(
+                &graph,
+                DirectExecutorRole::Finalization,
+                "test charge-conjugate Weyl-propagator graph intrinsic",
+            )
+            .unwrap();
+            let scale = parsed.scale.unwrap();
+            assert_eq!(scale.constant_real_bits(), 1.0_f64.to_bits());
+            assert_eq!(scale.constant_imag_bits(), 0.0_f64.to_bits());
+            assert_eq!(scale.prepared_parameter_slot(), None);
+
+            assert!(
+                parse_graph_intrinsic(
+                    &graph,
+                    DirectExecutorRole::Contribution,
+                    "test charge-conjugate Weyl-propagator graph intrinsic",
+                )
+                .is_err()
+            );
+            for invalid_graph in [
+                propagator(runtime_template, -1.0, None),
+                propagator(runtime_template, 1.0, Some(17)),
+            ] {
+                assert!(
+                    parse_graph_intrinsic(
+                        &invalid_graph,
+                        DirectExecutorRole::Finalization,
+                        "test charge-conjugate Weyl-propagator graph intrinsic",
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[test]

@@ -53,6 +53,14 @@ const WEYL_VECTOR_A_CONTRACT: &str =
 const WEYL_VECTOR_B_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-b.v1";
 const WEYL_VECTOR_B_CONTRACT: &str =
     "488de507671a00baeb23979e51303f1a77e7c4747b733ee51c95b00705ca393b";
+const WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-a.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_A_CONTRACT: &str =
+    "60c9f930fbf87b660465576973f8808b6170faaf8450cca9d2fe7f03a92ce650";
+const WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-vector-to-weyl-charge-conjugate-b.v1";
+const WEYL_VECTOR_CHARGE_CONJUGATE_B_CONTRACT: &str =
+    "889a474e49649aac2fec994f2184960765bbc162e68a3f64c68276837eee17f6";
 const WEYL_PAIR_VECTOR_A_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-pair-to-vector-a.v1";
 const WEYL_PAIR_VECTOR_A_CONTRACT: &str =
     "4ba229a983d630393867793ae53d0a6acb9d503e4767a43e0c804cb3cf43bf7a";
@@ -65,6 +73,14 @@ const WEYL_PROPAGATOR_A_CONTRACT: &str =
 const WEYL_PROPAGATOR_B_TEMPLATE: &str = "rusticol.recurrence-intrinsic.weyl-propagator-b.v1";
 const WEYL_PROPAGATOR_B_CONTRACT: &str =
     "3c0a6569e86eb94d115561e286491eb85d7210480efa2706f9f8ae5cd63f0888";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-a.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_CONTRACT: &str =
+    "59758189473600d789c56ecdf0df33c651ef6e4300449929e956f14db22006fc";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.weyl-propagator-charge-conjugate-b.v1";
+const WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_CONTRACT: &str =
+    "9320f6e95d50fe1f5425aa987672eddc574ccd558445bb419d5dd7ce57d81e23";
 const VECTOR_PROPAGATOR_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.vector-propagator-feynman.v1";
 const VECTOR_PROPAGATOR_CONTRACT: &str =
@@ -214,7 +230,10 @@ enum QcdContributionKind {
     ThreeVector,
     AntisymmetricTensorVector,
     VectorWedgeVector,
-    WeylVector(SpinorChirality),
+    WeylVector {
+        chirality: SpinorChirality,
+        orientation: CurrentOrientation,
+    },
     WeylPairVector(SpinorChirality),
     DiracVector(CurrentOrientation),
     ChiralDiracVector(CurrentOrientation),
@@ -1529,6 +1548,8 @@ fn qcd_contribution_kind(
         VECTOR_WEDGE_VECTOR_TEMPLATE => VECTOR_WEDGE_VECTOR_CONTRACT,
         WEYL_VECTOR_A_TEMPLATE => WEYL_VECTOR_A_CONTRACT,
         WEYL_VECTOR_B_TEMPLATE => WEYL_VECTOR_B_CONTRACT,
+        WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE => WEYL_VECTOR_CHARGE_CONJUGATE_A_CONTRACT,
+        WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE => WEYL_VECTOR_CHARGE_CONJUGATE_B_CONTRACT,
         WEYL_PAIR_VECTOR_A_TEMPLATE => WEYL_PAIR_VECTOR_A_CONTRACT,
         WEYL_PAIR_VECTOR_B_TEMPLATE => WEYL_PAIR_VECTOR_B_CONTRACT,
         DIRAC_VECTOR_PARTICLE_TEMPLATE => DIRAC_VECTOR_PARTICLE_CONTRACT,
@@ -1564,12 +1585,13 @@ fn qcd_contribution_kind(
             descriptor.runtime_template()
         )));
     }
+    if let Some(kind) = weyl_vector_contribution_kind(descriptor.runtime_template()) {
+        return Ok(kind);
+    }
     Ok(match descriptor.runtime_template() {
         THREE_VECTOR_TEMPLATE => QcdContributionKind::ThreeVector,
         ANTISYMMETRIC_TENSOR_VECTOR_TEMPLATE => QcdContributionKind::AntisymmetricTensorVector,
         VECTOR_WEDGE_VECTOR_TEMPLATE => QcdContributionKind::VectorWedgeVector,
-        WEYL_VECTOR_A_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Positive),
-        WEYL_VECTOR_B_TEMPLATE => QcdContributionKind::WeylVector(SpinorChirality::Negative),
         WEYL_PAIR_VECTOR_A_TEMPLATE => {
             QcdContributionKind::WeylPairVector(SpinorChirality::Negative)
         }
@@ -1591,6 +1613,24 @@ fn qcd_contribution_kind(
         DIRAC_SCALAR_TEMPLATE => QcdContributionKind::ComponentwiseFourScalar,
         VECTOR_PAIR_SCALAR_TEMPLATE => QcdContributionKind::VectorPairScalar,
         _ => unreachable!("runtime template checked above"),
+    })
+}
+
+fn weyl_vector_contribution_kind(runtime_template: &str) -> Option<QcdContributionKind> {
+    let (chirality, orientation) = match runtime_template {
+        WEYL_VECTOR_A_TEMPLATE => (SpinorChirality::Positive, CurrentOrientation::Particle),
+        WEYL_VECTOR_B_TEMPLATE => (SpinorChirality::Negative, CurrentOrientation::Particle),
+        WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE => {
+            (SpinorChirality::Positive, CurrentOrientation::Antiparticle)
+        }
+        WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE => {
+            (SpinorChirality::Negative, CurrentOrientation::Antiparticle)
+        }
+        _ => return None,
+    };
+    Some(QcdContributionKind::WeylVector {
+        chirality,
+        orientation,
     })
 }
 
@@ -2141,19 +2181,17 @@ fn qcd_finalization_scale(
             ));
         }
         QcdStateKind::Weyl {
-            chirality: SpinorChirality::Positive,
+            chirality,
+            orientation,
             ..
-        } => (WEYL_PROPAGATOR_B_TEMPLATE, WEYL_PROPAGATOR_B_CONTRACT, true),
-        QcdStateKind::Weyl {
-            chirality: SpinorChirality::Negative,
-            ..
-        } => (WEYL_PROPAGATOR_A_TEMPLATE, WEYL_PROPAGATOR_A_CONTRACT, true),
+        } => weyl_finalization_contract(chirality, orientation)?,
         QcdStateKind::Dirac { .. } => {
             return Err(invalid(
                 "massive Dirac finalization must use its typed operand contract",
             ));
         }
     };
+    let weyl_finalizer = matches!(state, QcdStateKind::Weyl { .. });
     if descriptor.runtime_template() != runtime_template
         || descriptor
             .contract_digest()
@@ -2161,6 +2199,11 @@ fn qcd_finalization_scale(
         || descriptor
             .scale()
             .is_none_or(|scale| scale.prepared_parameter_slot().is_some())
+        || (weyl_finalizer
+            && descriptor.scale().is_none_or(|scale| {
+                scale.constant_real_bits() != 1.0_f64.to_bits()
+                    || scale.constant_imag_bits() != 0.0_f64.to_bits()
+            }))
         || descriptor.chiral_dirac_vector().is_some()
         || descriptor.massive_dirac_finalizer().is_some()
         || descriptor.massive_vector_finalizer().is_some()
@@ -2185,6 +2228,33 @@ fn qcd_finalization_scale(
     let mass_squared = bispinor_dot_expression(builder, &momentum, &momentum)?;
     factors.push(builder.reciprocal(mass_squared)?);
     builder.product(factors)
+}
+
+fn weyl_finalization_contract(
+    chirality: SpinorChirality,
+    orientation: CurrentOrientation,
+) -> RusticolResult<(&'static str, &'static str, bool)> {
+    match (orientation, chirality) {
+        (CurrentOrientation::Particle, SpinorChirality::Positive) => {
+            Ok((WEYL_PROPAGATOR_B_TEMPLATE, WEYL_PROPAGATOR_B_CONTRACT, true))
+        }
+        (CurrentOrientation::Particle, SpinorChirality::Negative) => {
+            Ok((WEYL_PROPAGATOR_A_TEMPLATE, WEYL_PROPAGATOR_A_CONTRACT, true))
+        }
+        (CurrentOrientation::Antiparticle, SpinorChirality::Positive) => Ok((
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_CONTRACT,
+            false,
+        )),
+        (CurrentOrientation::Antiparticle, SpinorChirality::Negative) => Ok((
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+            WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_CONTRACT,
+            false,
+        )),
+        (CurrentOrientation::SelfConjugate, _) => {
+            Err(invalid("a Weyl finalizer has self-conjugate orientation"))
+        }
+    }
 }
 
 fn qcd_contribution_contract<'a>(
@@ -2743,7 +2813,12 @@ fn lower_qcd_current(
                 for contribution in &program.contributions()[range] {
                     let (kind, parents, _) =
                         qcd_contribution_contract(contribution, program, templates, direct)?;
-                    if kind != QcdContributionKind::WeylVector(chirality) {
+                    if kind
+                        != (QcdContributionKind::WeylVector {
+                            chirality,
+                            orientation,
+                        })
+                    {
                         return Err(invalid(
                             "terminal Weyl current uses the wrong chiral vertex primitive",
                         ));
@@ -2775,7 +2850,12 @@ fn lower_qcd_current(
             for contribution in &program.contributions()[range] {
                 let (kind, parents, descriptor) =
                     qcd_contribution_contract(contribution, program, templates, direct)?;
-                if kind != QcdContributionKind::WeylVector(chirality) {
+                if kind
+                    != (QcdContributionKind::WeylVector {
+                        chirality,
+                        orientation,
+                    })
+                {
                     return Err(invalid(
                         "propagated Weyl current uses the wrong chiral vertex primitive",
                     ));
@@ -3323,12 +3403,11 @@ fn lower_qcd_closures(
             }
         };
         if terminal_chirality == source_chirality
-            || terminal_orientation != CurrentOrientation::Particle
-            || source_orientation != CurrentOrientation::Antiparticle
+            || terminal_orientation == source_orientation
             || !program.currents()[source_id as usize].is_source()
         {
             return Err(invalid(
-                "QCD closure does not terminate one particle-oriented Weyl line on its antiparticle source",
+                "QCD closure does not terminate a Weyl line on its opposite-orientation source",
             ));
         }
         let terminal = &program.currents()[terminal_id as usize];
@@ -3349,7 +3428,12 @@ fn lower_qcd_closures(
         for contribution in &program.contributions()[range] {
             let (kind, parents, contribution_descriptor) =
                 qcd_contribution_contract(contribution, program, templates, direct)?;
-            if kind != QcdContributionKind::WeylVector(terminal_chirality) {
+            if kind
+                != (QcdContributionKind::WeylVector {
+                    chirality: terminal_chirality,
+                    orientation: terminal_orientation,
+                })
+            {
                 return Err(invalid("terminal QCD line uses the wrong Weyl vertex"));
             }
             let (parent_chirality, parent_orientation, quark) =
@@ -4862,6 +4946,55 @@ mod tests {
             (22, 11)
         );
         assert!(oriented_chiral_half_scales(CurrentOrientation::SelfConjugate, 11, 22).is_err());
+    }
+
+    #[test]
+    fn charge_conjugate_weyl_contracts_follow_line_orientation() {
+        assert_eq!(
+            weyl_vector_contribution_kind(WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE),
+            Some(QcdContributionKind::WeylVector {
+                chirality: SpinorChirality::Positive,
+                orientation: CurrentOrientation::Antiparticle,
+            })
+        );
+        assert_eq!(
+            weyl_vector_contribution_kind(WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE),
+            Some(QcdContributionKind::WeylVector {
+                chirality: SpinorChirality::Negative,
+                orientation: CurrentOrientation::Antiparticle,
+            })
+        );
+        assert_eq!(
+            weyl_finalization_contract(
+                SpinorChirality::Positive,
+                CurrentOrientation::Antiparticle,
+            )
+            .unwrap(),
+            (
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_CONTRACT,
+                false,
+            )
+        );
+        assert_eq!(
+            weyl_finalization_contract(
+                SpinorChirality::Negative,
+                CurrentOrientation::Antiparticle,
+            )
+            .unwrap(),
+            (
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+                WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_CONTRACT,
+                false,
+            )
+        );
+        assert!(
+            weyl_finalization_contract(
+                SpinorChirality::Positive,
+                CurrentOrientation::SelfConjugate,
+            )
+            .is_err()
+        );
     }
 
     #[test]
