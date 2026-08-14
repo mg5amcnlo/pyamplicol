@@ -25,6 +25,8 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+    MASSLESS_DIRAC_PARTICLE_TEMPLATE,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_SCALE_KIND,
@@ -745,6 +747,47 @@ def test_massive_dirac_finalizer_projection_round_trips_and_is_authenticated() -
         RecurrenceDirectPayloadBindingV1.from_dict(tampered)
 
 
+def test_massless_dirac_finalizer_graph_contract_keeps_prepared_execution() -> None:
+    contract_digest = RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[
+        MASSLESS_DIRAC_PARTICLE_TEMPLATE
+    ]
+    graph_intrinsic = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceFinalizationIntrinsic(
+            runtime_template=MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+            contract_digest=contract_digest,
+            constant_scale=1.0j,
+        )
+    )
+    binding = _prepared_graph_binding(graph_intrinsic, role="finalization")
+
+    payload = binding.to_dict()
+    assert payload["kind"] == "prepared-direct-call"
+    assert payload["runtime_template"] is None
+    assert payload["intrinsic_contract_digest"] is None
+    assert payload["graph_intrinsic"] == {
+        "contract_digest": contract_digest,
+        "contribution_parent_permutation": [0, 1],
+        "runtime_template": MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+        "scalar_projection": {
+            "constant_imag_bits": 4607182418800017408,
+            "constant_real_bits": 0,
+            "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+            "parameter_index": None,
+        },
+    }
+    assert RecurrenceDirectPayloadBindingV1.from_dict(payload) == binding
+
+    wrong_scale = _build_certified_graph_intrinsic(
+        CertifiedRecurrenceFinalizationIntrinsic(
+            runtime_template=MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+            contract_digest=contract_digest,
+            constant_scale=1.0,
+        )
+    )
+    with pytest.raises(RecurrenceDirectTemplateError, match=r"certified \+i"):
+        _prepared_graph_binding(wrong_scale, role="finalization")
+
+
 def test_massive_vector_finalizer_graph_contract_keeps_prepared_execution() -> None:
     contract_digest = RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS[
         MASSIVE_VECTOR_UNITARY_TEMPLATE
@@ -1448,6 +1491,80 @@ def test_direct_catalog_is_model_generic_and_covers_identity_finalizers(
                 "parameter_index": None,
             }
             for item in charge_conjugate_weyl_finalizers
+        )
+        massless_dirac_finalizers = tuple(
+            item
+            for item in direct.templates
+            if item.role == "finalization"
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.runtime_template
+            in {
+                MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+            }
+        )
+        assert {
+            template: sum(
+                item.payload_binding.graph_intrinsic is not None
+                and item.payload_binding.graph_intrinsic.runtime_template == template
+                for item in massless_dirac_finalizers
+            )
+            for template in (
+                MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+            )
+        } == {
+            MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE: 11,
+            MASSLESS_DIRAC_PARTICLE_TEMPLATE: 11,
+        }
+        assert {
+            (
+                item.payload_binding.graph_intrinsic.runtime_template,
+                item.payload_binding.graph_intrinsic.contract_digest,
+            )
+            for item in massless_dirac_finalizers
+            if item.payload_binding.graph_intrinsic is not None
+        } == {
+            (
+                MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+                "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958"
+            ),
+            (
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+                "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f"
+            ),
+        }
+        assert all(
+            item.parent_component_counts == (4,)
+            and item.destination_component_count == 4
+            and item.payload_binding.kind == "prepared-direct-call"
+            and item.payload_binding.runtime_template is None
+            and item.payload_binding.intrinsic_contract_digest is None
+            and item.payload_binding.graph_intrinsic is not None
+            and item.payload_binding.graph_intrinsic.projection
+            == {
+                "constant_imag_bits": 4607182418800017408,
+                "constant_real_bits": 0,
+                "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+                "parameter_index": None,
+            }
+            for item in massless_dirac_finalizers
+        )
+        massless_semantic_ids = {
+            template_id
+            for item in massless_dirac_finalizers
+            for template_id in item.semantic_template_ids
+        }
+        massless_propagators = tuple(
+            propagator
+            for propagator in semantic.propagators
+            if propagator.template_id in massless_semantic_ids
+        )
+        assert len(massless_propagators) == 22
+        assert all(
+            propagator.mass_parameter_id is None
+            and propagator.width_parameter_id is None
+            for propagator in massless_propagators
         )
         massive_finalizers = tuple(
             item

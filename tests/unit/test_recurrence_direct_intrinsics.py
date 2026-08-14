@@ -20,6 +20,8 @@ from pyamplicol.models.recurrence_direct_intrinsics import (
     MASSIVE_DIRAC_PARTICLE_TEMPLATE,
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+    MASSLESS_DIRAC_PARTICLE_TEMPLATE,
     RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
     RECURRENCE_INTRINSIC_CONTRACT_DIGESTS,
@@ -423,6 +425,30 @@ def _massive_finalization_expressions(
             f"(-p0-p3)*l3+(p1+1\U0001d456*p2)*l2+{mass_symbol}*l1",
             f"(-p0-p3)*l0+(-p1+1\U0001d456*p2)*l1+{mass_symbol}*l2",
             f"(-p0+p3)*l1+(-p1-1\U0001d456*p2)*l0+{mass_symbol}*l3",
+        )
+    return tuple(
+        _substitute_finalization(f"1\U0001d456*{denominator}*({numerator})", 4)
+        for numerator in numerators
+    )
+
+
+def _massless_dirac_finalization_expressions(
+    orientation: str,
+) -> tuple[str, ...]:
+    denominator = "(-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1)"
+    if orientation == "particle":
+        numerators = (
+            "(p0+p3)*l2+(p1+1\U0001d456*p2)*l3",
+            "(p0-p3)*l3+(p1-1\U0001d456*p2)*l2",
+            "(p0-p3)*l0-(p1+1\U0001d456*p2)*l1",
+            "(p0+p3)*l1-(p1-1\U0001d456*p2)*l0",
+        )
+    else:
+        numerators = (
+            "(-p0+p3)*l2+(p1-1\U0001d456*p2)*l3",
+            "(-p0-p3)*l3+(p1+1\U0001d456*p2)*l2",
+            "(-p0-p3)*l0+(-p1+1\U0001d456*p2)*l1",
+            "(-p0+p3)*l1+(-p1-1\U0001d456*p2)*l0",
         )
     return tuple(
         _substitute_finalization(f"1\U0001d456*{denominator}*({numerator})", 4)
@@ -1737,6 +1763,63 @@ def test_rejects_finalization_intrinsic_with_wrong_global_scale() -> None:
     assert (
         certify_recurrence_finalization_intrinsic(
             exact_expressions=expressions,
+            input_contracts=_finalization_contracts(4),
+            component_count=4,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expected_template", "expected_digest"),
+    (
+        (
+            "particle",
+            MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+            "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f",
+        ),
+        (
+            "antiparticle",
+            MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+            "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958",
+        ),
+    ),
+)
+def test_massless_dirac_finalizer_authenticates_orientation_and_fails_closed(
+    orientation: str,
+    expected_template: str,
+    expected_digest: str,
+) -> None:
+    expressions = _massless_dirac_finalization_expressions(orientation)
+    result = certify_recurrence_finalization_intrinsic(
+        exact_expressions=expressions,
+        input_contracts=_finalization_contracts(4),
+        component_count=4,
+    )
+
+    assert result is not None
+    assert result.runtime_template == expected_template
+    assert result.contract_digest == expected_digest
+    assert result.constant_scale == 1.0j
+    assert result.orientation is None
+    assert result.mass_parameter_index is None
+    assert result.width_parameter_index is None
+    assert result.scale_projection() == {
+        "constant_imag_bits": 4607182418800017408,
+        "constant_real_bits": 0,
+        "kind": RECURRENCE_INTRINSIC_SCALE_KIND,
+        "parameter_index": None,
+    }
+
+    perturbed = list(expressions)
+    perturbed[0] = perturbed[0].replace(
+        "+model::prepared::momentum_3",
+        "-model::prepared::momentum_3",
+        1,
+    )
+    assert (
+        certify_recurrence_finalization_intrinsic(
+            exact_expressions=tuple(perturbed),
             input_contracts=_finalization_contracts(4),
             component_count=4,
         )

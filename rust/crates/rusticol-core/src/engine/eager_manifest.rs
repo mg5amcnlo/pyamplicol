@@ -26,6 +26,14 @@ const MASSIVE_DIRAC_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-particle.v1";
 const MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1";
+const MASSLESS_DIRAC_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-particle.v1";
+const MASSLESS_DIRAC_PARTICLE_CONTRACT: &str =
+    "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f";
+const MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-antiparticle.v1";
+const MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT: &str =
+    "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958";
 const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
 const MASSIVE_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1";
@@ -1751,6 +1759,33 @@ impl RecurrenceDirectGraphIntrinsicManifest {
             }
             (
                 "finalization",
+                RecurrenceDirectScalarProjectionManifest::IntrinsicScale {
+                    constant_real_bits,
+                    constant_imag_bits,
+                    parameter_index,
+                },
+            ) if matches!(
+                self.runtime_template.as_str(),
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE | MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE
+            ) =>
+            {
+                let expected_contract = match self.runtime_template.as_str() {
+                    MASSLESS_DIRAC_PARTICLE_TEMPLATE => MASSLESS_DIRAC_PARTICLE_CONTRACT,
+                    MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE => MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT,
+                    _ => unreachable!("massless Dirac template was matched above"),
+                };
+                if (*constant_real_bits, *constant_imag_bits)
+                    != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+                    || parameter_index.is_some()
+                    || self.contract_digest != expected_contract
+                {
+                    return Err(RusticolError::integrity(
+                        "prepared massless-Dirac propagator graph intrinsic disagrees with its runtime primitive",
+                    ));
+                }
+            }
+            (
+                "finalization",
                 RecurrenceDirectScalarProjectionManifest::MassiveDiracPropagator {
                     constant_real_bits,
                     constant_imag_bits,
@@ -2863,6 +2898,69 @@ mod typed_finalizer_tests {
                 propagator(runtime_template, 1.0, None)
                     .validate("contribution")
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn massless_dirac_graph_intrinsics_are_contract_role_and_scale_closed() {
+        let graph = |runtime_template: &str,
+                     contract_digest: &str,
+                     real: f64,
+                     imaginary: f64,
+                     parameter_index: Option<u32>| {
+            serde_json::from_value::<RecurrenceDirectGraphIntrinsicManifest>(json!({
+                "contract_digest": contract_digest,
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": real.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": parameter_index,
+                },
+            }))
+            .unwrap()
+        };
+
+        for (runtime_template, contract_digest) in [
+            (
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_PARTICLE_CONTRACT,
+            ),
+            (
+                MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT,
+            ),
+        ] {
+            graph(runtime_template, contract_digest, 0.0, 1.0, None)
+                .validate("finalization")
+                .unwrap();
+            assert!(
+                graph(runtime_template, contract_digest, 0.0, 1.0, None)
+                    .validate("contribution")
+                    .is_err()
+            );
+            assert!(
+                graph(runtime_template, contract_digest, 0.0, -1.0, None)
+                    .validate("finalization")
+                    .is_err()
+            );
+            assert!(
+                graph(runtime_template, contract_digest, 0.0, 1.0, Some(7))
+                    .validate("finalization")
+                    .is_err()
+            );
+            assert!(
+                graph(
+                    runtime_template,
+                    "7174d14153ebd3028b9e963538bb5255468eeb00665f3a2114dd97206bc0a28c",
+                    0.0,
+                    1.0,
+                    None,
+                )
+                .validate("finalization")
+                .is_err()
             );
         }
     }

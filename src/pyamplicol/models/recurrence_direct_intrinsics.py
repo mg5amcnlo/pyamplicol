@@ -84,6 +84,12 @@ MASSIVE_DIRAC_PARTICLE_TEMPLATE = (
 MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-dirac-propagator-antiparticle.v1"
 )
+MASSLESS_DIRAC_PARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-particle.v1"
+)
+MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE = (
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-antiparticle.v1"
+)
 MASSIVE_SCALAR_TEMPLATE = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1"
 MASSIVE_VECTOR_UNITARY_TEMPLATE = (
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1"
@@ -132,6 +138,7 @@ def _chiral_branch_scale_projection(
 
 
 MASSIVE_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
+MASSLESS_DIRAC_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
 MASSIVE_SCALAR_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(1.0))
 MASSIVE_VECTOR_RUNTIME_SCALE_BITS = (_f64_bits(0.0), _f64_bits(-1.0))
 
@@ -883,6 +890,36 @@ _FINALIZATION_WITNESSES = (
         inverse_anchor_coefficient="-1",
         component_count=2,
         runtime_owned_scale=1.0 + 0.0j,
+    ),
+    _FinalizationWitness(
+        runtime_template=MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+        expressions=(
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*((p0+p3)*l2+(p1+1\U0001d456*p2)*l3)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*((p0-p3)*l3+(p1-1\U0001d456*p2)*l2)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*((p0-p3)*l0-(p1+1\U0001d456*p2)*l1)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*((p0+p3)*l1-(p1-1\U0001d456*p2)*l0)",
+        ),
+        anchor_monomial=("((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l2*p0"),
+        inverse_anchor_coefficient="1",
+        component_count=4,
+        runtime_owned_scale=0.0 + 1.0j,
+    ),
+    _FinalizationWitness(
+        runtime_template=MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+        expressions=(
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))"
+            "*((-p0+p3)*l2+(p1-1\U0001d456*p2)*l3)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))"
+            "*((-p0-p3)*l3+(p1+1\U0001d456*p2)*l2)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))"
+            "*((-p0-p3)*l0+(-p1+1\U0001d456*p2)*l1)",
+            "((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))"
+            "*((-p0+p3)*l1+(-p1-1\U0001d456*p2)*l0)",
+        ),
+        anchor_monomial=("((-1*p1^2+-1*p2^2+-1*p3^2+p0^2)^(-1))*l2*p0"),
+        inverse_anchor_coefficient="-1",
+        component_count=4,
+        runtime_owned_scale=0.0 + 1.0j,
     ),
     _FinalizationWitness(
         runtime_template=FEYNMAN_VECTOR_PROPAGATOR_TEMPLATE,
@@ -1862,6 +1899,9 @@ __all__ = [
     "MASSIVE_SCALAR_TEMPLATE",
     "MASSIVE_VECTOR_RUNTIME_SCALE_BITS",
     "MASSIVE_VECTOR_UNITARY_TEMPLATE",
+    "MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE",
+    "MASSLESS_DIRAC_PARTICLE_TEMPLATE",
+    "MASSLESS_DIRAC_RUNTIME_SCALE_BITS",
     "RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND",
     "RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND",
     "RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS",

@@ -70,6 +70,14 @@ const DIRECT_IDENTITY_FINALIZER: &str = "rusticol.identity-finalize-in-place.v1"
 const MASSIVE_VECTOR_UNITARY_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.massive-vector-propagator-unitary.v1";
 const MASSIVE_SCALAR_TEMPLATE: &str = "rusticol.recurrence-intrinsic.massive-scalar-propagator.v1";
+const MASSLESS_DIRAC_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-particle.v1";
+const MASSLESS_DIRAC_PARTICLE_CONTRACT: &str =
+    "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f";
+const MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-antiparticle.v1";
+const MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT: &str =
+    "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958";
 const CHIRAL_DIRAC_VECTOR_PARTICLE_TEMPLATE: &str =
     "rusticol.recurrence-intrinsic.dirac-vector-to-dirac-chiral-particle.v1";
 const CHIRAL_DIRAC_VECTOR_ANTIPARTICLE_TEMPLATE: &str =
@@ -3413,6 +3421,11 @@ fn parse_graph_intrinsic(
         &format!("{context} runtime template"),
     )?
     .to_owned();
+    let contract_digest = json_sha256(
+        graph,
+        "contract_digest",
+        &format!("{context} contract digest"),
+    )?;
     if matches!(
         runtime_template.as_str(),
         WEYL_VECTOR_CHARGE_CONJUGATE_A_TEMPLATE | WEYL_VECTOR_CHARGE_CONJUGATE_B_TEMPLATE
@@ -3450,6 +3463,31 @@ fn parse_graph_intrinsic(
         {
             return Err(invalid(format!(
                 "{context} charge-conjugate Weyl-propagator projection disagrees with its runtime primitive"
+            )));
+        }
+    }
+    if matches!(
+        runtime_template.as_str(),
+        MASSLESS_DIRAC_PARTICLE_TEMPLATE | MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE
+    ) {
+        let scale = scale.ok_or_else(|| {
+            invalid(format!(
+                "{context} massless-Dirac propagator projection has no intrinsic scale"
+            ))
+        })?;
+        let expected_contract = match runtime_template.as_str() {
+            MASSLESS_DIRAC_PARTICLE_TEMPLATE => MASSLESS_DIRAC_PARTICLE_CONTRACT,
+            MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE => MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT,
+            _ => unreachable!("massless Dirac template was matched above"),
+        };
+        if role != DirectExecutorRole::Finalization
+            || (scale.constant_real_bits(), scale.constant_imag_bits())
+                != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+            || scale.prepared_parameter_slot().is_some()
+            || contract_digest.to_string() != expected_contract
+        {
+            return Err(invalid(format!(
+                "{context} massless-Dirac propagator projection disagrees with its runtime primitive"
             )));
         }
     }
@@ -3532,11 +3570,7 @@ fn parse_graph_intrinsic(
     }
     Ok(ParsedGraphIntrinsic {
         runtime_template,
-        contract_digest: json_sha256(
-            graph,
-            "contract_digest",
-            &format!("{context} contract digest"),
-        )?,
+        contract_digest,
         scale,
         chiral_dirac_vector,
         chiral_dirac_pair_vector,
@@ -6447,6 +6481,77 @@ mod direct_binding_tests {
                         &invalid_graph,
                         DirectExecutorRole::Finalization,
                         "test charge-conjugate Weyl-propagator graph intrinsic",
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn massless_dirac_graph_intrinsic_parser_is_contract_role_and_scale_closed() {
+        let graph = |runtime_template: &str,
+                     contract_digest: &str,
+                     imaginary: f64,
+                     parameter_index: Option<u32>| {
+            json!({
+                "contract_digest": contract_digest,
+                "contribution_parent_permutation": [0, 1],
+                "runtime_template": runtime_template,
+                "scalar_projection": {
+                    "constant_imag_bits": imaginary.to_bits(),
+                    "constant_real_bits": 0.0_f64.to_bits(),
+                    "kind": "intrinsic-scale-v1",
+                    "parameter_index": parameter_index,
+                },
+            })
+        };
+
+        for (runtime_template, contract_digest) in [
+            (
+                MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_PARTICLE_CONTRACT,
+            ),
+            (
+                MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+                MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT,
+            ),
+        ] {
+            let valid = graph(runtime_template, contract_digest, 1.0, None);
+            let parsed = parse_graph_intrinsic(
+                &valid,
+                DirectExecutorRole::Finalization,
+                "test massless-Dirac graph intrinsic",
+            )
+            .unwrap();
+            assert_eq!(parsed.runtime_template, runtime_template);
+            assert_eq!(parsed.contract_digest.to_string(), contract_digest);
+            assert_eq!(
+                parsed.scale,
+                Some(PreparedDirectIntrinsicScale::new(
+                    0.0_f64.to_bits(),
+                    1.0_f64.to_bits(),
+                    None,
+                ))
+            );
+            assert!(
+                parse_graph_intrinsic(
+                    &valid,
+                    DirectExecutorRole::Contribution,
+                    "test massless-Dirac graph intrinsic",
+                )
+                .is_err()
+            );
+            for invalid in [
+                graph(runtime_template, contract_digest, -1.0, None),
+                graph(runtime_template, contract_digest, 1.0, Some(7)),
+                graph(runtime_template, &digest(19), 1.0, None),
+            ] {
+                assert!(
+                    parse_graph_intrinsic(
+                        &invalid,
+                        DirectExecutorRole::Finalization,
+                        "test massless-Dirac graph intrinsic",
                     )
                     .is_err()
                 );

@@ -36,6 +36,9 @@ from .recurrence_direct_intrinsics import (
     MASSIVE_SCALAR_TEMPLATE,
     MASSIVE_VECTOR_RUNTIME_SCALE_BITS,
     MASSIVE_VECTOR_UNITARY_TEMPLATE,
+    MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+    MASSLESS_DIRAC_PARTICLE_TEMPLATE,
+    MASSLESS_DIRAC_RUNTIME_SCALE_BITS,
     RECURRENCE_CHIRAL_DIRAC_PAIR_TO_VECTOR_SCALE_KIND,
     RECURRENCE_CHIRAL_DIRAC_VECTOR_SCALE_KIND,
     RECURRENCE_FINALIZATION_INTRINSIC_CONTRACT_DIGESTS,
@@ -126,10 +129,18 @@ _PREPARED_GRAPH_FINALIZATION_TEMPLATES = frozenset(
     {
         MASSIVE_DIRAC_ANTIPARTICLE_TEMPLATE,
         MASSIVE_DIRAC_PARTICLE_TEMPLATE,
+        MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+        MASSLESS_DIRAC_PARTICLE_TEMPLATE,
         MASSIVE_SCALAR_TEMPLATE,
         MASSIVE_VECTOR_UNITARY_TEMPLATE,
         WEYL_PROPAGATOR_CHARGE_CONJUGATE_A_TEMPLATE,
         WEYL_PROPAGATOR_CHARGE_CONJUGATE_B_TEMPLATE,
+    }
+)
+_MASSLESS_DIRAC_FINALIZATION_TEMPLATES = frozenset(
+    {
+        MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE,
+        MASSLESS_DIRAC_PARTICLE_TEMPLATE,
     }
 )
 
@@ -320,6 +331,25 @@ def _validate_massive_dirac_finalizer_projection(
     ):
         raise RecurrenceDirectTemplateError(
             "massive Dirac finalizer contract digest is not authenticated"
+        )
+
+
+def _validate_massless_dirac_finalizer_scale_projection(
+    projection: Mapping[str, object],
+) -> None:
+    scale_bits = (
+        _require_f64_bits(
+            "massless Dirac real scale bits",
+            projection.get("constant_real_bits"),
+        ),
+        _require_f64_bits(
+            "massless Dirac imaginary scale bits",
+            projection.get("constant_imag_bits"),
+        ),
+    )
+    if scale_bits != MASSLESS_DIRAC_RUNTIME_SCALE_BITS:
+        raise RecurrenceDirectTemplateError(
+            "massless Dirac finalizer must retain the certified +i scale"
         )
 
 
@@ -695,6 +725,8 @@ def _validate_graph_intrinsic_for_role(
         projection_kind = projection.get("kind")
         if projection_kind == RECURRENCE_INTRINSIC_SCALE_KIND:
             _validate_intrinsic_scale_projection(projection, allow_parameter=False)
+            if intrinsic.runtime_template in _MASSLESS_DIRAC_FINALIZATION_TEMPLATES:
+                _validate_massless_dirac_finalizer_scale_projection(projection)
         elif projection_kind == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND:
             _validate_massive_dirac_finalizer_projection(
                 projection,
@@ -897,6 +929,8 @@ class RecurrenceDirectPayloadBindingV1:
                         projection,
                         allow_parameter=False,
                     )
+                    if self.runtime_template in _MASSLESS_DIRAC_FINALIZATION_TEMPLATES:
+                        _validate_massless_dirac_finalizer_scale_projection(projection)
                 elif projection_kind == RECURRENCE_MASSIVE_DIRAC_FINALIZER_KIND:
                     _validate_massive_dirac_finalizer_projection(
                         projection,

@@ -40,6 +40,14 @@ fn digest(seed: u8) -> SemanticDigest {
     SemanticDigest::new([seed; 32]).unwrap()
 }
 
+fn digest_hex(value: &str) -> SemanticDigest {
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+    }
+    SemanticDigest::new(bytes).unwrap()
+}
+
 #[test]
 fn prepared_intrinsic_metadata_is_keyed_and_fail_closed() {
     let key = PreparedDirectExecutorKey::Evaluator {
@@ -93,6 +101,84 @@ fn prepared_intrinsic_metadata_is_keyed_and_fail_closed() {
         .to_string()
         .contains("incomplete execution metadata")
     );
+}
+
+#[test]
+fn prepared_massless_dirac_finalizer_metadata_is_scale_and_contract_closed() {
+    let templates = [
+        (
+            "rusticol.recurrence-intrinsic.massless-dirac-propagator-particle.v1",
+            "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f",
+        ),
+        (
+            "rusticol.recurrence-intrinsic.massless-dirac-propagator-antiparticle.v1",
+            "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958",
+        ),
+    ];
+    let build = |role, runtime_template: &str, contract_digest, scale| {
+        let key = PreparedDirectExecutorKey::Evaluator {
+            role,
+            evaluator_binding_id: 42,
+        };
+        PreparedDirectExecutorCatalog::new_with_intrinsics(
+            digest(3),
+            vec![PreparedDirectExecutorBinding::evaluator(role, 42, 0)],
+            vec![PreparedDirectIntrinsicDescriptor::new(
+                key,
+                runtime_template.to_owned(),
+                Some(contract_digest),
+                Some(scale),
+            )],
+        )
+    };
+    let scale = PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), 1.0_f64.to_bits(), None);
+
+    for (runtime_template, contract) in templates {
+        let contract = digest_hex(contract);
+        build(
+            DirectExecutorRole::Finalization,
+            runtime_template,
+            contract,
+            scale,
+        )
+        .unwrap();
+        assert!(
+            build(
+                DirectExecutorRole::Contribution,
+                runtime_template,
+                contract,
+                scale,
+            )
+            .is_err()
+        );
+        assert!(
+            build(
+                DirectExecutorRole::Finalization,
+                runtime_template,
+                digest(29),
+                scale,
+            )
+            .is_err()
+        );
+        assert!(
+            build(
+                DirectExecutorRole::Finalization,
+                runtime_template,
+                contract,
+                PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), (-1.0_f64).to_bits(), None,),
+            )
+            .is_err()
+        );
+        assert!(
+            build(
+                DirectExecutorRole::Finalization,
+                runtime_template,
+                contract,
+                PreparedDirectIntrinsicScale::new(0.0_f64.to_bits(), 1.0_f64.to_bits(), Some(7),),
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

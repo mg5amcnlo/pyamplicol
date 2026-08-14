@@ -41,6 +41,14 @@ use crate::{RusticolError, RusticolResult};
 
 const UNIVERSAL_SELECTOR_DOMAIN_ID: u32 = 0;
 const DIRECT_ROW_FLAGS_NONE: u32 = 0;
+const MASSLESS_DIRAC_PARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-particle.v1";
+const MASSLESS_DIRAC_PARTICLE_CONTRACT: &str =
+    "ff6ae5cbd7fb80c742b57fcd941c1ff5ff3c0671bc5741323fb916851a8b0e5f";
+const MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE: &str =
+    "rusticol.recurrence-intrinsic.massless-dirac-propagator-antiparticle.v1";
+const MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT: &str =
+    "0015233dac589ccaa4a8f744c578673ce67166e157bd1c13f147d2fe794d9958";
 
 fn invalid(message: impl Into<String>) -> RusticolError {
     RusticolError::invalid_argument(format!("recurrence direct lowering: {}", message.into()))
@@ -51,6 +59,14 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|character| character.is_ascii_digit() || (b'a'..=b'f').contains(&character))
+}
+
+fn massless_dirac_finalizer_contract(runtime_template: &str) -> Option<&'static str> {
+    match runtime_template {
+        MASSLESS_DIRAC_PARTICLE_TEMPLATE => Some(MASSLESS_DIRAC_PARTICLE_CONTRACT),
+        MASSLESS_DIRAC_ANTIPARTICLE_TEMPLATE => Some(MASSLESS_DIRAC_ANTIPARTICLE_CONTRACT),
+        _ => None,
+    }
 }
 
 /// Runtime sizing recorded in the immutable direct plan.
@@ -746,6 +762,27 @@ impl PreparedDirectExecutorCatalog {
                 return Err(invalid(format!(
                     "prepared non-contribution intrinsic for key {key:?} binds a model parameter"
                 )));
+            }
+            if let Some(expected_contract) =
+                massless_dirac_finalizer_contract(&descriptor.runtime_template)
+            {
+                let scale = descriptor.scale.ok_or_else(|| {
+                    invalid(format!(
+                        "prepared massless-Dirac finalizer for key {key:?} has no authenticated scale"
+                    ))
+                })?;
+                if key.role() != DirectExecutorRole::Finalization
+                    || (scale.constant_real_bits, scale.constant_imag_bits)
+                        != (0.0_f64.to_bits(), 1.0_f64.to_bits())
+                    || scale.prepared_parameter_slot.is_some()
+                    || descriptor
+                        .contract_digest
+                        .is_none_or(|digest| digest.to_string() != expected_contract)
+                {
+                    return Err(invalid(format!(
+                        "prepared massless-Dirac finalizer for key {key:?} has invalid authenticated metadata"
+                    )));
+                }
             }
             if let Some(chiral) = descriptor.chiral_dirac_vector {
                 let expected_template = match chiral.orientation {

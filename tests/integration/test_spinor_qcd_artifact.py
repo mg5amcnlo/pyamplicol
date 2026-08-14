@@ -96,6 +96,15 @@ _ZZTT_POINT = (
 _ZZTT_PROCESS_ID = "z_z_to_t_tbar"
 _ZZTT_FLOW = "flow:3,4"
 _ZZTT_ORDER = (3, 4)
+_WWTT_POINT = (
+    (200.0, 0.0, 0.0, 183.11958946445208),
+    (200.0, 0.0, 0.0, -183.11958946445208),
+    (200.0, 98.32680204298318, 0.0, 20.07087442041328),
+    (200.0, -98.32680204298318, 0.0, -20.07087442041328),
+)
+_WWTT_PROCESS_ID = "wplus_wminus_to_t_tbar"
+_WWTT_FLOW = "flow:3,4"
+_WWTT_ORDER = (3, 4)
 _DDZH_POINT = (
     (500.0, 0.0, 0.0, 500.0),
     (500.0, 0.0, 0.0, -500.0),
@@ -332,6 +341,58 @@ def test_graph_spinor_chiral_dirac_vector_recurrence(
     baseline = value(reference)
     assert baseline.real > 0.0
     assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+
+def test_graph_spinor_massless_full_dirac_propagation(
+    tmp_path: Path,
+    prepared_model: CompiledModel,
+) -> None:
+    # The fermion-exchange branch in W+ W- -> ttbar propagates a massless
+    # bottom current containing both Weyl halves.  A top-width mutation is a
+    # focused discriminator against accidentally treating it as a top line.
+    runtimes: dict[str, Runtime] = {}
+    for mode in ("spinor", "component"):
+        artifact = tmp_path / f"{_WWTT_PROCESS_ID}-{mode}"
+        generate_slice(
+            ProcessRequest.parse("w+ w- > t t~", name=_WWTT_PROCESS_ID),
+            artifact,
+            selection=GenerationSlice(
+                reference_color_order=_WWTT_ORDER,
+                selected_color_sector_ids=(0,),
+                experimental_spinor_dag=mode == "spinor",
+            ),
+            config=_config(0, 2),
+            model=prepared_model,
+        )
+        runtimes[mode] = Runtime.load(artifact, process=_WWTT_PROCESS_ID)
+
+    candidate = runtimes["spinor"]
+    reference = runtimes["component"]
+    assert candidate.execution_mode == "spinor"
+    assert reference.execution_mode == "compiled"
+    for runtime in (candidate, reference):
+        assert runtime.physics.helicity_coverage == "complete"
+        assert runtime.physics.color_ids == (_WWTT_FLOW,)
+    assert candidate.physics.helicity_ids == ("h:sum",)
+    assert len(reference.physics.helicity_ids) == 36
+
+    def value(runtime: Runtime) -> complex:
+        return complex(runtime.evaluate((_WWTT_POINT,), color_flows=(_WWTT_FLOW,))[0])
+
+    baseline = value(reference)
+    assert baseline.real > 0.0
+    assert baseline.imag == pytest.approx(0.0, abs=1.0e-15)
+    assert value(candidate) == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+
+    for runtime in (candidate, reference):
+        runtime.set_model_parameters({"particle.6.width": 20.0})
+    width_reference = value(reference)
+    assert width_reference == pytest.approx(baseline, rel=2.0e-12, abs=1.0e-15)
+    assert value(candidate) == pytest.approx(
+        width_reference,
+        rel=2.0e-12,
+        abs=1.0e-15,
+    )
 
 
 def test_graph_spinor_massive_scalar_recurrence(
